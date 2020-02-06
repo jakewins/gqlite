@@ -1,3 +1,26 @@
 
-statement = { "CREATE (n:Note {message:\"Hello, world!\"})" }
-query = { SOI ~ ( statement ~ ( " " | "\n" )* )* ~ EOI }
+WHITESPACE = _{ " " | "\t" | "\r" | "\n" }
+
+
+id = ${ ( ASCII_ALPHA | "_" | "-" ) + }
+
+string = ${ "\"" ~ str_inner ~ "\"" }
+str_inner = @{ char* }
+char = {
+    !("\"" | "\\") ~ ANY
+    | "\\" ~ ("\"" | "\\" | "/" | "b" | "f" | "n" | "r" | "t")
+}
+
+
+expr = { string }
+
+map_pair = { id ~ ":" ~ expr }
+map = {
+  "{" ~ "}" |
+  "{" ~ map_pair ~ ("," ~ map_pair)* ~ "}"
+}
+
+node = { "(" ~ id? ~ (":" ~ id)? ~ map? ~ ")" }
+
+statement = { "CREATE" ~ node }
+query = { SOI ~ ( statement )* ~ EOI }
