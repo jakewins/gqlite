@@ -1,0 +1,3 @@
+
+statement = { "CREATE (n:Note {message:\"Hello, world!\"})" }
+query = { SOI ~ ( statement ~ ( " " | "\n" )* )* ~ EOI }
