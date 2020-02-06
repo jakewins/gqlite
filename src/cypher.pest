@@ -21,7 +21,8 @@ map = {
 }
 
 node = { "(" ~ id? ~ (":" ~ id)? ~ map? ~ ")" }
-rel = { "--" }
+
+rel = { "<"? ~ "-" ~ ( "[" ~ id? ~ (":" ~ id)? ~ map? ~ "]" )? ~ "-" ~ ">"? }
 
 pattern = { node  ~ ( rel ~ node )* }
 
