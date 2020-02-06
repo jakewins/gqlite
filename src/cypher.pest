@@ -1,8 +1,11 @@
 
 WHITESPACE = _{ " " | "\t" | "\r" | "\n" }
 
+expr = { string | id ~ prop_lookup? }
 
 id = ${ ( ASCII_ALPHA | "_" | "-" ) + }
+
+prop_lookup = { ("." ~ id)+ }
 
 string = ${ "\"" ~ str_inner ~ "\"" }
 str_inner = @{ char* }
@@ -11,14 +14,12 @@ char = {
     | "\\" ~ ("\"" | "\\" | "/" | "b" | "f" | "n" | "r" | "t")
 }
 
-
-expr = { string }
-
-map_pair = { id ~ ":" ~ expr }
 map = {
   "{" ~ "}" |
   "{" ~ map_pair ~ ("," ~ map_pair)* ~ "}"
 }
+map_pair = { id ~ ":" ~ expr }
+
 
 node = { "(" ~ id? ~ (":" ~ id)? ~ map? ~ ")" }
 
