@@ -29,7 +29,9 @@ pattern = { node  ~ ( rel ~ node )* }
 create_clause = { "CREATE" ~ pattern }
 
 match_clause = { "MATCH" ~ pattern }
-return_clause = { "RETURN" }
+return_clause = { "RETURN" ~ projection }
+
+projection = { expr ~ ("AS" ~ id)? ~ ( "," ~ expr ~ ("AS" ~ id)? )* }
 
 create_stmt = { create_clause }
 match_stmt = { match_clause ~ return_clause? }
