@@ -21,6 +21,9 @@ map = {
 }
 
 node = { "(" ~ id? ~ (":" ~ id)? ~ map? ~ ")" }
+rel = { "--" }
 
-statement = { "CREATE" ~ node }
+pattern = { node  ~ ( rel ~ node )* }
+
+statement = { "CREATE" ~ pattern }
 query = { SOI ~ ( statement )* ~ EOI }

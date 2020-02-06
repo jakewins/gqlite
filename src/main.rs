@@ -4,10 +4,9 @@ extern crate pest_derive;
 
 extern crate clap;
 
-use clap::{Arg, App, SubCommand, AppSettings};
+use clap::{App, SubCommand, AppSettings};
 
 use pest::Parser;
-use std::fs;
 
 #[derive(Parser)]
 #[grammar = "cypher.pest"]
