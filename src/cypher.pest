@@ -26,5 +26,13 @@ rel = { "<"? ~ "-" ~ ( "[" ~ id? ~ (":" ~ id)? ~ map? ~ "]" )? ~ "-" ~ ">"? }
 
 pattern = { node  ~ ( rel ~ node )* }
 
-statement = { "CREATE" ~ pattern }
+create_clause = { "CREATE" ~ pattern }
+
+match_clause = { "MATCH" ~ pattern }
+return_clause = { "RETURN" }
+
+create_stmt = { create_clause }
+match_stmt = { match_clause ~ return_clause? }
+
+statement = { create_stmt | match_stmt }
 query = { SOI ~ ( statement )* ~ EOI }
