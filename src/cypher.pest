@@ -21,21 +21,19 @@ map = {
 map_pair = { id ~ ":" ~ expr }
 
 
-node = { "(" ~ id? ~ (":" ~ id)? ~ map? ~ ")" }
+node = { "(" ~ id? ~ ( ":" ~ label )? ~ map? ~ ")" }
+label = { id }
 
-rel = { "<"? ~ "-" ~ ( "[" ~ id? ~ (":" ~ id)? ~ map? ~ "]" )? ~ "-" ~ ">"? }
+rel = { "<"? ~ "-" ~ ( "[" ~ id? ~ ( ":" ~ rel_type )? ~ map? ~ "]" )? ~ "-" ~ ">"? }
+rel_type = { id }
 
 pattern = { node  ~ ( rel ~ node )* }
 
-create_clause = { "CREATE" ~ pattern }
-
-match_clause = { "MATCH" ~ pattern }
-return_clause = { "RETURN" ~ projection }
-
 projection = { expr ~ ("AS" ~ id)? ~ ( "," ~ expr ~ ("AS" ~ id)? )* }
 
-create_stmt = { create_clause }
-match_stmt = { match_clause ~ return_clause? }
+create_stmt = { "CREATE" ~ pattern }
+match_stmt = { "MATCH" ~ pattern }
+return_stmt = { "RETURN" ~ projection }
 
-statement = { create_stmt | match_stmt }
-query = { SOI ~ ( statement )* ~ EOI }
+statement = _{ create_stmt | match_stmt }
+query = { SOI ~ ( statement )* ~ return_stmt? ~ EOI }
