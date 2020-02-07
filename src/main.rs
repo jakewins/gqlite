@@ -45,7 +45,7 @@ fn main() {
             Node{ labels: [ "Note" ].iter().cloned().collect(), properties: Default::default() },
             Node{ labels: [ "Reference" ].iter().cloned().collect(), properties: Default::default() },
         ] };
-        let mut pc = PlanningContext{ g: &g };
+        let mut pc = PlanningContext{ g: &g, slots: Default::default() };
         let mut plan: Box<dyn Step> = Box::new(Leaf{});
 
         for stmt in query.into_inner() {
@@ -91,13 +91,27 @@ fn main() {
 type StepStateKey = u32;
 
 struct PlanningContext<'i> {
-    g: &'i Graph<'i>
+    g: &'i Graph<'i>,
+    // slot assignments by name in output row
+    slots: HashMap<String, usize>,
 }
 
 impl PlanningContext<'_> {
 
+    pub fn get_or_alloc_slot(&mut self, identifier: &str) -> usize {
+        match self.slots.get(identifier) {
+            Some(slot) => { return *slot },
+            None => {
+                let slot = self.slots.len();
+                let string= String::from(identifier);
+                self.slots.insert(string, slot);
+                return slot
+            }
+        }
+    }
+
     pub fn new_row(&self) -> Row {
-        return Row{ slots: Default::default() }
+        return Row{ slots: vec![Val::Null;self.slots.len()] }
     }
 
     pub fn new_execution_ctx(&self) -> Context {
@@ -146,11 +160,13 @@ fn plan_match_node<'i, 'p>(pc: &'p mut PlanningContext, src: Box<dyn Step + 'i>,
         }
     }
 
+    let slot = pc.get_or_alloc_slot(identifier);
+
     let out: Box<dyn Step> = Box::new(NodeScan {
         src,
+        slot,
+        label,
         next_node: 0,
-        slot: identifier,
-        label
     });
 
     return out
@@ -167,8 +183,8 @@ pub struct Context<'i> {
 }
 
 #[derive(Debug)]
-pub struct Row<'i> {
-    slots: HashMap<&'i str, Val>,
+pub struct Row {
+    slots: Vec<Val>
 }
 
 pub trait Step: std::fmt::Debug {
@@ -204,7 +220,7 @@ pub struct NodeScan<'i> {
     next_node: usize,
 
     // Where should this scan write its output?
-    slot: &'i str,
+    slot: usize,
 
     // If the empty string, return all nodes, otherwise only nodes with the specified label
     label:  &'i str,
@@ -219,6 +235,8 @@ impl<'i> Step for NodeScan<'i> {
                 if self.label != "" && !node.labels.contains(self.label) {
                     continue;
                 }
+
+                out.slots[self.slot] = Val::Node(self.next_node);
 
                 println!("next: {:?}", node);
                 return Ok(true)
@@ -244,9 +262,10 @@ pub struct Node<'i> {
     properties: HashMap<&'i str, Val>,
 }
 
-#[derive(Debug)]
+#[derive(Debug,Clone)]
 pub enum Val {
-
+    Null,
+    Node(usize),
 }
 
 #[derive(Debug)]
