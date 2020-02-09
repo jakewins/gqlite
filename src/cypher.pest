@@ -29,11 +29,12 @@ rel_type = { id }
 
 pattern = { node  ~ ( rel ~ node )* }
 
-projection = { expr ~ ("AS" ~ id)? ~ ( "," ~ expr ~ ("AS" ~ id)? )* }
+projection = { expr ~ ("AS" ~ id)? }
+projections = { projection ~ ( "," ~ projection )* }
 
 create_stmt = { "CREATE" ~ pattern }
 match_stmt = { "MATCH" ~ pattern }
-return_stmt = { "RETURN" ~ projection }
+return_stmt = { "RETURN" ~ projections }
 
 statement = _{ create_stmt | match_stmt }
 query = { SOI ~ ( statement )* ~ return_stmt? ~ EOI }

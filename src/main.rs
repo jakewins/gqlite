@@ -11,6 +11,7 @@ use pest::Parser;
 use pest::iterators::{Pair};
 use std::any::Any;
 use std::collections::{HashMap, HashSet};
+use std::rc::Rc;
 
 #[derive(Parser)]
 #[grammar = "cypher.pest"]
@@ -40,12 +41,12 @@ fn main() {
 
         let mut statement_count: u64 = 0;
 
-        let g = Graph{ nodes: vec![
-            Node{ labels: [ "Note" ].iter().cloned().collect(), properties: Default::default() },
-            Node{ labels: [ "Note" ].iter().cloned().collect(), properties: Default::default() },
-            Node{ labels: [ "Reference" ].iter().cloned().collect(), properties: Default::default() },
-        ] };
-        let mut pc = PlanningContext{ g: &g, slots: Default::default() };
+        let g = Rc::new(Graph{ nodes: vec![
+            Node{ labels: [ String::from("Note") ].iter().cloned().collect(), properties: Default::default() },
+            Node{ labels: [ String::from("Note") ].iter().cloned().collect(), properties: Default::default() },
+            Node{ labels: [ String::from("Reference") ].iter().cloned().collect(), properties: Default::default() },
+        ] });
+        let mut pc = PlanningContext{ g, slots: Default::default() };
         let mut plan: Box<dyn Step> = Box::new(Leaf{});
 
         for stmt in query.into_inner() {
@@ -58,7 +59,7 @@ fn main() {
                     println!("{}", create_stmt.as_str())
                 }
                 Rule::return_stmt => {
-                    statement_count += 1;
+                    plan = plan_return(&mut pc, plan, stmt)
                 }
                 Rule::EOI => (),
                 _ => unreachable!(),
@@ -90,13 +91,13 @@ fn main() {
 // out of the runtime context.
 type StepStateKey = u32;
 
-struct PlanningContext<'i> {
-    g: &'i Graph<'i>,
+struct PlanningContext {
+    g: Rc<Graph>,
     // slot assignments by name in output row
     slots: HashMap<String, usize>,
 }
 
-impl PlanningContext<'_> {
+impl PlanningContext {
 
     pub fn get_or_alloc_slot(&mut self, identifier: &str) -> usize {
         match self.slots.get(identifier) {
@@ -115,12 +116,37 @@ impl PlanningContext<'_> {
     }
 
     pub fn new_execution_ctx(&self) -> Context {
-        return Context{ g: self.g }
+        return Context{ g: self.g.clone() }
     }
 }
 
+fn plan_return<'i, 'p>(pc: &'p mut PlanningContext, src: Box<dyn Step + 'i>, return_stmt: Pair<'i, Rule>) -> Box<dyn Step + 'i> {
+    let mut plan: Box<dyn Step + 'i> = src;
+    for part in return_stmt.into_inner() {
+        match part.as_rule() {
+            Rule::projections => {
+                plan = plan_return_projections(pc, plan, part)
+            }
+            _ => unreachable!(),
+        }
+    }
+    return plan;
+}
+
+fn plan_return_projections<'i, 'p>(pc: &'p mut PlanningContext, src: Box<dyn Step + 'i>, projections: Pair<'i, Rule>) -> Box<dyn Step + 'i> {
+    let mut plan: Box<dyn Step + 'i> = src;
+    for part in projections.into_inner() {
+        match part.as_rule() {
+            Rule::projection => {
+
+            }
+            _ => unreachable!(),
+        }
+    }
+    return plan;
+}
+
 fn plan_match<'i, 'p>(pc: &'p mut PlanningContext, src: Box<dyn Step + 'i>, match_stmt: Pair<'i, Rule>) -> Box<dyn Step + 'i> {
-    println!("{}", match_stmt.as_str());
     let mut plan: Box<dyn Step + 'i> = src;
     for part in match_stmt.into_inner() {
         match part.as_rule() {
@@ -178,8 +204,8 @@ pub struct Error {
 }
 
 #[derive(Debug)]
-pub struct Context<'i> {
-    g: &'i Graph<'i>
+pub struct Context {
+    g: Rc<Graph>
 }
 
 #[derive(Debug)]
@@ -237,8 +263,6 @@ impl<'i> Step for NodeScan<'i> {
                 }
 
                 out.slots[self.slot] = Val::Node(self.next_node);
-
-                println!("next: {:?}", node);
                 return Ok(true)
             }
             return Ok(false)
@@ -257,9 +281,18 @@ impl Step for Leaf {
 
 
 #[derive(Debug)]
-pub struct Node<'i> {
-    labels: HashSet<&'i str>,
-    properties: HashMap<&'i str, Val>,
+pub struct Return;
+
+impl Step for Return {
+    fn next(&mut self, ctx: &mut Context, out: &mut Row) -> Result<bool, Error> {
+        unimplemented!()
+    }
+}
+
+#[derive(Debug)]
+pub struct Node {
+    labels: HashSet<String>,
+    properties: HashMap<String, Val>,
 }
 
 #[derive(Debug,Clone)]
@@ -269,7 +302,7 @@ pub enum Val {
 }
 
 #[derive(Debug)]
-pub struct Graph<'i>  {
-    nodes: Vec<Node<'i>>
+pub struct Graph  {
+    nodes: Vec<Node>
 
 }
