@@ -19,6 +19,7 @@ use std::fmt::{Display, Formatter, Write};
 use std::fmt;
 
 use steps::*;
+use std::iter::Map;
 
 #[derive(Parser)]
 #[grammar = "cypher.pest"]
@@ -49,7 +50,7 @@ fn main() {
         Node{ labels: [ String::from("Note") ].iter().cloned().collect(), properties: [ (String::from("message"), Val::String(String::from("other message.."))) ].iter().cloned().collect() },
         Node{ labels: [ String::from("Reference") ].iter().cloned().collect(), properties: Default::default() },
     ] });
-    let mut pc = PlanningContext{ g, slots: Default::default() };
+    let mut pc = PlanningContext{ g, slots: Default::default(), anon_rel_seq:0, anon_node_seq: 0 };
     let mut plan: Box<dyn Step> = Box::new(Leaf{});
 
     for stmt in query.into_inner() {
@@ -90,6 +91,8 @@ struct PlanningContext {
     g: Rc<Graph>,
     // slot assignments by name in output row
     slots: HashMap<String, usize>,
+    anon_rel_seq: u32,
+    anon_node_seq: u32,
 }
 
 impl PlanningContext {
@@ -104,6 +107,18 @@ impl PlanningContext {
                 return slot
             }
         }
+    }
+
+    pub fn new_anon_rel(&mut self) -> Id {
+        let seq = self.anon_rel_seq;
+        self.anon_rel_seq += 1;
+        return format!("AnonRel#{}", seq)
+    }
+
+    pub fn new_anon_node(&mut self) -> Id {
+        let seq = self.anon_node_seq;
+        self.anon_node_seq += 1;
+        return format!("AnonNode#{}", seq)
     }
 
     pub fn new_row(&self) -> Row {
@@ -168,19 +183,77 @@ fn plan_expr(pc: & mut PlanningContext, expression: Pair<Rule>) -> Expr {
     panic!("Invalid expression from parser.")
 }
 
+#[derive(Debug)]
+struct PatternNode {
+    identifier: Id,
+    labels: Vec<String>
+}
+
+impl PatternNode {
+    fn merge(&mut self, other: &PatternNode) {
+
+    }
+}
+
+#[derive(Debug)]
+struct PatternRel {
+    identifier: Id,
+    rel_type: String,
+    left_node: String,
+    right_node: String,
+}
+
+#[derive(Debug)]
+struct PatternGraph {
+    e: HashMap<String, PatternNode>,
+    v: Vec<PatternRel>,
+}
+
+impl PatternGraph {
+    fn merge_node(&mut self, pc: &mut PlanningContext, mut n: PatternNode) -> String {
+        if n.identifier == "" {
+            n.identifier = pc.new_anon_node();
+        }
+
+        let id = n.identifier.clone();
+        let id2 = id.clone();
+        let entry = self.e.entry(id);
+        entry.and_modify(|on| on.merge(&n)).or_insert(n);
+        return id2;
+    }
+
+    fn merge_rel(&mut self, pc: &mut PlanningContext, mut r: PatternRel) {
+        if r.identifier == "" {
+            r.identifier = pc.new_anon_rel();
+        }
+
+        self.v.push(r)
+    }
+}
+
 fn plan_match<'i>(pc: &mut PlanningContext, src: Box<dyn Step + 'i>, match_stmt: Pair<'i, Rule>) -> Box<dyn Step + 'i> {
     let mut plan: Box<dyn Step + 'i> = src;
+    let mut pg: PatternGraph = PatternGraph{ e: HashMap::new(), v: Vec::new()};
+
     for part in match_stmt.into_inner() {
         match part.as_rule() {
             Rule::pattern => {
+                let mut prior_node = None;
+                let mut prior_rel: Option<PatternRel> = None;
                 // For each node and rel segment of eg: (n:Message)-[:KNOWS]->()
                 for segment in part.into_inner() {
                     match segment.as_rule() {
                         Rule::node => {
-                            plan = plan_match_node(pc,plan, segment);
+                            prior_node = Some(pg.merge_node(pc, parse_pattern_node(segment)));
+                            if let Some(mut rel) = prior_rel {
+                                rel.right_node = prior_node.as_ref().unwrap().clone(); // TODO lol
+                                pg.merge_rel(pc, rel);
+                                prior_rel = None
+                            }
                         }
                         Rule::rel => {
-                            println!("rel: {}", segment.as_str());
+                            prior_rel = Some(parse_pattern_rel(prior_node.expect("pattern rel must be preceded by node"), segment));
+                            prior_node = None
                         }
                         _ => unreachable!(),
                     }
@@ -189,11 +262,14 @@ fn plan_match<'i>(pc: &mut PlanningContext, src: Box<dyn Step + 'i>, match_stmt:
             _ => unreachable!(),
         }
     }
+
+    println!("built pg: {:?}", pg);
+
     return plan
 }
 
 // Figures out what step we need to find the specified node
-fn plan_match_node<'i>(pc: & mut PlanningContext, src: Box<dyn Step + 'i>, pattern_node: Pair<'i, Rule>) -> Box<dyn Step + 'i> {
+fn parse_pattern_node(pattern_node: Pair<Rule>) -> PatternNode {
     let mut identifier = "";
     let mut label = "";
     for part in pattern_node.into_inner() {
@@ -208,16 +284,25 @@ fn plan_match_node<'i>(pc: & mut PlanningContext, src: Box<dyn Step + 'i>, patte
         }
     }
 
-    let slot = pc.get_or_alloc_slot(identifier);
+    return PatternNode{ identifier: identifier.to_string(), labels: vec![label.to_string()] }
+}
 
-    let out: Box<dyn Step> = Box::new(NodeScan {
-        src,
-        slot,
-        label,
-        next_node: 0,
-    });
-
-    return out
+fn parse_pattern_rel(left_node: String, pattern_rel: Pair<Rule>) -> PatternRel {
+    let mut identifier = "";
+    let mut rel_type = "";
+    for part in pattern_rel.into_inner() {
+        match part.as_rule() {
+            Rule::id => {
+                identifier = part.as_str()
+            }
+            Rule::rel_type => {
+                rel_type = part.as_str()
+            }
+            _ => unreachable!(),
+        }
+    }
+    // TODO don't use this empty identifier here
+    return PatternRel{ left_node, right_node: String::from(""), identifier: identifier.to_string(), rel_type: rel_type.to_string() }
 }
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]

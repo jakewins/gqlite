@@ -25,7 +25,7 @@ impl Step for Filter {
     }
 }
 
-// For each src row, perform a full node scan with the specified filters
+// For each src row, perform a full no de scan with the specified filters
 #[derive(Debug)]
 pub struct NodeScan<'i> {
     pub src: Box<dyn Step + 'i>,
