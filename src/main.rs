@@ -12,6 +12,9 @@ use pest::iterators::{Pair};
 use std::any::Any;
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
+use crate::Val::Null;
+use std::fmt::{Display, Formatter, Write};
+use std::fmt;
 
 #[derive(Parser)]
 #[grammar = "cypher.pest"]
@@ -42,8 +45,8 @@ fn main() {
         let mut statement_count: u64 = 0;
 
         let g = Rc::new(Graph{ nodes: vec![
-            Node{ labels: [ String::from("Note") ].iter().cloned().collect(), properties: Default::default() },
-            Node{ labels: [ String::from("Note") ].iter().cloned().collect(), properties: Default::default() },
+            Node{ labels: [ String::from("Note") ].iter().cloned().collect(), properties: [ (String::from("message"), Val::String(String::from("a message"))) ].iter().cloned().collect() },
+            Node{ labels: [ String::from("Note") ].iter().cloned().collect(), properties: [ (String::from("message"), Val::String(String::from("other message.."))) ].iter().cloned().collect() },
             Node{ labels: [ String::from("Reference") ].iter().cloned().collect(), properties: Default::default() },
         ] });
         let mut pc = PlanningContext{ g, slots: Default::default() };
@@ -66,15 +69,12 @@ fn main() {
             }
         }
 
-        println!("Plan: {:?}", plan);
-
         let mut ctx = pc.new_execution_ctx();
         let mut row = pc.new_row();
         loop {
             match plan.next(&mut ctx, &mut row) {
                 Ok(true) => {
                     // Keep going
-                    println!("{:?}", row)
                 }
                 Ok(false) => {
                     return
@@ -86,10 +86,6 @@ fn main() {
         }
     }
 }
-
-// For a given plan, each step that has runtime state uas one of these to get their state
-// out of the runtime context.
-type StepStateKey = u32;
 
 struct PlanningContext {
     g: Rc<Graph>,
@@ -120,33 +116,60 @@ impl PlanningContext {
     }
 }
 
-fn plan_return<'i, 'p>(pc: &'p mut PlanningContext, src: Box<dyn Step + 'i>, return_stmt: Pair<'i, Rule>) -> Box<dyn Step + 'i> {
-    let mut plan: Box<dyn Step + 'i> = src;
-    for part in return_stmt.into_inner() {
-        match part.as_rule() {
-            Rule::projections => {
-                plan = plan_return_projections(pc, plan, part)
-            }
-            _ => unreachable!(),
-        }
-    }
-    return plan;
+fn plan_return<'i>(pc: & mut PlanningContext, src: Box<dyn Step + 'i>, return_stmt: Pair<'i, Rule>) -> Box<dyn Step + 'i> {
+    let mut parts = return_stmt.into_inner();
+    let projections = parts.next().and_then(|p| Some(plan_return_projections(pc, p))).expect("RETURN must start with projections");
+    return Box::new(Return{ src, projections });
 }
 
-fn plan_return_projections<'i, 'p>(pc: &'p mut PlanningContext, src: Box<dyn Step + 'i>, projections: Pair<'i, Rule>) -> Box<dyn Step + 'i> {
-    let mut plan: Box<dyn Step + 'i> = src;
-    for part in projections.into_inner() {
-        match part.as_rule() {
-            Rule::projection => {
-
-            }
-            _ => unreachable!(),
+fn plan_return_projections(pc: & mut PlanningContext, projections: Pair<Rule>) -> Vec<Projection> {
+    let mut out = Vec::new();
+    for projection in projections.into_inner() {
+        if let Rule::projection = projection.as_rule() {
+            let default_alias = String::from(projection.as_str());
+            let mut parts = projection.into_inner();
+            let expr = parts.next().and_then(|p| Some(plan_expr(pc, p))).unwrap();
+            let alias = parts.next().and_then(|p| match p.as_rule() {
+                Rule::id => Some(String::from(p.as_str())),
+                _ => None
+            }).unwrap_or(default_alias);
+            out.push(Projection{expr, alias});
         }
     }
-    return plan;
+    return out;
 }
 
-fn plan_match<'i, 'p>(pc: &'p mut PlanningContext, src: Box<dyn Step + 'i>, match_stmt: Pair<'i, Rule>) -> Box<dyn Step + 'i> {
+fn plan_expr(pc: & mut PlanningContext, expression: Pair<Rule>) -> Expr {
+    for inner in expression.into_inner() {
+        match inner.as_rule() {
+            Rule::string => {
+                return Expr::Lit(Val::String(String::from(inner.as_str())))
+            }
+            Rule::id => {
+                return Expr::Slot(pc.get_or_alloc_slot(inner.as_str()))
+            }
+            Rule::prop_lookup => {
+                let mut prop_lookup = inner.into_inner();
+                let prop_lookup_expr = prop_lookup.next().unwrap();
+                let base = match prop_lookup_expr.as_rule() {
+                    Rule::id => Expr::Slot(pc.get_or_alloc_slot(prop_lookup_expr.as_str())),
+                    _ => unreachable!(),
+                };
+                let mut props = Vec::new();
+                for p_inner in prop_lookup {
+                    if let Rule::id = p_inner.as_rule() {
+                        props.push(String::from(p_inner.as_str()));
+                    }
+                }
+                return Expr::Prop(Box::new(base), props)
+            }
+            _ => panic!(String::from(inner.as_str())),
+        }
+    }
+    panic!("Invalid expression from parser.")
+}
+
+fn plan_match<'i>(pc: &mut PlanningContext, src: Box<dyn Step + 'i>, match_stmt: Pair<'i, Rule>) -> Box<dyn Step + 'i> {
     let mut plan: Box<dyn Step + 'i> = src;
     for part in match_stmt.into_inner() {
         match part.as_rule() {
@@ -171,7 +194,7 @@ fn plan_match<'i, 'p>(pc: &'p mut PlanningContext, src: Box<dyn Step + 'i>, matc
 }
 
 // Figures out what step we need to find the specified node
-fn plan_match_node<'i, 'p>(pc: &'p mut PlanningContext, src: Box<dyn Step + 'i>, pattern_node: Pair<'i, Rule>) -> Box<dyn Step + 'i> {
+fn plan_match_node<'i>(pc: & mut PlanningContext, src: Box<dyn Step + 'i>, pattern_node: Pair<'i, Rule>) -> Box<dyn Step + 'i> {
     let mut identifier = "";
     let mut label = "";
     for part in pattern_node.into_inner() {
@@ -212,6 +235,9 @@ pub struct Context {
 pub struct Row {
     slots: Vec<Val>
 }
+
+// Pointer to a Val in a row
+pub type Slot = usize;
 
 pub trait Step: std::fmt::Debug {
     // Produce the next row
@@ -257,12 +283,13 @@ impl<'i> Step for NodeScan<'i> {
         loop {
             if ctx.g.nodes.len() > self.next_node {
                 let node = ctx.g.nodes.get(self.next_node).unwrap();
-                self.next_node += 1;
                 if self.label != "" && !node.labels.contains(self.label) {
+                    self.next_node += 1;
                     continue;
                 }
 
                 out.slots[self.slot] = Val::Node(self.next_node);
+                self.next_node += 1;
                 return Ok(true)
             }
             return Ok(false)
@@ -279,13 +306,44 @@ impl Step for Leaf {
     }
 }
 
+#[derive(Debug)]
+pub struct Projection {
+    expr: Expr,
+    alias: String,
+}
 
 #[derive(Debug)]
-pub struct Return;
+pub struct Return<'i> {
+    src: Box<dyn Step + 'i>,
+    projections: Vec<Projection>,
+}
 
-impl Step for Return {
+impl<'i> Step for Return<'i> {
     fn next(&mut self, ctx: &mut Context, out: &mut Row) -> Result<bool, Error> {
-        unimplemented!()
+        let mut first = true;
+        for cell in &self.projections {
+            if first {
+                print!("{}", cell.alias);
+                first = false
+            } else {
+                print!(", {}", cell.alias)
+            }
+        }
+        println!();
+        while self.src.next(ctx, out)? {
+            first = true;
+            for cell in &self.projections {
+                let v = cell.expr.eval(ctx, out)?;
+                if first {
+                    print!("{}", v);
+                    first = false
+                } else {
+                    print!(", {}", v)
+                }
+            }
+            println!();
+        }
+        Ok(false)
     }
 }
 
@@ -298,11 +356,75 @@ pub struct Node {
 #[derive(Debug,Clone)]
 pub enum Val {
     Null,
+    String(String),
     Node(usize),
+}
+
+impl Val {
+    fn get(&self, ctx: &mut Context, row: &mut Row, prop: &Id) -> Result<Val, Error>  {
+        match self {
+            Val::Null=> Err(Error{ msg: format!("NULL has no property {}", prop) }),
+            Val::String(_) => Err(Error{ msg: format!("STRING has no property {}", prop) }),
+            Val::Node(id) => match ctx.g.get_node_prop(*id, prop) {
+                Some(v) => Ok(v),
+                None => Ok(Null),
+            },
+        }
+    }
+}
+
+impl Display for Val {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        match self {
+            Val::Null=> f.write_str("NULL"),
+            Val::String(s) => f.write_str(&s),
+            Val::Node(id) => f.write_str(&format!("Node({})", id))
+        }
+    }
+}
+
+pub type Id = String;
+
+#[derive(Debug)]
+pub enum Expr {
+    Lit(Val),
+    // Lookup a property by id
+    Prop(Box<Expr>, Vec<Id>),
+    Slot(Slot),
+}
+
+impl Expr {
+
+    fn eval_prop(ctx: &mut Context, row: &mut Row, expr: &Box<Expr>, props: &Vec<Id>) -> Result<Val, Error> {
+        let mut v = expr.eval(ctx, row)?;
+        for prop in props {
+            v = v.get(ctx, row, prop)?;
+        }
+        return Ok(v)
+    }
+
+    fn eval(&self, ctx: &mut Context, row: &mut Row) -> Result<Val, Error> {
+        match self {
+            Expr::Prop(expr, props) => Expr::eval_prop(ctx, row, expr, props),
+            Expr::Slot(slot) => Ok(row.slots[*slot].clone()), // TODO not this
+            Expr::Lit(v) => Ok(v.clone()), // TODO not this
+            _ => panic!("{:?}", self)
+        }
+    }
 }
 
 #[derive(Debug)]
 pub struct Graph  {
     nodes: Vec<Node>
 
+}
+
+impl Graph {
+    fn get_node_prop(&self, node_id: usize, prop: &Id) -> Option<Val> {
+        if let Some(v) = self.nodes[node_id].properties.get(prop) {
+            Some(v.clone())
+        } else {
+            None
+        }
+    }
 }
