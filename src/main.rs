@@ -31,61 +31,56 @@ fn main() {
         .about("A graph database in a yaml file!")
         .setting(AppSettings::ArgRequiredElseHelp)
         .args_from_usage(
-            "-f, --file=[FILE] @graf.yaml 'Sets the db file to use'\
+            "<QUERY> 'Query to execute'\
+            -f, --file=[FILE] @graf.yaml 'Sets the db file to use'\
             -h, --help 'Print help information'")
-        .subcommand(SubCommand::with_name("query")
-            .about("executes a query against the database")
-            .arg_from_usage(
-                "<QUERY> 'Query to execute'"))
         .get_matches();
 
-    if let Some(matches) = matches.subcommand_matches("query") {
-        let query_str = matches.value_of("QUERY").unwrap();
+    let query_str = matches.value_of("QUERY").unwrap();
 
-        let query = CypherParser::parse(Rule::query, &query_str)
-            .expect("unsuccessful parse") // unwrap the parse result
-            .next().unwrap(); // get and unwrap the `file` rule; never fails
+    let query = CypherParser::parse(Rule::query, &query_str)
+        .expect("unsuccessful parse") // unwrap the parse result
+        .next().unwrap(); // get and unwrap the `file` rule; never fails
 
-        let mut statement_count: u64 = 0;
+    let mut statement_count: u64 = 0;
 
-        let g = Rc::new(Graph{ nodes: vec![
-            Node{ labels: [ String::from("Note") ].iter().cloned().collect(), properties: [ (String::from("message"), Val::String(String::from("a message"))) ].iter().cloned().collect() },
-            Node{ labels: [ String::from("Note") ].iter().cloned().collect(), properties: [ (String::from("message"), Val::String(String::from("other message.."))) ].iter().cloned().collect() },
-            Node{ labels: [ String::from("Reference") ].iter().cloned().collect(), properties: Default::default() },
-        ] });
-        let mut pc = PlanningContext{ g, slots: Default::default() };
-        let mut plan: Box<dyn Step> = Box::new(Leaf{});
+    let g = Rc::new(Graph{ nodes: vec![
+        Node{ labels: [ String::from("Note") ].iter().cloned().collect(), properties: [ (String::from("message"), Val::String(String::from("a message"))) ].iter().cloned().collect() },
+        Node{ labels: [ String::from("Note") ].iter().cloned().collect(), properties: [ (String::from("message"), Val::String(String::from("other message.."))) ].iter().cloned().collect() },
+        Node{ labels: [ String::from("Reference") ].iter().cloned().collect(), properties: Default::default() },
+    ] });
+    let mut pc = PlanningContext{ g, slots: Default::default() };
+    let mut plan: Box<dyn Step> = Box::new(Leaf{});
 
-        for stmt in query.into_inner() {
-            match stmt.as_rule() {
-                Rule::match_stmt => {
-                    plan = plan_match(&mut pc, plan, stmt)
-                }
-                Rule::create_stmt => {
-                    let create_stmt = stmt.into_inner();
-                    println!("{}", create_stmt.as_str())
-                }
-                Rule::return_stmt => {
-                    plan = plan_return(&mut pc, plan, stmt)
-                }
-                Rule::EOI => (),
-                _ => unreachable!(),
+    for stmt in query.into_inner() {
+        match stmt.as_rule() {
+            Rule::match_stmt => {
+                plan = plan_match(&mut pc, plan, stmt)
             }
+            Rule::create_stmt => {
+                let create_stmt = stmt.into_inner();
+                println!("{}", create_stmt.as_str())
+            }
+            Rule::return_stmt => {
+                plan = plan_return(&mut pc, plan, stmt)
+            }
+            Rule::EOI => (),
+            _ => unreachable!(),
         }
+    }
 
-        let mut ctx = pc.new_execution_ctx();
-        let mut row = pc.new_row();
-        loop {
-            match plan.next(&mut ctx, &mut row) {
-                Ok(true) => {
-                    // Keep going
-                }
-                Ok(false) => {
-                    return
-                }
-                Err(e) => {
-                    panic!(e.msg)
-                }
+    let mut ctx = pc.new_execution_ctx();
+    let mut row = pc.new_row();
+    loop {
+        match plan.next(&mut ctx, &mut row) {
+            Ok(true) => {
+                // Keep going
+            }
+            Ok(false) => {
+                return
+            }
+            Err(e) => {
+                panic!(e.msg)
             }
         }
     }
