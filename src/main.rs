@@ -16,6 +16,8 @@ use crate::Val::Null;
 use std::fmt::{Display, Formatter, Write};
 use std::fmt;
 
+use steps::*;
+
 #[derive(Parser)]
 #[grammar = "cypher.pest"]
 pub struct CypherParser;
@@ -239,111 +241,145 @@ pub struct Row {
 // Pointer to a Val in a row
 pub type Slot = usize;
 
-pub trait Step: std::fmt::Debug {
-    // Produce the next row
-    fn next(&mut self, ctx: &mut Context, out: &mut Row) -> Result<bool, Error>;
-}
 
-#[derive(Debug)]
-pub struct Expand;
+mod steps {
 
-impl Step for Expand {
-    fn next(&mut self, ctx: &mut Context, out: &mut Row) -> Result<bool, Error> {
-        unimplemented!()
+    use super::{Context, Row, Val, Expr, Error};
+
+    pub trait Step: std::fmt::Debug {
+        // Produce the next row
+        fn next(&mut self, ctx: &mut Context, out: &mut Row) -> Result<bool, Error>;
     }
-}
 
+    #[derive(Debug)]
+    pub struct Expand;
 
-#[derive(Debug)]
-pub struct Filter;
-
-impl Step for Filter {
-    fn next(&mut self, ctx: &mut Context, out: &mut Row) -> Result<bool, Error> {
-        unimplemented!()
+    impl Step for Expand {
+        fn next(&mut self, ctx: &mut Context, out: &mut Row) -> Result<bool, Error> {
+            unimplemented!()
+        }
     }
-}
 
-// For each src row, perform a full node scan with the specified filters
-#[derive(Debug)]
-pub struct NodeScan<'i> {
-    src: Box<dyn Step + 'i>,
 
-    // Next node id in g to return
-    next_node: usize,
+    #[derive(Debug)]
+    pub struct Filter;
 
-    // Where should this scan write its output?
-    slot: usize,
+    impl Step for Filter {
+        fn next(&mut self, ctx: &mut Context, out: &mut Row) -> Result<bool, Error> {
+            unimplemented!()
+        }
+    }
 
-    // If the empty string, return all nodes, otherwise only nodes with the specified label
-    label:  &'i str,
-}
+    // For each src row, perform a full node scan with the specified filters
+    #[derive(Debug)]
+    pub struct NodeScan<'i> {
+        pub src: Box<dyn Step + 'i>,
 
-impl<'i> Step for NodeScan<'i> {
-    fn next(&mut self, ctx: &mut Context, out: &mut Row) -> Result<bool, Error> {
-        loop {
-            if ctx.g.nodes.len() > self.next_node {
-                let node = ctx.g.nodes.get(self.next_node).unwrap();
-                if self.label != "" && !node.labels.contains(self.label) {
+        // Next node id in g to return
+        pub next_node: usize,
+
+        // Where should this scan write its output?
+        pub slot: usize,
+
+        // If the empty string, return all nodes, otherwise only nodes with the specified label
+        pub label: &'i str,
+    }
+
+    impl<'i> Step for NodeScan<'i> {
+        fn next(&mut self, ctx: &mut Context, out: &mut Row) -> Result<bool, Error> {
+            loop {
+                if ctx.g.nodes.len() > self.next_node {
+                    let node = ctx.g.nodes.get(self.next_node).unwrap();
+                    if self.label != "" && !node.labels.contains(self.label) {
+                        self.next_node += 1;
+                        continue;
+                    }
+
+                    out.slots[self.slot] = Val::Node(self.next_node);
                     self.next_node += 1;
-                    continue;
+                    return Ok(true)
                 }
-
-                out.slots[self.slot] = Val::Node(self.next_node);
-                self.next_node += 1;
-                return Ok(true)
-            }
-            return Ok(false)
-        }
-    }
-}
-
-#[derive(Debug)]
-pub struct Leaf;
-
-impl Step for Leaf {
-    fn next(&mut self, ctx: &mut Context, out: &mut Row) -> Result<bool, Error> {
-        unimplemented!()
-    }
-}
-
-#[derive(Debug)]
-pub struct Projection {
-    expr: Expr,
-    alias: String,
-}
-
-#[derive(Debug)]
-pub struct Return<'i> {
-    src: Box<dyn Step + 'i>,
-    projections: Vec<Projection>,
-}
-
-impl<'i> Step for Return<'i> {
-    fn next(&mut self, ctx: &mut Context, out: &mut Row) -> Result<bool, Error> {
-        let mut first = true;
-        for cell in &self.projections {
-            if first {
-                print!("{}", cell.alias);
-                first = false
-            } else {
-                print!(", {}", cell.alias)
+                return Ok(false)
             }
         }
-        println!();
-        while self.src.next(ctx, out)? {
-            first = true;
+    }
+
+    #[derive(Debug)]
+    pub struct Leaf;
+
+    impl Step for Leaf {
+        fn next(&mut self, ctx: &mut Context, out: &mut Row) -> Result<bool, Error> {
+            unimplemented!()
+        }
+    }
+
+    #[derive(Debug)]
+    pub struct Projection {
+        pub expr: Expr,
+        pub alias: String,
+    }
+
+    #[derive(Debug)]
+    pub struct Return<'i> {
+        pub src: Box<dyn Step + 'i>,
+        pub projections: Vec<Projection>,
+    }
+
+    impl<'i> Step for Return<'i> {
+        fn next(&mut self, ctx: &mut Context, out: &mut Row) -> Result<bool, Error> {
+            let mut first = true;
             for cell in &self.projections {
-                let v = cell.expr.eval(ctx, out)?;
                 if first {
-                    print!("{}", v);
+                    print!("{}", cell.alias);
                     first = false
                 } else {
-                    print!(", {}", v)
+                    print!(", {}", cell.alias)
                 }
             }
             println!();
+            while self.src.next(ctx, out)? {
+                first = true;
+                for cell in &self.projections {
+                    let v = cell.expr.eval(ctx, out)?;
+                    if first {
+                        print!("{}", v);
+                        first = false
+                    } else {
+                        print!(", {}", v)
+                    }
+                }
+                println!();
+            }
+            Ok(false)
         }
-        Ok(false)
+    }
+}
+
+#[derive(Debug)]
+pub enum Expr {
+    Lit(Val),
+    // Lookup a property by id
+    Prop(Box<Expr>, Vec<Id>),
+    Slot(Slot),
+}
+
+impl Expr {
+
+    fn eval_prop(ctx: &mut Context, row: &mut Row, expr: &Box<Expr>, props: &Vec<Id>) -> Result<Val, Error> {
+        let mut v = expr.eval(ctx, row)?;
+        for prop in props {
+            v = v.get(ctx, row, prop)?;
+        }
+        return Ok(v)
+    }
+
+    fn eval(&self, ctx: &mut Context, row: &mut Row) -> Result<Val, Error> {
+        match self {
+            Expr::Prop(expr, props) => Expr::eval_prop(ctx, row, expr, props),
+            Expr::Slot(slot) => Ok(row.slots[*slot].clone()), // TODO not this
+            Expr::Lit(v) => Ok(v.clone()), // TODO not this
+            _ => panic!("{:?}", self)
+        }
     }
 }
 
@@ -352,6 +388,8 @@ pub struct Node {
     labels: HashSet<String>,
     properties: HashMap<String, Val>,
 }
+
+pub type Id = String;
 
 #[derive(Debug,Clone)]
 pub enum Val {
@@ -383,35 +421,6 @@ impl Display for Val {
     }
 }
 
-pub type Id = String;
-
-#[derive(Debug)]
-pub enum Expr {
-    Lit(Val),
-    // Lookup a property by id
-    Prop(Box<Expr>, Vec<Id>),
-    Slot(Slot),
-}
-
-impl Expr {
-
-    fn eval_prop(ctx: &mut Context, row: &mut Row, expr: &Box<Expr>, props: &Vec<Id>) -> Result<Val, Error> {
-        let mut v = expr.eval(ctx, row)?;
-        for prop in props {
-            v = v.get(ctx, row, prop)?;
-        }
-        return Ok(v)
-    }
-
-    fn eval(&self, ctx: &mut Context, row: &mut Row) -> Result<Val, Error> {
-        match self {
-            Expr::Prop(expr, props) => Expr::eval_prop(ctx, row, expr, props),
-            Expr::Slot(slot) => Ok(row.slots[*slot].clone()), // TODO not this
-            Expr::Lit(v) => Ok(v.clone()), // TODO not this
-            _ => panic!("{:?}", self)
-        }
-    }
-}
 
 #[derive(Debug)]
 pub struct Graph  {
