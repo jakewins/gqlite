@@ -49,29 +49,29 @@ fn main() {
     let lbl_note = tokens.tokenize("Note");
     let lbl_reference = tokens.tokenize("Reference");
     let key_message = tokens.tokenize("message");
-    let g = Rc::new(Graph{ nodes: vec![
-        Node{ labels: [ lbl_note ].iter().cloned().collect(), properties: [ (key_message, Val::String(String::from("a message"))) ].iter().cloned().collect() },
-        Node{ labels: [ lbl_note ].iter().cloned().collect(), properties: [ (key_message, Val::String(String::from("other message.."))) ].iter().cloned().collect() },
-        Node{ labels: [ lbl_reference ].iter().cloned().collect(), properties: Default::default() },
-    ] });
-    let mut pc = PlanningContext{ g, slots: Default::default(), anon_rel_seq:0, anon_node_seq: 0, tokens: tokens, };
+    let mut g = Graph{ nodes: vec![
+        Node::new(vec!( lbl_note ), [ (key_message, Val::String(String::from("a message"))) ].iter().cloned().collect()),
+        Node::new(vec!( lbl_note ), [ (key_message, Val::String(String::from("other message.."))) ].iter().cloned().collect()),
+        Node::new(vec!( lbl_note ), [ (key_message, Val::String(String::from("that other note made me think of this thing"))) ].iter().cloned().collect()),
+        Node::new(vec!( lbl_reference ), Default::default() ),
+    ] };
+    g.add_rel(0, 1, tokens.tokenize("RELATES_TO"));
+    g.add_rel(0, 2, tokens.tokenize("RELATES_TO"));
+    g.add_rel(1, 3, tokens.tokenize("REFERENCES"));
+    let mut pc = PlanningContext{ g: Rc::new(g), slots: Default::default(), anon_rel_seq:0, anon_node_seq: 0, tokens: tokens, };
     let mut plan: Box<dyn Step> = Box::new(Leaf{});
 
     for stmt in query.into_inner() {
         match stmt.as_rule() {
             Rule::match_stmt => {
-                println!("planning match");
                 plan = plan_match(&mut pc, plan, stmt);
-                println!("planning match / done");
             }
             Rule::create_stmt => {
                 let create_stmt = stmt.into_inner();
                 println!("{}", create_stmt.as_str())
             }
             Rule::return_stmt => {
-                println!("planning return");
                 plan = plan_return(&mut pc, plan, stmt);
-                println!("done planning return");
             }
             Rule::EOI => (),
             _ => unreachable!(),
@@ -335,26 +335,18 @@ fn plan_match<'i>(pc: &mut PlanningContext, src: Box<dyn Step + 'i>, match_stmt:
                 right_node.solved = true;
                 rel.solved = true;
                 solved_any = true;
-                plan = Box::new( Expand{
-                    src: plan,
-                    src_slot: pc.get_or_alloc_slot(left_id),
-                    dst_slot: pc.get_or_alloc_slot(right_id),
-                    rel_type: rel.rel_type,
-                    next_rel_index: 0
-                } );
+                plan = Box::new( Expand::new(
+                    plan,  pc.get_or_alloc_slot(left_id), pc.get_or_alloc_slot(right_id), pc.get_or_alloc_slot(rel.identifier), rel.rel_type
+                ) );
             } else if !left_solved && right_solved {
                 // Right is solved and left isn't, so we can expand to the left
                 let mut left_node = pg.e.get_mut(&left_id).unwrap();
                 left_node.solved = true;
                 rel.solved = true;
                 solved_any = true;
-                plan = Box::new( Expand{
-                    src: plan,
-                    src_slot: pc.get_or_alloc_slot(right_id),
-                    dst_slot: pc.get_or_alloc_slot(left_id),
-                    rel_type: rel.rel_type,
-                    next_rel_index: 0
-                } );
+                plan = Box::new( Expand::new(
+                    plan,  pc.get_or_alloc_slot(right_id), pc.get_or_alloc_slot(left_id), pc.get_or_alloc_slot(rel.identifier), rel.rel_type
+                ) );
             }
         }
 
@@ -461,8 +453,33 @@ impl Expr {
 pub struct Node {
     labels: HashSet<Token>,
     properties: HashMap<Token, Val>,
+    rels: Vec<RelHalf>,
 }
 
+impl Node {
+    pub fn new(labels: Vec<Token>, properties: HashMap<Token, Val>) -> Node {
+        return Node {
+            labels: labels.iter().cloned().collect(),
+            properties,
+            rels: vec![]
+        }
+    }
+}
+
+#[derive(Debug)]
+pub struct RelHalf {
+    rel_type: Token,
+    dir: Dir,
+    other_node: usize,
+    properties: Rc<HashMap<Token, Val>>,
+}
+
+#[derive(Debug)]
+pub enum Dir {
+    Out, In
+}
+
+// TODO poorly named, "Identifier", not "Node Id", probably just replace this with "Token", or a dedicated "SlotIdentifier"?
 pub type Id = String;
 
 #[derive(Debug,Clone)]
@@ -470,6 +487,7 @@ pub enum Val {
     Null,
     String(String),
     Node(usize),
+    Rel{ node: usize, rel_index: usize },
 }
 
 impl Val {
@@ -481,6 +499,17 @@ impl Val {
                 Some(v) => Ok(v),
                 None => Ok(Null),
             },
+            Val::Rel{node, rel_index} => match ctx.g.get_rel_prop(*node, *rel_index, prop) {
+                Some(v) => Ok(v),
+                None => Ok(Null),
+            },
+        }
+    }
+
+    fn as_node_id(&self) -> usize {
+        match self {
+            Val::Node(id) => *id,
+            _ => panic!("invalid execution plan, non-node value feeds into thing expecting node value")
         }
     }
 }
@@ -490,7 +519,8 @@ impl Display for Val {
         match self {
             Val::Null=> f.write_str("NULL"),
             Val::String(s) => f.write_str(&s),
-            Val::Node(id) => f.write_str(&format!("Node({})", id))
+            Val::Node(id) => f.write_str(&format!("Node({})", id)),
+            Val::Rel{node, rel_index} => f.write_str(&format!("Rel({}/{})", node, rel_index))
         }
     }
 }
@@ -509,5 +539,29 @@ impl Graph {
         } else {
             None
         }
+    }
+
+    fn get_rel_prop(&self, node_id: usize, rel_index: usize, prop: Token) -> Option<Val> {
+        if let Some(v) = self.nodes[node_id].rels[rel_index].properties.get(&prop) {
+            Some(v.clone())
+        } else {
+            None
+        }
+    }
+
+    fn add_rel(&mut self, from: usize, to: usize, rel_type: Token) {
+        let props = Rc::new(Default::default());
+        self.nodes[from].rels.push(RelHalf{
+            rel_type,
+            dir: Dir::Out,
+            other_node: to,
+            properties: Rc::clone(&props)
+        });
+        self.nodes[to].rels.push(RelHalf{
+            rel_type,
+            dir: Dir::In,
+            other_node: from,
+            properties: props,
+        })
     }
 }
