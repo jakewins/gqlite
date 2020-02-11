@@ -1,5 +1,5 @@
 [package]
-name = "graf"
+name = "g"
 version = "0.1.0"
 authors = ["Jacob Davis-Hansson <jakewins@gmail.com>"]
 edition = "2018"
