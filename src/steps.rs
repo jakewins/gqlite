@@ -32,7 +32,7 @@ pub struct Expand<'i> {
 }
 
 impl Expand<'_> {
-    pub fn new<'i> (src: Box<dyn Step + 'i>, src_slot: usize, rel_slot: usize, dst_slot: usize, rel_type: Token) -> Expand<'i> {
+    pub fn new<'i> (src: Box<dyn Step + 'i>, src_slot: usize, dst_slot: usize, rel_slot: usize, rel_type: Token) -> Expand<'i> {
         return Expand{
             src,
             src_slot,
@@ -149,6 +149,7 @@ pub struct Return<'i> {
 
 impl<'i> Step for Return<'i> {
     fn next(&mut self, ctx: &mut Context, out: &mut Row) -> Result<bool, Error> {
+        println!("----");
         let mut first = true;
         for cell in &self.projections {
             if first {
@@ -159,6 +160,7 @@ impl<'i> Step for Return<'i> {
             }
         }
         println!();
+        println!("----");
         while self.src.next(ctx, out)? {
             first = true;
             for cell in &self.projections {

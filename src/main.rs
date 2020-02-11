@@ -115,6 +115,15 @@ impl Tokens {
             }
         }
     }
+
+    fn get(&self, tok: Token) -> Option<&str> {
+        for (content, candidate) in self.table.iter() {
+            if *candidate == tok {
+                return Some(&content);
+            }
+        }
+        return None
+    }
 }
 
 struct PlanningContext {
