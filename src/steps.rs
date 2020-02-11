@@ -63,7 +63,7 @@ impl<'i> Step for Expand<'i> {
                         // No more rels on this node
                         self.state = NextNode;
                         self.next_rel_index = 0;
-                        continue;
+                        continue
                     }
 
                     let rel = &rels[self.next_rel_index];
@@ -71,7 +71,7 @@ impl<'i> Step for Expand<'i> {
 
                     if rel.rel_type == self.rel_type {
                         out.slots[self.rel_slot] = Val::Rel{ node, rel_index: self.next_rel_index-1 };
-                        out.slots[self.dst_slot] = Val::Node(node);
+                        out.slots[self.dst_slot] = Val::Node( rel.other_node );
                         return Ok(true);
                     }
                 },
