@@ -5,6 +5,7 @@ extern crate pest_derive;
 extern crate clap;
 
 mod steps;
+mod yaml;
 
 use clap::{App, SubCommand, AppSettings};
 
@@ -25,7 +26,7 @@ use std::iter::Map;
 #[grammar = "cypher.pest"]
 pub struct CypherParser;
 
-fn main() {
+fn main() -> Result<(), Error>{
     let matches = App::new("graf")
         .version("0.0")
         .author("Jacob Davis-Hansson <jake@davis-hansson.com>")
@@ -49,15 +50,7 @@ fn main() {
     let lbl_note = tokens.tokenize("Note");
     let lbl_reference = tokens.tokenize("Reference");
     let key_message = tokens.tokenize("message");
-    let mut g = Graph{ nodes: vec![
-        Node::new(vec!( lbl_note ), [ (key_message, Val::String(String::from("a message"))) ].iter().cloned().collect()),
-        Node::new(vec!( lbl_note ), [ (key_message, Val::String(String::from("other message.."))) ].iter().cloned().collect()),
-        Node::new(vec!( lbl_note ), [ (key_message, Val::String(String::from("that other note made me think of this thing"))) ].iter().cloned().collect()),
-        Node::new(vec!( lbl_reference ), Default::default() ),
-    ] };
-    g.add_rel(0, 1, tokens.tokenize("RELATES_TO"));
-    g.add_rel(0, 2, tokens.tokenize("RELATES_TO"));
-    g.add_rel(1, 3, tokens.tokenize("REFERENCES"));
+    let mut g = yaml::load_yaml_graph(&mut tokens,"g.yaml")?;
     let mut pc = PlanningContext{ g: Rc::new(g), slots: Default::default(), anon_rel_seq:0, anon_node_seq: 0, tokens: tokens, };
     let mut plan: Box<dyn Step> = Box::new(Leaf{});
 
@@ -88,7 +81,7 @@ fn main() {
                 // Keep going
             }
             Ok(false) => {
-                return
+                return Ok(())
             }
             Err(e) => {
                 panic!(e.msg)
@@ -100,7 +93,7 @@ fn main() {
 type Token = usize;
 
 
-struct Tokens {
+pub struct Tokens {
     table: HashMap<String, Token>,
 }
 
@@ -417,6 +410,17 @@ pub struct Error {
     msg: String,
 }
 
+impl std::convert::From<std::io::Error> for Error {
+    fn from(e: std::io::Error) -> Self {
+        Error{ msg: format!("from io.error: {:?}", e) }
+    }
+}
+impl std::convert::From<serde_yaml::Error> for Error {
+    fn from(e: serde_yaml::Error) -> Self {
+        Error{ msg: format!("from serde_yaml.error: {:?}", e) }
+    }
+}
+
 #[derive(Debug)]
 pub struct Context {
     g: Rc<Graph>
@@ -538,7 +542,6 @@ impl Display for Val {
 #[derive(Debug)]
 pub struct Graph  {
     nodes: Vec<Node>
-
 }
 
 impl Graph {
@@ -556,6 +559,10 @@ impl Graph {
         } else {
             None
         }
+    }
+
+    fn add_node(&mut self, id: usize, n: Node) {
+        self.nodes.insert(id,n);
     }
 
     fn add_rel(&mut self, from: usize, to: usize, rel_type: Token) {

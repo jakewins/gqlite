@@ -1,0 +1,23 @@
+0:
+  labels: ["Note"]
+  properties:
+    message: This is a note
+  rels:
+    - ["RELATES_TO",1]
+    - ["RELATES_TO",2]
+1:
+  labels: ["Note"]
+  properties:
+    message: This is another note
+2:
+  labels: ["Note"]
+  properties:
+    message: The third note
+  rels:
+    - ["REFERENCES",3]
+3:
+  labels: ["Reference"]
+  properties:
+    url: http://example.com
+  rels:
+    - ["REFERENCES",3]
