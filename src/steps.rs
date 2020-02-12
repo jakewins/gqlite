@@ -1,10 +1,36 @@
 
-use super::{Context, Row, Val, Expr, Error, Token};
+use super::{Context, Row, Val, Expr, Error, Token, PatternGraph, Node};
 use crate::steps::ExpandState::{InNode, NextNode};
 
 pub trait Step: std::fmt::Debug {
     // Produce the next row
     fn next(&mut self, ctx: &mut Context, out: &mut Row) -> Result<bool, Error>;
+}
+
+#[derive(Debug)]
+pub struct Create<'i> {
+    pub src: Box<dyn Step + 'i>,
+
+    pub pg: PatternGraph,
+}
+
+impl<'i> Step for Create<'i> {
+    fn next(&mut self, ctx: &mut Context, out: &mut Row) -> Result<bool, Error> {
+        if ! self.src.next(ctx, out)? {
+            return Ok(false)
+        }
+
+        // Create pg
+        for (_, node) in self.pg.e {
+            ctx.g.add_node(ctx.g.nodes.len(), Node{
+                labels: Default::default(),
+                properties: Default::default(),
+                rels: vec![]
+            })
+        }
+
+        return Ok(true)
+    }
 }
 
 #[derive(Debug)]

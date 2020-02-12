@@ -60,8 +60,7 @@ fn main() -> Result<(), Error>{
                 plan = plan_match(&mut pc, plan, stmt);
             }
             Rule::create_stmt => {
-                let create_stmt = stmt.into_inner();
-                println!("{}", create_stmt.as_str())
+                plan = plan_create(&mut pc, plan, stmt);
             }
             Rule::return_stmt => {
                 plan = plan_return(&mut pc, plan, stmt);
@@ -165,6 +164,17 @@ impl PlanningContext {
     }
 }
 
+fn plan_create<'i>(pc: & mut PlanningContext, src: Box<dyn Step + 'i>, create_stmt: Pair<'i, Rule>) -> Box<dyn Step + 'i> {
+    let mut pg = parse_pattern_graph(pc,create_stmt);
+
+    println!("pg: {:?}", pg);
+
+    // So.. just create all unsolved parts of the pattern?
+
+
+    return src;
+}
+
 fn plan_return<'i>(pc: & mut PlanningContext, src: Box<dyn Step + 'i>, return_stmt: Pair<'i, Rule>) -> Box<dyn Step + 'i> {
     let mut parts = return_stmt.into_inner();
     let projections = parts.next().and_then(|p| Some(plan_return_projections(pc, p))).expect("RETURN must start with projections");
@@ -223,7 +233,7 @@ fn plan_expr(pc: & mut PlanningContext, expression: Pair<Rule>) -> Expr {
 }
 
 #[derive(Debug)]
-struct PatternNode {
+pub struct PatternNode {
     identifier: Token,
     labels: Vec<Token>,
     solved: bool,
@@ -236,7 +246,7 @@ impl PatternNode {
 }
 
 #[derive(Debug)]
-struct PatternRel {
+pub struct PatternRel {
     identifier: Token,
     rel_type: Token,
     left_node: Token,
@@ -245,7 +255,7 @@ struct PatternRel {
 }
 
 #[derive(Debug)]
-struct PatternGraph {
+pub struct PatternGraph {
     e: HashMap<Token, PatternNode>,
     v: Vec<PatternRel>,
 }
@@ -263,37 +273,7 @@ impl PatternGraph {
 
 fn plan_match<'i>(pc: &mut PlanningContext, src: Box<dyn Step + 'i>, match_stmt: Pair<'i, Rule>) -> Box<dyn Step + 'i> {
     let mut plan: Box<dyn Step + 'i> = src;
-    let mut pg: PatternGraph = PatternGraph{ e: HashMap::new(), v: Vec::new()};
-
-    for part in match_stmt.into_inner() {
-        match part.as_rule() {
-            Rule::pattern => {
-                let mut prior_node_id = None;
-                let mut prior_rel: Option<PatternRel> = None;
-                // For each node and rel segment of eg: (n:Message)-[:KNOWS]->()
-                for segment in part.into_inner() {
-                    match segment.as_rule() {
-                        Rule::node => {
-                            let prior_node = parse_pattern_node(pc, segment);
-                            prior_node_id = Some(prior_node.identifier);
-                            pg.merge_node(pc, prior_node);
-                            if let Some(mut rel) = prior_rel {
-                                rel.right_node = prior_node_id;
-                                pg.merge_rel(pc, rel);
-                                prior_rel = None
-                            }
-                        }
-                        Rule::rel => {
-                            prior_rel = Some(parse_pattern_rel(pc,prior_node_id.expect("pattern rel must be preceded by node"), segment));
-                            prior_node_id = None
-                        }
-                        _ => unreachable!(),
-                    }
-                }
-            }
-            _ => unreachable!(),
-        }
-    }
+    let mut pg = parse_pattern_graph(pc, match_stmt);
 
     // Ok, now we have parsed the pattern into a full graph, time to start solving it
     println!("built pg: {:?}", pg);
@@ -362,6 +342,42 @@ fn plan_match<'i>(pc: &mut PlanningContext, src: Box<dyn Step + 'i>, match_stmt:
     }
 
     return plan
+}
+
+fn parse_pattern_graph(pc: &mut PlanningContext, patterns: Pair<Rule>) -> PatternGraph {
+    let mut pg: PatternGraph = PatternGraph{ e: HashMap::new(), v: Vec::new()};
+
+    for part in patterns.into_inner() {
+        match part.as_rule() {
+            Rule::pattern => {
+                let mut prior_node_id = None;
+                let mut prior_rel: Option<PatternRel> = None;
+                // For each node and rel segment of eg: (n:Message)-[:KNOWS]->()
+                for segment in part.into_inner() {
+                    match segment.as_rule() {
+                        Rule::node => {
+                            let prior_node = parse_pattern_node(pc, segment);
+                            prior_node_id = Some(prior_node.identifier);
+                            pg.merge_node(pc, prior_node);
+                            if let Some(mut rel) = prior_rel {
+                                rel.right_node = prior_node_id;
+                                pg.merge_rel(pc, rel);
+                                prior_rel = None
+                            }
+                        }
+                        Rule::rel => {
+                            prior_rel = Some(parse_pattern_rel(pc,prior_node_id.expect("pattern rel must be preceded by node"), segment));
+                            prior_node_id = None
+                        }
+                        _ => unreachable!(),
+                    }
+                }
+            }
+            _ => unreachable!(),
+        }
+    }
+
+    return pg;
 }
 
 // Figures out what step we need to find the specified node
