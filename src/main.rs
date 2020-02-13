@@ -30,7 +30,6 @@ pub struct CypherParser;
 fn main() -> Result<(), Error>{
     let matches = App::new("g")
         .version("0.0")
-        .author("Jacob Davis-Hansson <jake@davis-hansson.com>")
         .about("A graph database in a yaml file!")
         .setting(AppSettings::ArgRequiredElseHelp)
         .args_from_usage(
