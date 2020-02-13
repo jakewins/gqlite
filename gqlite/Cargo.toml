@@ -1,0 +1,12 @@
+[package]
+name = "gqlite"
+version = "0.1.0"
+authors = ["Jacob Davis-Hansson <jake@davis-hansson.com>"]
+edition = "2020"
+
+[dependencies]
+pest = "2.0"
+pest_derive = "2.0"
+clap = "2.33.0"
+serde = "1.0"
+serde_yaml = "0.8"
