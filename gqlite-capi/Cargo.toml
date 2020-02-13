@@ -1,0 +1,17 @@
+[package]
+name = "gqlite-capi"
+version = "0.1.0"
+authors = ["Jacob Davis-Hansson <jake@davis-hansson.com>"]
+edition = "2018"
+description = """
+A C API for gqlite
+"""
+workspace = ".."
+
+[lib]
+name = "gqlite"
+crate-type = ["staticlib", "cdylib"]
+
+[dependencies]
+libc = "0.2"
+gqlite = { version = "0", path = ".." }

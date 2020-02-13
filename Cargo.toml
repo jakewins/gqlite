@@ -2,7 +2,13 @@
 name = "gqlite"
 version = "0.1.0"
 authors = ["Jacob Davis-Hansson <jake@davis-hansson.com>"]
-edition = "2020"
+edition = "2018"
+
+
+[workspace]
+members = [
+  "gqlite-capi",
+]
 
 [dependencies]
 pest = "2.0"
