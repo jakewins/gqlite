@@ -8,7 +8,7 @@ mod steps;
 mod yaml;
 mod gram;
 
-use clap::{App, SubCommand, AppSettings};
+use clap::{App, SubCommand, AppSettings, Arg};
 
 use pest::Parser;
 
@@ -28,18 +28,20 @@ use std::iter::Map;
 pub struct CypherParser;
 
 fn main() -> Result<(), Error>{
-    let matches = App::new("graf")
+    let matches = App::new("g")
         .version("0.0")
         .author("Jacob Davis-Hansson <jake@davis-hansson.com>")
         .about("A graph database in a yaml file!")
         .setting(AppSettings::ArgRequiredElseHelp)
         .args_from_usage(
-            "<QUERY> 'Query to execute'\
-            -f, --file=[FILE] @graf.yaml 'Sets the db file to use'\
-            -h, --help 'Print help information'")
+            "-f, --file=[FILE] @graph.gram 'Sets the gram file to use'
+            -h, --help 'Print help information'
+            <QUERY> 'Query to execute'")
         .get_matches();
 
     let query_str = matches.value_of("QUERY").unwrap();
+
+    let path = matches.value_of("file").unwrap_or("graph.gram");
 
     let query = CypherParser::parse(Rule::query, &query_str)
         .expect("unsuccessful parse") // unwrap the parse result
@@ -51,7 +53,7 @@ fn main() -> Result<(), Error>{
     let lbl_note = tokens.tokenize("Note");
     let lbl_reference = tokens.tokenize("Reference");
     let key_message = tokens.tokenize("message");
-    let mut g = gram::load(&mut tokens, "miserables.gram")?;
+    let mut g = gram::load(&mut tokens, path)?;
     let mut pc = PlanningContext{ g: Rc::new(g), slots: Default::default(), anon_rel_seq:0, anon_node_seq: 0, tokens: tokens, };
     let mut plan: Box<dyn Step> = Box::new(Leaf{});
 
