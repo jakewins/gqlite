@@ -21,13 +21,13 @@ impl<'i> Step for Create<'i> {
         }
 
         // Create pg
-        for (_, node) in self.pg.e {
-            ctx.g.add_node(ctx.g.nodes.len(), Node{
-                labels: Default::default(),
-                properties: Default::default(),
-                rels: vec![]
-            })
-        }
+//        for (_, node) in self.pg.e {
+//            ctx.g.add_node(ctx.g.nodes.len(), Node{
+//                labels: Default::default(),
+//                properties: Default::default(),
+//                rels: vec![]
+//            })
+//        }
 
         return Ok(true)
     }

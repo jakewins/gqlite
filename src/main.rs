@@ -6,6 +6,7 @@ extern crate clap;
 
 mod steps;
 mod yaml;
+mod gram;
 
 use clap::{App, SubCommand, AppSettings};
 
@@ -50,7 +51,7 @@ fn main() -> Result<(), Error>{
     let lbl_note = tokens.tokenize("Note");
     let lbl_reference = tokens.tokenize("Reference");
     let key_message = tokens.tokenize("message");
-    let mut g = yaml::load_yaml_graph(&mut tokens,"g.yaml")?;
+    let mut g = gram::load(&mut tokens, "miserables.gram")?;
     let mut pc = PlanningContext{ g: Rc::new(g), slots: Default::default(), anon_rel_seq:0, anon_node_seq: 0, tokens: tokens, };
     let mut plan: Box<dyn Step> = Box::new(Leaf{});
 

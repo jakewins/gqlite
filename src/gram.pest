@@ -1,0 +1,56 @@
+
+WHITESPACE = _{ " " | "\t" | "\r" | "\n" }
+
+expr = { string | id | num }
+//
+// id = { (( ASCII_ALPHA | "_" | "-" ) +) | ("`" ~ str_inner ~ "`") }
+id = { ("`" ~ id_inner ~ "`" ) | (( ASCII_ALPHA | "_" | "-" ) +) }
+
+id_inner = @{ id_char* }
+id_char = {
+    !("`" | "\\") ~ ANY
+    | "\\" ~ ("`" | "\\" | "/" | "b" | "f" | "n" | "r" | "t")
+}
+
+//
+// prop_lookup = { id ~ ("." ~ id)+ }
+//
+string = ${ "\"" ~ str_inner ~ "\"" }
+str_inner = @{ char* }
+char = {
+    !("\"" | "`" | "\\") ~ ANY
+    | "\\" ~ ("\"" | "\\" | "/" | "b" | "f" | "n" | "r" | "t")
+}
+
+num = { int ~ ("." ~ ASCII_DIGIT*)? ~ (^"e" ~ int)? }
+int = { ("+" | "-")? ~ ASCII_DIGIT+ }
+
+map = {
+  "{" ~ "}" |
+  "{" ~ map_pair ~ ("," ~ map_pair)* ~ "}"
+}
+map_pair = { id ~ ":" ~ expr }
+//
+//
+node = { "(" ~ id?  ~ map? ~ ")" }
+
+// node = { "(" ~ id? ~ ( ":" ~ label )? ~ map? ~ ")" }
+// label = { id }
+//
+rel = { "<"? ~ "-" ~ ( "[" ~ id? ~ ( ":" ~ rel_type )? ~ map? ~ "]" )? ~ "-" ~ ">"? }
+rel_type = { id }
+//
+path = { node ~ ( rel ~ node )+ }
+//
+// projection = { expr ~ ("AS" ~ id)? }
+// projections = { projection ~ ( "," ~ projection )* }
+//
+// create_stmt = { "CREATE" ~ pattern }
+// match_stmt = { "MATCH" ~ pattern }
+// return_stmt = { "RETURN" ~ projections }
+//
+// statement = _{ create_stmt | match_stmt }
+
+//  (`Napoleon` {name: "Napoleon", group:1})
+
+gram = { SOI ~ ( path | node ) * ~ EOI }
