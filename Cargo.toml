@@ -10,6 +10,11 @@ members = [
   "gqlite-capi",
 ]
 
+
+[lib]
+name = "gqlite"
+crate-type = ["rlib"]
+
 [dependencies]
 pest = "2.0"
 pest_derive = "2.0"

@@ -17,7 +17,10 @@ db = lib.gqlite_open(c_char_p("gram://miserables.gram".encode('utf-8')))
 cursor = lib.gqlite_cursor_new(db)
 
 res = lib.gqlite_run(cursor, c_char_p("MATCH (n:Note) RETURN n.message".encode('utf-8')))
-print(f"{cursor}")
+print(f"run => {res}")
 
 res = lib.gqlite_cursor_next(cursor)
 print(f"cursor.next => {res}")
+
+res = lib.gqlite_close(db)
+print(f"db.close => {res}")
