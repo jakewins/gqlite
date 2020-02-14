@@ -39,13 +39,13 @@ pub enum LogicalPlan {
     }
 }
 
-trait Tokenizer : Debug {
+pub trait Tokenizer : Debug {
     fn tokenize(&self, content: &str) -> Token;
 }
 
 #[derive(Debug)]
 pub struct Frontend {
-    tokenizer: Rc<dyn Tokenizer>,
+    pub tokenizer: Rc<dyn Tokenizer>,
 }
 
 impl Frontend {

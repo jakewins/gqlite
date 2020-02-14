@@ -1,5 +1,5 @@
 use crate::{Cursor, Error};
-use crate::frontend::LogicalPlan;
+use crate::frontend::{LogicalPlan, Tokenizer};
 use std::fmt::Debug;
 use std::rc::Rc;
 
@@ -14,7 +14,7 @@ pub trait PreparedStatement: Debug {
 // in the planning side and in the API to not have to deal with different backends having different
 // generics. Much of that difficulty is likely my poor Rust skills tho.
 pub trait Backend: Debug {
-    fn tokenizer(&self) -> Rc<Tokenizer>;
+    fn tokenizer(&self) -> Rc<dyn Tokenizer>;
 
     // Convert a logical plan into something executable
     fn prepare(&self, plan: LogicalPlan) -> Result<Box<dyn PreparedStatement>, Error>;
@@ -26,7 +26,7 @@ pub(crate) mod gram {
     use std::rc::Rc;
     use std::cell::RefCell;
     use super::PreparedStatement;
-    use crate::frontend::{LogicalPlan};
+    use crate::frontend::{LogicalPlan, Tokenizer};
 
     struct Expand {
 
@@ -132,7 +132,7 @@ pub(crate) mod gram {
 
     impl super::Backend for GramBackend {
 
-        fn tokenizer(&self) -> Rc<Tokenizer> {
+        fn tokenizer(&self) -> Rc<dyn Tokenizer> {
             unimplemented!()
         }
 

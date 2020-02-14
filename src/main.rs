@@ -1,18 +1,9 @@
 
 extern crate clap;
 
-use gqlite::{Error, Tokens, Database, Cursor};
+use gqlite::{Error, Database, Cursor};
 
-use clap::{App, SubCommand, AppSettings, Arg};
-
-use pest::Parser;
-
-use pest::iterators::{Pair};
-use std::any::Any;
-use std::collections::{HashMap, HashSet};
-use std::rc::Rc;
-use std::fmt::{Display, Formatter, Write};
-use std::fmt;
+use clap::{App, AppSettings, Arg};
 
 fn main() -> Result<(), Error>{
     let matches = App::new("g")

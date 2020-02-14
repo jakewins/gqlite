@@ -5,7 +5,7 @@ extern crate pest_derive;
 mod backend;
 mod frontend;
 
-use std::fmt::{Display, Formatter};
+use std::fmt::{Display, Formatter, Debug};
 use std::fmt;
 
 use backend::Backend;
@@ -38,38 +38,34 @@ impl Database {
         let mut prepped = self.backend.prepare(plan)?;
 
         // The API then allows us to modify this to reuse existing CursorState if we like
-        cursor.state = Some(CursorState{
-            prep: prepped,
-            row
-        });
-
-        return Ok(())
+        prepped.run(cursor)
     }
 }
 
-// Not sure if this is sensible; idea being that users can allocate cursors up front, and they
-// can retain allocation-heavy state (like rows) across queries, giving users control of allocation.
-#[derive(Debug)]
-struct CursorState {
-    prep: Box<dyn PreparedStatement>,
-    row: Row,
+// Backends provide this
+trait CursorState : Debug {
+    fn next(&mut self, row:  &mut Row) -> Result<bool, Error>;
 }
 
+// Cursors are like iterators, except they don't require malloc for each row; the row you read is
+// valid until next time you call "next", or until the transaction you are in is closed.
 #[derive(Debug)]
 pub struct Cursor {
-    state: Option<CursorState>,
+    state: Option<Box<dyn CursorState>>,
+    row: Row,
 }
 
 impl Cursor {
     pub fn new() -> Cursor {
         return Cursor {
             state: None,
+            row: Row { slots: vec![] }
         }
     }
     pub fn next(&mut self) -> Result<bool, Error> {
         match &mut self.state {
             Some(state) => {
-                return state.prep.next(&mut state.row)
+                return state.next(&mut self.row)
             }
             None => {
                 panic!("Use of uninitialized cursor")
