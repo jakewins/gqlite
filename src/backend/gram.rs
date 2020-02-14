@@ -6,6 +6,33 @@ use super::PreparedStatement;
 use crate::frontend::{LogicalPlan, Tokenizer};
 use std::fmt::Debug;
 
+#[derive(Debug)]
+pub struct GramBackend {
+    tokens: Rc<RefCell<Tokens>>,
+    g: Rc<Graph>,
+}
+
+impl GramBackend {
+    pub fn open(path: &str) -> Result<GramBackend, Error> {
+
+        let mut tokens = Tokens { table: Default::default() };
+        let mut g = parser::load(&mut tokens, path)?;
+
+        return Ok(GramBackend {
+            tokens: Rc::new(RefCell::new(tokens)), g: Rc::new(g)
+        })
+    }
+}
+
+impl super::Backend for GramBackend {
+    fn tokenizer(&self) -> Rc<dyn Tokenizer> {
+        unimplemented!()
+    }
+
+    fn prepare(&self, plan: LogicalPlan) -> Result<Box<dyn PreparedStatement>, Error> {
+        unimplemented!()
+    }
+}
 
 #[derive(Debug)]
 pub struct Tokens {
@@ -31,24 +58,6 @@ impl Tokens {
             }
         }
         return None
-    }
-}
-
-#[derive(Debug)]
-pub struct GramBackend {
-    tokens: Rc<RefCell<Tokens>>,
-    g: Rc<Graph>,
-}
-
-impl GramBackend {
-    pub fn open(path: &str) -> Result<GramBackend, Error> {
-
-        let mut tokens = Tokens { table: Default::default() };
-        let mut g = parser::load(&mut tokens, path)?;
-
-        return Ok(GramBackend {
-            tokens: Rc::new(RefCell::new(tokens)), g: Rc::new(g)
-        })
     }
 }
 
@@ -96,16 +105,6 @@ impl Expr {
     }
 }
 
-impl super::Backend for GramBackend {
-
-    fn tokenizer(&self) -> Rc<dyn Tokenizer> {
-        unimplemented!()
-    }
-
-    fn prepare(&self, plan: LogicalPlan) -> Result<Box<dyn PreparedStatement>, Error> {
-        unimplemented!()
-    }
-}
 
 trait PlanStep: Debug {
     fn next(&mut self, ctx: &mut Context, row: &mut Row) -> Result<bool, Error>;
@@ -182,7 +181,6 @@ impl Expand {
     }
 }
 
-
 // For each src row, perform a full no de scan with the specified filters
 #[derive(Debug)]
 struct NodeScan {
@@ -216,6 +214,58 @@ impl PlanStep for NodeScan {
             }
             return Ok(false)
         }
+    }
+}
+
+#[derive(Debug)]
+struct Argument;
+
+impl PlanStep for Argument {
+    fn next(&mut self, ctx: &mut Context, out: &mut Row) -> Result<bool, Error> {
+        unimplemented!()
+    }
+}
+
+#[derive(Debug)]
+struct Projection {
+    pub expr: Expr,
+    pub alias: String,
+}
+
+#[derive(Debug)]
+struct Return {
+    pub src: Box<dyn PlanStep>,
+    pub projections: Vec<Projection>,
+}
+
+impl PlanStep for Return {
+    fn next(&mut self, ctx: &mut Context, out: &mut Row) -> Result<bool, Error> {
+        println!("----");
+        let mut first = true;
+        for cell in &self.projections {
+            if first {
+                print!("{}", cell.alias);
+                first = false
+            } else {
+                print!(", {}", cell.alias)
+            }
+        }
+        println!();
+        println!("----");
+        while self.src.next(ctx, out)? {
+            first = true;
+            for cell in &self.projections {
+                let v = cell.expr.eval(ctx, out)?;
+                if first {
+                    print!("{}", v);
+                    first = false
+                } else {
+                    print!(", {}", v)
+                }
+            }
+            println!();
+        }
+        Ok(false)
     }
 }
 
