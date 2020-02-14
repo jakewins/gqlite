@@ -1,3 +1,6 @@
+
+extern crate clap;
+
 use gqlite::{Error, Tokens, Database, Cursor};
 
 use clap::{App, SubCommand, AppSettings, Arg};

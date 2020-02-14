@@ -1,18 +1,32 @@
 use crate::{Cursor, Error};
+use crate::frontend::LogicalPlan;
+use std::fmt::Debug;
+use std::rc::Rc;
 
-trait Backend<Plan, PlanCtx> {
-    fn new_planning_context() -> PlanCtx;
-    fn step_expand(src: Plan) -> Plan;
-    fn step_node_scan(src: Plan) -> Plan;
-
-    fn run(plan: Plan, cursor: &mut Cursor) -> Result<(), Error>;
+pub trait PreparedStatement: Debug {
+    fn run(&mut self, cursor: &mut Cursor) -> Result<(), Error>;
 }
 
-mod gram {
-    use crate::{Error, Cursor, Token, Val, Dir};
+// I don't know if any of this makes any sense, but the thoughts here is like.. lets make it
+// easy to build experimental backends, that can convert a logical plan tree into something that
+// can be executed. I've tried really hard to avoid making this trait have generics on it,
+// though I'm not sure it's possible to maintain that invariant.. It does simplify a lot of stuff
+// in the planning side and in the API to not have to deal with different backends having different
+// generics. Much of that difficulty is likely my poor Rust skills tho.
+pub trait Backend: Debug {
+    fn tokenizer(&self) -> Rc<Tokenizer>;
+
+    // Convert a logical plan into something executable
+    fn prepare(&self, plan: LogicalPlan) -> Result<Box<dyn PreparedStatement>, Error>;
+}
+
+pub(crate) mod gram {
+    use crate::{Error, Token, Val, Dir, Slot, Row};
     use std::collections::{HashMap, HashSet};
     use std::rc::Rc;
     use std::cell::RefCell;
+    use super::PreparedStatement;
+    use crate::frontend::{LogicalPlan};
 
     struct Expand {
 
@@ -26,7 +40,6 @@ mod gram {
         Expand(Expand),
         NodeScan(NodeScan),
     }
-    struct PlanningContext;
 
     #[derive(Debug)]
     pub struct Tokens {
@@ -55,7 +68,8 @@ mod gram {
         }
     }
 
-    struct GramBackend {
+    #[derive(Debug)]
+    pub struct GramBackend {
         tokens: Rc<RefCell<Tokens>>,
         g: Rc<Graph>,
     }
@@ -72,30 +86,66 @@ mod gram {
         }
     }
 
-    impl super::Backend<Plan, PlanningContext> for GramBackend {
-        fn new_planning_context() -> PlanningContext {
+    struct Context {
+        g: Rc<Graph>
+    }
+
+
+    #[derive(Debug)]
+    pub enum Expr {
+        Lit(Val),
+        // Lookup a property by id
+        Prop(Box<Expr>, Vec<Token>),
+        Slot(Slot),
+    }
+
+    impl Expr {
+
+        fn eval_prop(ctx: &mut Context, row: &mut Row, expr: &Box<Expr>, props: &Vec<Token>) -> Result<Val, Error> {
+            let mut v = expr.eval(ctx, row)?;
+            for prop in props {
+                v = match v {
+                    Val::Null=> Err(Error{ msg: format!("NULL has no property {}", prop) }),
+                    Val::String(_) => Err(Error{ msg: format!("STRING has no property {}", prop) }),
+                    Val::Node(id) => match ctx.g.get_node_prop(id, *prop) {
+                        Some(v) => Ok(v),
+                        None => Ok(Val::Null),
+                    },
+                    Val::Rel{node, rel_index} => match ctx.g.get_rel_prop(node, rel_index, *prop) {
+                        Some(v) => Ok(v),
+                        None => Ok(Val::Null),
+                    },
+                }?;
+            }
+            return Ok(v)
+        }
+
+        fn eval(&self, ctx: &mut Context, row: &mut Row) -> Result<Val, Error> {
+            match self {
+                Expr::Prop(expr, props) => Expr::eval_prop(ctx, row, expr, props),
+                Expr::Slot(slot) => Ok(row.slots[*slot].clone()), // TODO not this
+                Expr::Lit(v) => Ok(v.clone()), // TODO not this
+                _ => panic!("{:?}", self)
+            }
+        }
+    }
+
+    impl super::Backend for GramBackend {
+
+        fn tokenizer(&self) -> Rc<Tokenizer> {
             unimplemented!()
         }
 
-        fn step_expand(src: Plan) -> Plan {
-            unimplemented!()
-        }
-
-        fn step_node_scan(src: Plan) -> Plan {
-            unimplemented!()
-        }
-
-        fn run(plan: Plan, cursor: &mut Cursor) -> Result<(), Error> {
+        fn prepare(&self, plan: LogicalPlan) -> Result<Box<dyn PreparedStatement>, Error> {
             unimplemented!()
         }
     }
 
     mod parser {
-        use std::collections::{HashMap, HashSet};
+        use std::collections::{HashMap};
         use crate::pest::Parser;
         use crate::backend::gram::{Tokens, Node, Graph};
-        use crate::{Error, Token, Val, Dir};
-        use std::rc::Rc;
+        use crate::{Error, Token, Val};
 
         #[derive(Parser)]
         #[grammar = "gram.pest"]
@@ -219,7 +269,6 @@ mod gram {
             }
         }
     }
-
 
     #[derive(Debug)]
     pub struct Graph  {
