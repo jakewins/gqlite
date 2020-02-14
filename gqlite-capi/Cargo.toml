@@ -15,3 +15,4 @@ crate-type = ["staticlib", "cdylib"]
 [dependencies]
 libc = "0.2"
 gqlite = { version = "0", path = ".." }
+lazy_static = "1.4.0"

@@ -31,7 +31,8 @@ fn main() -> Result<(), Error>{
     let path = matches.value_of("file").unwrap_or("graph.gram");
 
     let mut db = Database::open(path)?;
-    let mut cursor = db.run(query_str)?;
+    let mut cursor = Cursor::new();
+    db.run(query_str, &mut cursor)?;
 
     while cursor.next()? {
 

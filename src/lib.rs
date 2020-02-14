@@ -27,6 +27,7 @@ use std::cell::RefCell;
 #[grammar = "cypher.pest"]
 pub struct CypherParser;
 
+#[derive(Debug)]
 pub struct Database {
     g: Rc<Graph>,
     tokens: Rc<RefCell<Tokens>>,
@@ -44,7 +45,7 @@ impl Database {
     }
 
     // TODO obviously the query string shouldn't be static
-    pub fn run(&mut self, query_str: &'static str) -> Result<Cursor, Error> {
+    pub fn run(&mut self, query_str: &'static str, cursor: &mut Cursor) -> Result<(), Error> {
         let query = CypherParser::parse(Rule::query, query_str)
             .expect("unsuccessful parse") // unwrap the parse result
             .next().unwrap(); // get and unwrap the `file` rule; never fails
@@ -75,83 +76,44 @@ impl Database {
         let mut ctx = pc.new_execution_ctx();
         let mut row = pc.new_row();
 
-        return Ok(Cursor {
-            ctx, plan, row
-        })
+        // The API then allows us to modify this to reuse existing CursorState if we like
+        cursor.state = Some(CursorState{
+            plan,
+            ctx,
+            row
+        });
+
+        return Ok(())
     }
 }
 
-pub struct Cursor {
+// Not sure if this is sensible; idea being that users can allocate cursors up front, and they
+// can retain allocation-heavy state (like rows) across queries, giving users control of allocation.
+#[derive(Debug)]
+struct CursorState {
     plan: Box<dyn Step>,
     ctx: Context,
     row: Row,
 }
 
-impl Cursor {
-    pub fn next(&mut self) -> Result<bool, Error> {
-        self.plan.next(&mut self.ctx, &mut self.row)
-    }
+#[derive(Debug)]
+pub struct Cursor {
+    state: Option<CursorState>,
 }
 
-fn main() -> Result<(), Error>{
-    let matches = App::new("g")
-        .version("0.0")
-        .about("A graph database in a yaml file!")
-        .setting(AppSettings::ArgRequiredElseHelp)
-        .args_from_usage(
-            "-f, --file=[FILE] @graph.gram 'Sets the gram file to use'
-            -h, --help 'Print help information'
-            <QUERY> 'Query to execute'")
-        .get_matches();
-
-    let query_str = matches.value_of("QUERY").unwrap();
-
-    let path = matches.value_of("file").unwrap_or("graph.gram");
-
-    let query = CypherParser::parse(Rule::query, &query_str)
-        .expect("unsuccessful parse") // unwrap the parse result
-        .next().unwrap(); // get and unwrap the `file` rule; never fails
-
-    let mut statement_count: u64 = 0;
-
-    let mut tokens = Tokens { table: Default::default() };
-    let lbl_note = tokens.tokenize("Note");
-    let lbl_reference = tokens.tokenize("Reference");
-    let key_message = tokens.tokenize("message");
-    let mut g = gram::load(&mut tokens, path)?;
-    let mut pc = PlanningContext{ g: Rc::new(g), slots: Default::default(), anon_rel_seq:0, anon_node_seq: 0, tokens: Rc::new(RefCell::new(tokens)), };
-    let mut plan: Box<dyn Step> = Box::new(Leaf{});
-
-    for stmt in query.into_inner() {
-        match stmt.as_rule() {
-            Rule::match_stmt => {
-                plan = plan_match(&mut pc, plan, stmt);
-            }
-            Rule::create_stmt => {
-                plan = plan_create(&mut pc, plan, stmt);
-            }
-            Rule::return_stmt => {
-                plan = plan_return(&mut pc, plan, stmt);
-            }
-            Rule::EOI => (),
-            _ => unreachable!(),
+impl Cursor {
+    pub fn new() -> Cursor {
+        return Cursor {
+            state: None,
         }
     }
-
-    println!("plan: {:?}", plan);
-
-    let mut ctx = pc.new_execution_ctx();
-    let mut row = pc.new_row();
-    loop {
-        match plan.next(&mut ctx, &mut row) {
-            Ok(true) => {
-                // Keep going
+    pub fn next(&mut self) -> Result<bool, Error> {
+        match &mut self.state {
+            Some(state) => {
+                return state.plan.next(&mut state.ctx, &mut state.row)
             }
-            Ok(false) => {
-                return Ok(())
-            }
-            Err(e) => {
-                panic!(e.msg)
+            None => {
+                panic!("Use of uninitialized cursor")
             }
         }
     }
@@ -159,7 +121,7 @@ fn main() -> Result<(), Error>{
 
 type Token = usize;
 
-
+#[derive(Debug)]
 pub struct Tokens {
     table: HashMap<String, Token>,
 }

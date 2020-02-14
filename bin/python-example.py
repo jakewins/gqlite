@@ -13,10 +13,10 @@ else:
 
 lib = cdll.LoadLibrary('/home/jake/Code/toy/graf/target/debug/{}gqlite.{}'.format(prefix, ext))
 
-db = lib.gqlite_open(c_char_p("gram://miserables.gram".encode('utf-8')))
+db = lib.gqlite_open(c_char_p("/home/jake/Code/toy/graf/miserables.gram".encode('utf-8')))
 cursor = lib.gqlite_cursor_new(db)
 
-res = lib.gqlite_run(cursor, c_char_p("MATCH (n:Note) RETURN n.message".encode('utf-8')))
+res = lib.gqlite_run(db, cursor, c_char_p("MATCH (n:Person) RETURN n.name".encode('utf-8')))
 print(f"run => {res}")
 
 res = lib.gqlite_cursor_next(cursor)
