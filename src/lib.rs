@@ -4,7 +4,6 @@ extern crate pest_derive;
 extern crate clap;
 
 mod steps;
-mod yaml;
 mod gram;
 
 use clap::{App, SubCommand, AppSettings, Arg};
@@ -463,11 +462,6 @@ pub struct Error {
 impl std::convert::From<std::io::Error> for Error {
     fn from(e: std::io::Error) -> Self {
         Error{ msg: format!("from io.error: {:?}", e) }
-    }
-}
-impl std::convert::From<serde_yaml::Error> for Error {
-    fn from(e: serde_yaml::Error) -> Self {
-        Error{ msg: format!("from serde_yaml.error: {:?}", e) }
     }
 }
 
