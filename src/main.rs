@@ -14,7 +14,7 @@ use std::fmt;
 fn main() -> Result<(), Error>{
     let matches = App::new("g")
         .version("0.0")
-        .about("A graph database in a yaml file!")
+        .about("A graph database in a gram file!")
         .setting(AppSettings::ArgRequiredElseHelp)
         .args_from_usage(
             "-f, --file=[FILE] @graph.gram 'Sets the gram file to use'
