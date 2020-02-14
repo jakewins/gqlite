@@ -10,7 +10,6 @@ use std::fmt;
 
 use backend::Backend;
 use crate::frontend::Frontend;
-use crate::backend::PreparedStatement;
 
 #[derive(Debug)]
 pub struct Database {

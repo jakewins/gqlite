@@ -3,7 +3,7 @@ extern crate clap;
 
 use gqlite::{Error, Database, Cursor};
 
-use clap::{App, AppSettings, Arg};
+use clap::{App, AppSettings};
 
 fn main() -> Result<(), Error>{
     let matches = App::new("g")

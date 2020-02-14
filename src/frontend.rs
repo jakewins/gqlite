@@ -226,12 +226,12 @@ pub struct PatternGraph {
 }
 
 impl PatternGraph {
-    fn merge_node(&mut self, pc: &mut PlanningContext, mut n: PatternNode) {
+    fn merge_node(&mut self, pc: &mut PlanningContext, n: PatternNode) {
         let entry = self.e.entry(n.identifier);
         entry.and_modify(|on| on.merge(&n)).or_insert(n);
     }
 
-    fn merge_rel(&mut self, pc: &mut PlanningContext, mut r: PatternRel) {
+    fn merge_rel(&mut self, pc: &mut PlanningContext, r: PatternRel) {
         self.v.push(r)
     }
 }
