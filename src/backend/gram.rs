@@ -8,15 +8,6 @@ use std::fmt::Debug;
 
 
 #[derive(Debug)]
-struct NodeScan {
-
-}
-
-trait PlanStep: Debug {
-    fn next(&mut self, ctx: &mut Context, row: &mut Row) -> Result<bool, Error>;
-}
-
-#[derive(Debug)]
 pub struct Tokens {
     table: HashMap<String, Token>,
 }
@@ -116,6 +107,10 @@ impl super::Backend for GramBackend {
     }
 }
 
+trait PlanStep: Debug {
+    fn next(&mut self, ctx: &mut Context, row: &mut Row) -> Result<bool, Error>;
+}
+
 #[derive(Debug)]
 pub enum ExpandState {
     NextNode,
@@ -187,6 +182,42 @@ impl Expand {
     }
 }
 
+
+// For each src row, perform a full no de scan with the specified filters
+#[derive(Debug)]
+struct NodeScan {
+    pub src: Box<dyn PlanStep>,
+
+    // Next node id in g to return
+    pub next_node: usize,
+
+    // Where should this scan write its output?
+    pub slot: usize,
+
+    // If the empty string, return all nodes, otherwise only nodes with the specified label
+    pub labels: Option<Token>,
+}
+
+impl PlanStep for NodeScan {
+    fn next(&mut self, ctx: &mut Context, out: &mut Row) -> Result<bool, Error> {
+        loop {
+            if ctx.g.nodes.len() > self.next_node {
+                let node = ctx.g.nodes.get(self.next_node).unwrap();
+                if let Some(tok) = self.labels {
+                    if !node.labels.contains(&tok) {
+                        self.next_node += 1;
+                        continue;
+                    }
+                }
+
+                out.slots[self.slot] = Val::Node(self.next_node);
+                self.next_node += 1;
+                return Ok(true)
+            }
+            return Ok(false)
+        }
+    }
+}
 
 mod parser {
     use std::collections::{HashMap};
