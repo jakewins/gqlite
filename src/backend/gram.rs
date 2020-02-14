@@ -4,18 +4,16 @@ use std::rc::Rc;
 use std::cell::RefCell;
 use super::PreparedStatement;
 use crate::frontend::{LogicalPlan, Tokenizer};
+use std::fmt::Debug;
 
-struct Expand {
 
-}
-
+#[derive(Debug)]
 struct NodeScan {
 
 }
 
-enum Plan {
-    Expand(Expand),
-    NodeScan(NodeScan),
+trait PlanStep: Debug {
+    fn next(&mut self, ctx: &mut Context, row: &mut Row) -> Result<bool, Error>;
 }
 
 #[derive(Debug)]
@@ -117,6 +115,78 @@ impl super::Backend for GramBackend {
         unimplemented!()
     }
 }
+
+#[derive(Debug)]
+pub enum ExpandState {
+    NextNode,
+    InNode,
+}
+
+#[derive(Debug)]
+struct Expand {
+    pub src: Box<dyn PlanStep>,
+
+    pub src_slot: usize,
+
+    pub rel_slot: usize,
+
+    pub dst_slot: usize,
+
+    pub rel_type: Token,
+
+    // In the current adjacency list, what is the next index we should return?
+    pub next_rel_index: usize,
+
+    pub state: ExpandState,
+}
+
+impl Expand {
+    pub fn new (src: Box<dyn PlanStep>, src_slot: usize, dst_slot: usize, rel_slot: usize, rel_type: Token) -> Expand {
+        return Expand{
+            src,
+            src_slot,
+            rel_slot,
+            dst_slot,
+            rel_type,
+            next_rel_index: 0,
+            state: ExpandState::NextNode
+        }
+    }
+
+    fn next(&mut self, ctx: &mut Context, out: &mut Row) -> Result<bool, Error> {
+        loop {
+            match &self.state {
+                ExpandState::NextNode => {
+                    // Pull in the next node
+                    if ! self.src.next(ctx, out)? {
+                        return Ok(false)
+                    }
+                    self.state = ExpandState::InNode;
+                },
+                ExpandState::InNode => {
+                    let node = out.slots[self.src_slot].as_node_id();
+                    let rels = &ctx.g.nodes[node].rels;
+                    if self.next_rel_index >= rels.len() {
+                        // No more rels on this node
+                        self.state = ExpandState::NextNode;
+                        self.next_rel_index = 0;
+                        continue
+                    }
+
+                    let rel = &rels[self.next_rel_index];
+                    self.next_rel_index += 1;
+
+                    if rel.rel_type == self.rel_type {
+                        out.slots[self.rel_slot] = Val::Rel{ node, rel_index: self.next_rel_index-1 };
+                        out.slots[self.dst_slot] = Val::Node( rel.other_node );
+                        return Ok(true);
+                    }
+                },
+            }
+        }
+    }
+}
+
 
 mod parser {
     use std::collections::{HashMap};
