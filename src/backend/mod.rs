@@ -2,7 +2,7 @@
 // Backends implement the actual storage of graphs, and provide implementations of the
 // logical operators the frontend emits that can act on that storage.
 //
-use crate::{Cursor, Error, Token};
+use crate::{Cursor, Error};
 use crate::frontend::{LogicalPlan};
 use std::fmt::Debug;
 use std::rc::Rc;
@@ -26,6 +26,14 @@ pub trait Backend: Debug {
     fn prepare(&self, plan: Box<LogicalPlan>) -> Result<Box<dyn PreparedStatement>, Error>;
 }
 
+
+// gql databases are filled with short string keys. Both things stored in the graph, like property
+// keys, labels and relationship types. But also strings used for identifiers in queries, like
+// "n" in `MATCH (n)`.
+// These are easier for the database to work with, since they are fixed size stack allocated values.
+pub type Token = usize;
+
+// Simple in-memory string-to-token mapper.
 #[derive(Debug)]
 pub struct Tokens {
     table: HashMap<String, Token>,

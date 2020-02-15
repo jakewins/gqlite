@@ -2,14 +2,14 @@
 // The Gram backend is a backend implementation that acts on a Gram file.
 // It is currently single threaded, and provides no data durability guarantees.
 
-use crate::{Error, Token, Val, Dir, Slot, Row, Cursor, frontend, CursorState};
+use crate::{Error, Val, Dir, Slot, Row, Cursor, frontend, CursorState};
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 use std::cell::RefCell;
 use super::PreparedStatement;
 use crate::frontend::{LogicalPlan};
 use std::fmt::Debug;
-use crate::backend::Tokens;
+use crate::backend::{Tokens, Token};
 
 #[derive(Debug)]
 pub struct GramBackend {
@@ -362,8 +362,8 @@ mod parser {
     use std::collections::{HashMap};
     use crate::pest::Parser;
     use crate::backend::gram::{Node, Graph};
-    use crate::{Error, Token, Val};
-    use crate::backend::Tokens;
+    use crate::{Error, Val};
+    use crate::backend::{Tokens, Token};
 
     #[derive(Parser)]
     #[grammar = "backend/gram.pest"]

@@ -73,8 +73,6 @@ impl Cursor {
     }
 }
 
-pub type Token = usize;
-
 #[derive(Debug)]
 pub enum Dir {
     Out, In

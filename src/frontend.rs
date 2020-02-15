@@ -7,10 +7,10 @@ use pest::Parser;
 
 use std::fmt::{Debug};
 use pest::iterators::Pair;
-use crate::{Token, Slot, Val, Error, Row};
+use crate::{Slot, Val, Error, Row};
 use std::collections::HashMap;
 use std::rc::Rc;
-use crate::backend::Tokens;
+use crate::backend::{Tokens, Token};
 use std::cell::RefCell;
 
 #[derive(Parser)]
@@ -59,7 +59,12 @@ impl Frontend {
     }
 }
 
-// The slots here are indexes into the row being produced
+// The ultimate output of the frontend is a logical plan. The logical plan is a tree of operators.
+// The tree describes a stream processing pipeline starting at the leafs and ending at the root.
+//
+// This enumeration is the complete list of supported operators that the planner can emit.
+//
+// The slots are indexes into the row being produced
 #[derive(Debug)]
 pub enum LogicalPlan {
     Argument,
@@ -89,7 +94,7 @@ pub struct Projection {
 
 
 struct PlanningContext {
-    // slot assignments by name in output row
+    // Mapping of names used in the query string to slots in the row being processed
     slots: HashMap<Token, usize>,
 
     // TODO is there some nicer way to do this than Rc+RefCell?
@@ -126,10 +131,6 @@ impl PlanningContext {
         let seq = self.anon_node_seq;
         self.anon_node_seq += 1;
         return self.tokenize(&format!("AnonNode#{}", seq))
-    }
-
-    pub fn new_row(&self) -> Row {
-        return Row{ slots: vec![Val::Null;self.slots.len()] }
     }
 }
 
@@ -240,7 +241,7 @@ impl PatternGraph {
     }
 }
 
-fn plan_match<'i>(pc: &mut PlanningContext, src: LogicalPlan, match_stmt: Pair<'i, Rule>) -> LogicalPlan {
+fn plan_match(pc: &mut PlanningContext, src: LogicalPlan, match_stmt: Pair<Rule>) -> LogicalPlan {
     let mut plan = src;
     let mut pg = parse_pattern_graph(pc, match_stmt);
 
@@ -404,6 +405,3 @@ pub enum Expr {
     Prop(Box<Self>, Vec<Token>),
     Slot(Slot),
 }
-
-// TODO poorly named, "Identifier", not "Node Id", probably just replace this with "Token", or a dedicated "SlotIdentifier"?
-pub type Id = String;
