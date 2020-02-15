@@ -45,6 +45,9 @@ impl GramBackend {
                 next_rel_index: 0,
                 state: ExpandState::NextNode
             })),
+            LogicalPlan::Create { .. } => {
+                panic!("The gram backend does not yet support CREATE statements")
+            }
             LogicalPlan::Return { src, projections } => {
                 let mut converted_projections = Vec::new();
                 for projection in projections {

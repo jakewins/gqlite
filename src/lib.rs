@@ -97,7 +97,7 @@ pub struct Row {
 // Pointer to a Val in a row
 pub type Slot = usize;
 
-#[derive(Debug,Clone)]
+#[derive(Debug,Clone,PartialEq)]
 pub enum Val {
     Null,
     String(String),

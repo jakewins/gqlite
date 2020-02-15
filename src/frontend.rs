@@ -25,16 +25,17 @@ pub struct Frontend {
 impl Frontend {
     // TODO obviously the query string shouldn't be static
     pub fn plan(&self, query_str: &'static str) -> Result<LogicalPlan, Error> {
+        self.plan_in_context(query_str, &mut PlanningContext{
+            slots: Default::default(),
+            anon_rel_seq:0, anon_node_seq: 0,
+            tokens: Rc::clone(&self.tokens)})
+    }
+
+    pub fn plan_in_context(&self, query_str: &'static str, mut pc: &mut PlanningContext) -> Result<LogicalPlan, Error> {
         let query = CypherParser::parse(Rule::query, query_str)
             .expect("unsuccessful parse") // unwrap the parse result
             .next().unwrap(); // get and unwrap the `file` rule; never fails
 
-        let mut statement_count: u64 = 0;
-
-        let mut pc = PlanningContext{
-            slots: Default::default(),
-            anon_rel_seq:0, anon_node_seq: 0,
-            tokens: Rc::clone(&self.tokens), };
         let mut plan = LogicalPlan::Argument;
 
         for stmt in query.into_inner() {
@@ -65,7 +66,7 @@ impl Frontend {
 // This enumeration is the complete list of supported operators that the planner can emit.
 //
 // The slots are indexes into the row being produced
-#[derive(Debug)]
+#[derive(Debug, PartialEq)]
 pub enum LogicalPlan {
     Argument,
     NodeScan{
@@ -80,20 +81,25 @@ pub enum LogicalPlan {
         dst_slot: usize,
         rel_type: Token,
     },
+    Create {
+        src: Box<Self>,
+        nodes: Vec<PatternNode>,
+        rels: Vec<PatternRel>,
+    },
     Return{
         src: Box<Self>,
         projections: Vec<Projection>,
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq)]
 pub struct Projection {
     pub expr: Expr,
     pub alias: String, // TODO this should be Token
 }
 
 
-struct PlanningContext {
+pub struct PlanningContext {
     // Mapping of names used in the query string to slots in the row being processed
     slots: HashMap<Token, usize>,
 
@@ -135,7 +141,7 @@ impl PlanningContext {
 }
 
 fn plan_create(pc: &mut PlanningContext, src: LogicalPlan, create_stmt: Pair<Rule>) -> LogicalPlan {
-    let mut pg = parse_pattern_graph(pc,create_stmt);
+    let pg = parse_pattern_graph(pc,create_stmt);
 
     println!("pg: {:?}", pg);
 
@@ -202,7 +208,7 @@ fn plan_expr(pc: & mut PlanningContext, expression: Pair<Rule>) -> Expr {
     panic!("Invalid expression from parser.")
 }
 
-#[derive(Debug)]
+#[derive(Debug,PartialEq)]
 pub struct PatternNode {
     identifier: Token,
     labels: Vec<Token>,
@@ -215,7 +221,7 @@ impl PatternNode {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug,PartialEq)]
 pub struct PatternRel {
     identifier: Token,
     rel_type: Token,
@@ -369,7 +375,7 @@ fn parse_pattern_node(pc: &mut PlanningContext, pattern_node: Pair<Rule>) -> Pat
             Rule::label => {
                 label = Some(pc.tokenize(part.as_str()))
             }
-            _ => unreachable!(),
+            _ => panic!("don't know how to handle: {}", part),
         }
     }
 
@@ -398,10 +404,45 @@ fn parse_pattern_rel(pc: &mut PlanningContext, left_node: Token, pattern_rel: Pa
     return PatternRel{ left_node, right_node: None, identifier: id, rel_type: rt, solved: false }
 }
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq)]
 pub enum Expr {
     Lit(Val),
     // Lookup a property by id
     Prop(Box<Self>, Vec<Token>),
     Slot(Slot),
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::frontend::{Frontend, LogicalPlan, PatternNode, PlanningContext};
+    use crate::backend::Tokens;
+    use std::cell::RefCell;
+    use std::rc::Rc;
+
+    #[test]
+    fn plan_create() {
+        let tokens = Rc::new(RefCell::new(Tokens::new()));
+
+        let frontend = Frontend { tokens: Rc::clone(&tokens) };
+        let mut pc = PlanningContext {
+            slots: Default::default(),
+            anon_rel_seq: 0,
+            anon_node_seq: 0,
+            tokens: Rc::clone(&tokens)
+        };
+        let lbl_person = pc.tokenize("Person");
+        let id_n = pc.tokenize("n");
+
+        let plan = frontend.plan_in_context("CREATE (n:Person)", &mut pc).unwrap();
+
+        assert_eq!(plan, LogicalPlan::Create{
+            src: Box::new(LogicalPlan::Argument),
+            nodes: vec![PatternNode{
+                identifier: id_n,
+                labels: vec![lbl_person],
+                solved: false
+            }],
+            rels: vec![]
+        })
+    }
 }

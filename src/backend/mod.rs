@@ -40,6 +40,9 @@ pub struct Tokens {
 }
 
 impl Tokens {
+    pub fn new() -> Tokens {
+        Tokens{ table: Default::default() }
+    }
     pub fn lookup(&self, tok: usize) -> Option<&str> {
         for (content, candidate) in self.table.iter() {
             if *candidate == tok {
