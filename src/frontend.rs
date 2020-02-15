@@ -143,12 +143,17 @@ impl PlanningContext {
 fn plan_create(pc: &mut PlanningContext, src: LogicalPlan, create_stmt: Pair<Rule>) -> LogicalPlan {
     let pg = parse_pattern_graph(pc,create_stmt);
 
-    println!("pg: {:?}", pg);
+    let mut nodes = Vec::new();
+    let mut rels = Vec::new();
+    for (_, node) in pg.e {
+        nodes.push(node);
+    }
 
-    // So.. just create all unsolved parts of the pattern?
-
-
-    return src;
+    return LogicalPlan::Create {
+        src: Box::new(src),
+        nodes,
+        rels,
+    };
 }
 
 fn plan_return(pc: &mut PlanningContext, src: LogicalPlan, return_stmt: Pair<Rule>) -> LogicalPlan {
