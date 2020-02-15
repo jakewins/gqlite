@@ -34,7 +34,7 @@ impl Database {
         println!("plan: {:?}", plan);
 
         let mut row = Row{ slots: vec![] };
-        let mut prepped = self.backend.prepare(plan)?;
+        let mut prepped = self.backend.prepare(Box::new(plan))?;
 
         // The API then allows us to modify this to reuse existing CursorState if we like
         prepped.run(cursor)
@@ -42,7 +42,7 @@ impl Database {
 }
 
 // Backends provide this
-trait CursorState : Debug {
+pub trait CursorState : Debug {
     fn next(&mut self, row:  &mut Row) -> Result<bool, Error>;
 }
 

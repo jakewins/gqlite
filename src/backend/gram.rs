@@ -1,4 +1,4 @@
-use crate::{Error, Token, Val, Dir, Slot, Row};
+use crate::{Error, Token, Val, Dir, Slot, Row, Cursor, frontend, CursorState};
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 use std::cell::RefCell;
@@ -22,6 +22,47 @@ impl GramBackend {
             tokens: Rc::new(RefCell::new(tokens)), g: Rc::new(g)
         })
     }
+
+    fn convert(&self, plan: Box<LogicalPlan>) -> Result<Box<dyn PlanStep>, Error> {
+        match *plan {
+            LogicalPlan::Argument => Ok(Box::new(Argument{})),
+            LogicalPlan::NodeScan { src, slot, labels } => Ok(Box::new(NodeScan{
+                src: self.convert(src)?,
+                next_node: 0,
+                slot,
+                labels
+            })),
+            LogicalPlan::Expand { src, src_slot, rel_slot, dst_slot, rel_type } => Ok(Box::new(Expand{
+                src: self.convert(src)?,
+                src_slot,
+                rel_slot,
+                dst_slot,
+                rel_type,
+                next_rel_index: 0,
+                state: ExpandState::NextNode
+            })),
+            LogicalPlan::Return { src, projections } => {
+                let mut converted_projections = Vec::new();
+                for projection in projections {
+                    converted_projections.push(Projection{
+                        expr: self.convert_expr(projection.expr),
+                        alias: projection.alias })
+                }
+
+                Ok(Box::new(Return{
+                    src: self.convert(src)?,
+                    projections: converted_projections }))
+            },
+        }
+    }
+
+    fn convert_expr(&self, expr: frontend::Expr) -> Expr {
+        match expr {
+            frontend::Expr::Lit(v) => Expr::Lit(v),
+            frontend::Expr::Prop(e, props) => Expr::Prop(Box::new(self.convert_expr(*e)), props),
+            frontend::Expr::Slot(s) => Expr::Slot(s),
+        }
+    }
 }
 
 impl super::Backend for GramBackend {
@@ -29,7 +70,33 @@ impl super::Backend for GramBackend {
         Rc::clone(&self.tokens)
     }
 
-    fn prepare(&self, plan: LogicalPlan) -> Result<Box<dyn PreparedStatement>, Error> {
+    fn prepare(&self, logical_plan: Box<LogicalPlan>) -> Result<Box<dyn PreparedStatement>, Error> {
+        let plan = self.convert(logical_plan)?;
+        return Ok(Box::new(Statement{ plan }))
+    }
+}
+
+#[derive(Debug)]
+struct Statement {
+    plan: Box<dyn PlanStep>
+}
+
+impl PreparedStatement for Statement {
+    fn run(&mut self, cursor: &mut Cursor) -> Result<(), Error> {
+        cursor.state = Some(Box::new(GramCursorState{
+            plan: self.plan.clone(),
+        }));
+        return Ok(())
+    }
+}
+
+#[derive(Debug)]
+struct GramCursorState {
+    plan: Box<dyn PlanStep>
+}
+
+impl CursorState for GramCursorState {
+    fn next(&mut self, row: &mut Row) -> Result<bool, Error> {
         unimplemented!()
     }
 }
@@ -38,8 +105,7 @@ struct Context {
     g: Rc<Graph>
 }
 
-
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum Expr {
     Lit(Val),
     // Lookup a property by id
@@ -79,6 +145,9 @@ impl Expr {
 
 trait PlanStep: Debug {
     fn next(&mut self, ctx: &mut Context, row: &mut Row) -> Result<bool, Error>;
+
+    // I can't figure out how do implement the normal "Clone" trait for this trait..
+    fn clone(&self) -> Box<dyn PlanStep>;
 }
 
 #[derive(Debug)]
@@ -117,7 +186,9 @@ impl Expand {
             state: ExpandState::NextNode
         }
     }
+}
 
+impl PlanStep for Expand {
     fn next(&mut self, ctx: &mut Context, out: &mut Row) -> Result<bool, Error> {
         loop {
             match &self.state {
@@ -149,6 +220,18 @@ impl Expand {
                 },
             }
         }
+    }
+
+    fn clone(&self) -> Box<dyn PlanStep> {
+        Box::new(Expand{
+            src: self.src.clone(),
+            src_slot: self.src_slot,
+            rel_slot: self.rel_slot,
+            dst_slot: self.dst_slot,
+            rel_type: self.rel_type,
+            next_rel_index: 0,
+            state: ExpandState::NextNode,
+        })
     }
 }
 
@@ -186,18 +269,31 @@ impl PlanStep for NodeScan {
             return Ok(false)
         }
     }
+
+    fn clone(&self) -> Box<dyn PlanStep> {
+        Box::new(NodeScan{
+            src: self.src.clone(),
+            next_node: 0,
+            slot: self.slot,
+            labels: self.labels,
+        })
+    }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct Argument;
 
 impl PlanStep for Argument {
     fn next(&mut self, ctx: &mut Context, out: &mut Row) -> Result<bool, Error> {
         unimplemented!()
     }
+
+    fn clone(&self) -> Box<dyn PlanStep> {
+        Box::new(Argument{})
+    }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct Projection {
     pub expr: Expr,
     pub alias: String,
@@ -238,18 +334,25 @@ impl PlanStep for Return {
         }
         Ok(false)
     }
+
+    fn clone(&self) -> Box<dyn PlanStep> {
+        Box::new(Return{
+            src: self.src.clone(),
+            projections: self.projections.clone(),
+        })
+    }
 }
 
 mod parser {
     use std::collections::{HashMap};
     use crate::pest::Parser;
-    use crate::backend::gram::{Tokens, Node, Graph};
+    use crate::backend::gram::{Node, Graph};
     use crate::{Error, Token, Val};
+    use crate::backend::Tokens;
 
     #[derive(Parser)]
     #[grammar = "gram.pest"]
     pub struct GramParser;
-
 
     pub fn load(tokens: &mut Tokens, path: &str) -> Result<Graph, Error> {
         let mut g = Graph{ nodes: vec![] };

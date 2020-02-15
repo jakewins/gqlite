@@ -19,7 +19,7 @@ pub trait Backend: Debug {
     fn tokens(&self) -> Rc<RefCell<Tokens>>;
 
     // Convert a logical plan into something executable
-    fn prepare(&self, plan: LogicalPlan) -> Result<Box<dyn PreparedStatement>, Error>;
+    fn prepare(&self, plan: Box<LogicalPlan>) -> Result<Box<dyn PreparedStatement>, Error>;
 }
 
 #[derive(Debug)]
