@@ -106,7 +106,6 @@ struct GramCursorState {
 
 impl CursorState for GramCursorState {
     fn next(&mut self, row: &mut Row) -> Result<bool, Error> {
-        println!("Next, numslots={}", row.slots.len());
         self.plan.next(&mut self.ctx, row)
     }
 }
