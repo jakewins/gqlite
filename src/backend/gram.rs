@@ -72,37 +72,48 @@ impl super::Backend for GramBackend {
 
     fn prepare(&self, logical_plan: Box<LogicalPlan>) -> Result<Box<dyn PreparedStatement>, Error> {
         let plan = self.convert(logical_plan)?;
-        return Ok(Box::new(Statement{ plan }))
+        return Ok(Box::new(Statement{ g: Rc::clone(&self.g), plan,
+            // TODO: pipe this knowledge through from logial plan
+            num_slots: 16 }))
     }
 }
 
 #[derive(Debug)]
 struct Statement {
-    plan: Box<dyn PlanStep>
+    g: Rc<Graph>,
+    plan: Box<dyn PlanStep>,
+    num_slots: usize,
 }
 
 impl PreparedStatement for Statement {
     fn run(&mut self, cursor: &mut Cursor) -> Result<(), Error> {
         cursor.state = Some(Box::new(GramCursorState{
+            ctx: Context{ g: Rc::clone(&self.g)},
             plan: self.plan.clone(),
         }));
+        if cursor.row.slots.len() < self.num_slots {
+            cursor.row.slots.resize(self.num_slots, Val::Null);
+        }
         return Ok(())
     }
 }
 
 #[derive(Debug)]
 struct GramCursorState {
+    ctx: Context,
     plan: Box<dyn PlanStep>
 }
 
 impl CursorState for GramCursorState {
     fn next(&mut self, row: &mut Row) -> Result<bool, Error> {
-        unimplemented!()
+        println!("Next, numslots={}", row.slots.len());
+        self.plan.next(&mut self.ctx, row)
     }
 }
 
+#[derive(Debug)]
 struct Context {
-    g: Rc<Graph>
+    g: Rc<Graph>,
 }
 
 #[derive(Debug, Clone)]
