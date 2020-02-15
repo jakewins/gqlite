@@ -1,7 +1,9 @@
-use crate::{Cursor, Error};
-use crate::frontend::{LogicalPlan, Tokenizer};
+use crate::{Cursor, Error, Token};
+use crate::frontend::{LogicalPlan};
 use std::fmt::Debug;
 use std::rc::Rc;
+use std::cell::RefCell;
+use std::collections::HashMap;
 
 pub trait PreparedStatement: Debug {
     fn run(&mut self, cursor: &mut Cursor) -> Result<(), Error>;
@@ -14,10 +16,38 @@ pub trait PreparedStatement: Debug {
 // in the planning side and in the API to not have to deal with different backends having different
 // generics. Much of that difficulty is likely my poor Rust skills tho.
 pub trait Backend: Debug {
-    fn tokenizer(&self) -> Rc<dyn Tokenizer>;
+    fn tokens(&self) -> Rc<RefCell<Tokens>>;
 
     // Convert a logical plan into something executable
     fn prepare(&self, plan: LogicalPlan) -> Result<Box<dyn PreparedStatement>, Error>;
 }
+
+#[derive(Debug)]
+pub struct Tokens {
+    table: HashMap<String, Token>,
+}
+
+impl Tokens {
+    pub fn lookup(&self, tok: usize) -> Option<&str> {
+        for (content, candidate) in self.table.iter() {
+            if *candidate == tok {
+                return Some(&content);
+            }
+        }
+        return None
+    }
+
+    pub fn tokenize(&mut self, content: &str) -> usize {
+        match self.table.get(content) {
+            Some(tok) => { return *tok }
+            None => {
+                let tok = self.table.len();
+                self.table.insert(content.to_string(), tok);
+                return tok
+            }
+        }
+    }
+}
+
 
 pub(crate) mod gram;

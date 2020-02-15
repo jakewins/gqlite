@@ -3,8 +3,9 @@ use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 use std::cell::RefCell;
 use super::PreparedStatement;
-use crate::frontend::{LogicalPlan, Tokenizer};
+use crate::frontend::{LogicalPlan};
 use std::fmt::Debug;
+use crate::backend::Tokens;
 
 #[derive(Debug)]
 pub struct GramBackend {
@@ -14,7 +15,6 @@ pub struct GramBackend {
 
 impl GramBackend {
     pub fn open(path: &str) -> Result<GramBackend, Error> {
-
         let mut tokens = Tokens { table: Default::default() };
         let mut g = parser::load(&mut tokens, path)?;
 
@@ -25,39 +25,12 @@ impl GramBackend {
 }
 
 impl super::Backend for GramBackend {
-    fn tokenizer(&self) -> Rc<dyn Tokenizer> {
-        unimplemented!()
+    fn tokens(&self) -> Rc<RefCell<Tokens>> {
+        Rc::clone(&self.tokens)
     }
 
     fn prepare(&self, plan: LogicalPlan) -> Result<Box<dyn PreparedStatement>, Error> {
         unimplemented!()
-    }
-}
-
-#[derive(Debug)]
-pub struct Tokens {
-    table: HashMap<String, Token>,
-}
-
-impl Tokens {
-    fn tokenize(&mut self, contents: &str) -> Token {
-        match self.table.get(contents) {
-            Some(tok) => { return *tok }
-            None => {
-                let tok = self.table.len();
-                self.table.insert(contents.to_string(), tok);
-                return tok
-            }
-        }
-    }
-
-    fn get(&self, tok: Token) -> Option<&str> {
-        for (content, candidate) in self.table.iter() {
-            if *candidate == tok {
-                return Some(&content);
-            }
-        }
-        return None
     }
 }
 
@@ -100,11 +73,9 @@ impl Expr {
             Expr::Prop(expr, props) => Expr::eval_prop(ctx, row, expr, props),
             Expr::Slot(slot) => Ok(row.slots[*slot].clone()), // TODO not this
             Expr::Lit(v) => Ok(v.clone()), // TODO not this
-            _ => panic!("{:?}", self)
         }
     }
 }
-
 
 trait PlanStep: Debug {
     fn next(&mut self, ctx: &mut Context, row: &mut Row) -> Result<bool, Error>;

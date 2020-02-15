@@ -20,7 +20,7 @@ pub struct Database {
 impl Database {
     pub fn open(path: &str) -> Result<Database, Error> {
         let backend = backend::gram::GramBackend::open(path)?;
-        let frontend = Frontend{ tokenizer: backend.tokenizer() };
+        let frontend = Frontend{ tokens: backend.tokens() };
         return Ok(Database {
             backend: Box::new(backend),
             frontend,

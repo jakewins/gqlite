@@ -6,6 +6,8 @@ use pest::iterators::Pair;
 use crate::{Token, Slot, Val, Error, Row};
 use std::collections::HashMap;
 use std::rc::Rc;
+use crate::backend::Tokens;
+use std::cell::RefCell;
 
 #[derive(Parser)]
 #[grammar = "cypher.pest"]
@@ -39,13 +41,9 @@ pub enum LogicalPlan {
     }
 }
 
-pub trait Tokenizer : Debug {
-    fn tokenize(&self, content: &str) -> Token;
-}
-
 #[derive(Debug)]
 pub struct Frontend {
-    pub tokenizer: Rc<dyn Tokenizer>,
+    pub tokens: Rc<RefCell<Tokens>>,
 }
 
 impl Frontend {
@@ -57,8 +55,10 @@ impl Frontend {
 
         let mut statement_count: u64 = 0;
 
-        let mut pc = PlanningContext{slots: Default::default(), anon_rel_seq:0, anon_node_seq: 0,
-            tokens: Rc::clone(&self.tokenizer), };
+        let mut pc = PlanningContext{
+            slots: Default::default(),
+            anon_rel_seq:0, anon_node_seq: 0,
+            tokens: Rc::clone(&self.tokens), };
         let mut plan = LogicalPlan::Argument;
 
         for stmt in query.into_inner() {
@@ -89,7 +89,7 @@ struct PlanningContext {
     slots: HashMap<Token, usize>,
 
     // TODO is there some nicer way to do this than Rc+RefCell?
-    tokens: Rc<dyn Tokenizer>,
+    tokens: Rc<RefCell<Tokens>>,
 
     anon_rel_seq: u32,
     anon_node_seq: u32,
@@ -98,7 +98,7 @@ struct PlanningContext {
 impl PlanningContext {
 
     fn tokenize(&mut self, contents: &str) -> Token {
-        self.tokens.tokenize(contents)
+        self.tokens.borrow_mut().tokenize(contents)
     }
 
     pub fn get_or_alloc_slot(&mut self, tok: Token) -> usize {
