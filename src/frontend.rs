@@ -7,7 +7,7 @@ use pest::Parser;
 
 use std::fmt::{Debug};
 use pest::iterators::Pair;
-use crate::{Slot, Val, Error, Row};
+use crate::{Slot, Val, Error, Row, Dir};
 use std::collections::HashMap;
 use std::rc::Rc;
 use crate::backend::{Tokens, Token};
@@ -41,10 +41,10 @@ impl Frontend {
         for stmt in query.into_inner() {
             match stmt.as_rule() {
                 Rule::match_stmt => {
-                    plan = plan_match(&mut pc, plan, stmt);
+                    plan = plan_match(&mut pc, plan, stmt)?;
                 }
                 Rule::create_stmt => {
-                    plan = plan_create(&mut pc, plan, stmt);
+                    plan = plan_create(&mut pc, plan, stmt)?;
                 }
                 Rule::return_stmt => {
                     plan = plan_return(&mut pc, plan, stmt);
@@ -140,8 +140,8 @@ impl PlanningContext {
     }
 }
 
-fn plan_create(pc: &mut PlanningContext, src: LogicalPlan, create_stmt: Pair<Rule>) -> LogicalPlan {
-    let pg = parse_pattern_graph(pc,create_stmt);
+fn plan_create(pc: &mut PlanningContext, src: LogicalPlan, create_stmt: Pair<Rule>) -> Result<LogicalPlan, Error> {
+    let pg = parse_pattern_graph(pc,create_stmt)?;
 
     let mut nodes = Vec::new();
     let mut rels = Vec::new();
@@ -150,15 +150,17 @@ fn plan_create(pc: &mut PlanningContext, src: LogicalPlan, create_stmt: Pair<Rul
     }
 
     for rel in pg.v {
+        if let None = rel.dir {
+            return Err(Error{ msg: "relationships in CREATE clauses must have a direction".to_string() })
+        }
         rels.push(rel);
     }
 
-
-    return LogicalPlan::Create {
+    return Ok(LogicalPlan::Create {
         src: Box::new(src),
         nodes,
         rels,
-    };
+    });
 }
 
 fn plan_return(pc: &mut PlanningContext, src: LogicalPlan, return_stmt: Pair<Rule>) -> LogicalPlan {
@@ -237,6 +239,7 @@ pub struct PatternRel {
     rel_type: Token,
     left_node: Token,
     right_node: Option<Token>,
+    dir: Option<Dir>,
     solved: bool,
 }
 
@@ -257,9 +260,9 @@ impl PatternGraph {
     }
 }
 
-fn plan_match(pc: &mut PlanningContext, src: LogicalPlan, match_stmt: Pair<Rule>) -> LogicalPlan {
+fn plan_match(pc: &mut PlanningContext, src: LogicalPlan, match_stmt: Pair<Rule>) -> Result<LogicalPlan, Error> {
     let mut plan = src;
-    let mut pg = parse_pattern_graph(pc, match_stmt);
+    let mut pg = parse_pattern_graph(pc, match_stmt)?;
 
     // Ok, now we have parsed the pattern into a full graph, time to start solving it
     println!("built pg: {:?}", pg);
@@ -334,10 +337,10 @@ fn plan_match(pc: &mut PlanningContext, src: LogicalPlan, match_stmt: Pair<Rule>
         }
     }
 
-    return plan
+    return Ok(plan)
 }
 
-fn parse_pattern_graph(pc: &mut PlanningContext, patterns: Pair<Rule>) -> PatternGraph {
+fn parse_pattern_graph(pc: &mut PlanningContext, patterns: Pair<Rule>) -> Result<PatternGraph, Error> {
     let mut pg: PatternGraph = PatternGraph{ e: HashMap::new(), v: Vec::new()};
 
     for part in patterns.into_inner() {
@@ -359,7 +362,7 @@ fn parse_pattern_graph(pc: &mut PlanningContext, patterns: Pair<Rule>) -> Patter
                             }
                         }
                         Rule::rel => {
-                            prior_rel = Some(parse_pattern_rel(pc,prior_node_id.expect("pattern rel must be preceded by node"), segment));
+                            prior_rel = Some(parse_pattern_rel(pc,prior_node_id.expect("pattern rel must be preceded by node"), segment)?);
                             prior_node_id = None
                         }
                         _ => unreachable!(),
@@ -370,7 +373,7 @@ fn parse_pattern_graph(pc: &mut PlanningContext, patterns: Pair<Rule>) -> Patter
         }
     }
 
-    return pg;
+    return Ok(pg);
 }
 
 // Figures out what step we need to find the specified node
@@ -400,9 +403,10 @@ fn parse_pattern_node(pc: &mut PlanningContext, pattern_node: Pair<Rule>) -> Pat
     return PatternNode{ identifier: id, labels, solved: false }
 }
 
-fn parse_pattern_rel(pc: &mut PlanningContext, left_node: Token, pattern_rel: Pair<Rule>) -> PatternRel {
+fn parse_pattern_rel(pc: &mut PlanningContext, left_node: Token, pattern_rel: Pair<Rule>) -> Result<PatternRel, Error> {
     let mut identifier = None;
     let mut rel_type = None;
+    let mut dir = None;
     for part in pattern_rel.into_inner() {
         match part.as_rule() {
             Rule::id => {
@@ -411,13 +415,22 @@ fn parse_pattern_rel(pc: &mut PlanningContext, left_node: Token, pattern_rel: Pa
             Rule::rel_type => {
                 rel_type = Some(pc.tokenize(part.as_str()))
             }
+            Rule::left_arrow => {
+                dir = Some(Dir::In)
+            }
+            Rule::right_arrow => {
+                if dir.is_some() {
+                    return Err(Error{ msg: "relationship can't be directed in both directions. If you want to find relationships in either direction, leave the arrows out".to_string() })
+                }
+                dir = Some(Dir::Out)
+            }
             _ => unreachable!(),
         }
     }
     // TODO don't use this empty identifier here
     let id = identifier.unwrap_or_else(|| pc.new_anon_rel());
     let rt = rel_type.unwrap_or_else(||pc.new_anon_rel());
-    return PatternRel{ left_node, right_node: None, identifier: id, rel_type: rt, solved: false }
+    return Ok(PatternRel{ left_node, right_node: None, identifier: id, rel_type: rt, dir, solved: false })
 }
 
 #[derive(Debug, PartialEq)]
@@ -434,6 +447,8 @@ mod tests {
     use crate::backend::Tokens;
     use std::cell::RefCell;
     use std::rc::Rc;
+    use crate::Dir::Out;
+    use crate::Dir;
 
     fn plan(q: &'static str) -> (LogicalPlan, PlanningContext) {
         let tokens = Rc::new(RefCell::new(Tokens::new()));
@@ -469,7 +484,7 @@ mod tests {
 
     #[test]
     fn plan_create_rel() {
-        let (plan, mut pc) = plan("CREATE (n:Person)-[r:KNOWS]-(n)");
+        let (plan, mut pc) = plan("CREATE (n:Person)-[r:KNOWS]->(n)");
 
         let rt_knows = pc.tokenize("KNOWS");
         let lbl_person = pc.tokenize("Person");
@@ -489,6 +504,7 @@ mod tests {
                     rel_type: rt_knows,
                     left_node: id_n,
                     right_node: Some(id_n),
+                    dir: Some(Dir::Out),
                     solved: false
                 },
             ]

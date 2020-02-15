@@ -24,8 +24,10 @@ map_pair = { id ~ ":" ~ expr }
 node = { "(" ~ id? ~ ( ":" ~ label )? ~ map? ~ ")" }
 label = { id }
 
-rel = { "<"? ~ "-" ~ ( "[" ~ id? ~ ( ":" ~ rel_type )? ~ map? ~ "]" )? ~ "-" ~ ">"? }
+rel = { left_arrow? ~ "-" ~ ( "[" ~ id? ~ ( ":" ~ rel_type )? ~ map? ~ "]" )? ~ "-" ~ right_arrow? }
 rel_type = { id }
+left_arrow = { "<" }
+right_arrow = { ">" }
 
 pattern = { node  ~ ( rel ~ node )* }
 

@@ -73,13 +73,14 @@ impl Cursor {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq)]
 pub enum Dir {
     Out, In
 }
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub struct Error {
+    // TODO I think maybe this should be &str?
     msg: String,
 }
 
