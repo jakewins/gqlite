@@ -149,6 +149,11 @@ fn plan_create(pc: &mut PlanningContext, src: LogicalPlan, create_stmt: Pair<Rul
         nodes.push(node);
     }
 
+    for rel in pg.v {
+        rels.push(rel);
+    }
+
+
     return LogicalPlan::Create {
         src: Box::new(src),
         nodes,
@@ -386,7 +391,13 @@ fn parse_pattern_node(pc: &mut PlanningContext, pattern_node: Pair<Rule>) -> Pat
 
     let id = identifier.unwrap_or_else(||pc.new_anon_node());
 
-    return PatternNode{ identifier: id, labels: vec![label.expect("Label currently required")], solved: false }
+    let labels = if let Some(lbl) = label {
+       vec![lbl]
+    } else {
+        vec![]
+    };
+
+    return PatternNode{ identifier: id, labels, solved: false }
 }
 
 fn parse_pattern_rel(pc: &mut PlanningContext, left_node: Token, pattern_rel: Pair<Rule>) -> PatternRel {
@@ -419,7 +430,7 @@ pub enum Expr {
 
 #[cfg(test)]
 mod tests {
-    use crate::frontend::{Frontend, LogicalPlan, PatternNode, PlanningContext};
+    use crate::frontend::{Frontend, LogicalPlan, PatternNode, PlanningContext, PatternRel};
     use crate::backend::Tokens;
     use std::cell::RefCell;
     use std::rc::Rc;
@@ -435,7 +446,7 @@ mod tests {
             tokens: Rc::clone(&tokens)
         };
 
-        let plan = frontend.plan_in_context("CREATE (n:Person)", &mut pc).unwrap();
+        let plan = frontend.plan_in_context(q, &mut pc).unwrap();
         return (plan, pc)
     }
 
@@ -453,6 +464,34 @@ mod tests {
                 solved: false
             }],
             rels: vec![]
+        })
+    }
+
+    #[test]
+    fn plan_create_rel() {
+        let (plan, mut pc) = plan("CREATE (n:Person)-[r:KNOWS]-(n)");
+
+        let rt_knows = pc.tokenize("KNOWS");
+        let lbl_person = pc.tokenize("Person");
+        let id_n = pc.tokenize("n");
+        let id_r = pc.tokenize("r");
+        assert_eq!(plan, LogicalPlan::Create{
+            src: Box::new(LogicalPlan::Argument),
+            nodes: vec![
+                PatternNode{
+                    identifier: id_n,
+                    labels: vec![lbl_person],
+                    solved: false
+                }],
+            rels: vec![
+                PatternRel{
+                    identifier: id_r,
+                    rel_type: rt_knows,
+                    left_node: id_n,
+                    right_node: Some(id_n),
+                    solved: false
+                },
+            ]
         })
     }
 }
