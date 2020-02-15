@@ -424,8 +424,7 @@ mod tests {
     use std::cell::RefCell;
     use std::rc::Rc;
 
-    #[test]
-    fn plan_create() {
+    fn plan(q: &'static str) -> (LogicalPlan, PlanningContext) {
         let tokens = Rc::new(RefCell::new(Tokens::new()));
 
         let frontend = Frontend { tokens: Rc::clone(&tokens) };
@@ -435,11 +434,17 @@ mod tests {
             anon_node_seq: 0,
             tokens: Rc::clone(&tokens)
         };
-        let lbl_person = pc.tokenize("Person");
-        let id_n = pc.tokenize("n");
 
         let plan = frontend.plan_in_context("CREATE (n:Person)", &mut pc).unwrap();
+        return (plan, pc)
+    }
 
+    #[test]
+    fn plan_create() {
+        let (plan, mut pc) = plan("CREATE (n:Person)");
+
+        let lbl_person = pc.tokenize("Person");
+        let id_n = pc.tokenize("n");
         assert_eq!(plan, LogicalPlan::Create{
             src: Box::new(LogicalPlan::Argument),
             nodes: vec![PatternNode{
