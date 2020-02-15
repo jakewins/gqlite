@@ -83,8 +83,8 @@ pub enum LogicalPlan {
     },
     Create {
         src: Box<Self>,
-        nodes: Vec<PatternNode>,
-        rels: Vec<PatternRel>,
+        nodes: Vec<NodeSpec>,
+        rels: Vec<RelSpec>,
     },
     Return{
         src: Box<Self>,
@@ -114,6 +114,13 @@ impl PlanningContext {
 
     fn tokenize(&mut self, contents: &str) -> Token {
         self.tokens.borrow_mut().tokenize(contents)
+    }
+
+    // Is the given token a value that we know about already?
+    // This is used to determine if entities in CREATE refer to existing bound identifiers
+    // or if they are introducing new entities to be created.
+    pub fn is_bound(&self, tok: Token) -> bool {
+        self.slots.contains_key(&tok)
     }
 
     pub fn get_or_alloc_slot(&mut self, tok: Token) -> usize {
@@ -146,14 +153,37 @@ fn plan_create(pc: &mut PlanningContext, src: LogicalPlan, create_stmt: Pair<Rul
     let mut nodes = Vec::new();
     let mut rels = Vec::new();
     for (_, node) in pg.e {
-        nodes.push(node);
+        if pc.is_bound(node.identifier) {
+            // We already know about this node, it isn't meant to be created. ie
+            // MATCH (n) CREATE (n)-[:NEWREL]->(newnode)
+            continue;
+        }
+        nodes.push(NodeSpec{
+            slot: pc.get_or_alloc_slot(node.identifier),
+            labels: node.labels,
+        });
     }
 
     for rel in pg.v {
-        if let None = rel.dir {
-            return Err(Error{ msg: "relationships in CREATE clauses must have a direction".to_string() })
+        match rel.dir {
+            Some(Dir::Out) => {
+                rels.push(RelSpec{
+                    slot: pc.get_or_alloc_slot(rel.identifier),
+                    rel_type: rel.rel_type,
+                    start_node_slot: pc.get_or_alloc_slot(rel.left_node),
+                    end_node_slot: pc.get_or_alloc_slot(rel.right_node.unwrap()),
+                });
+            }
+            Some(Dir::In) => {
+                rels.push(RelSpec{
+                    slot: pc.get_or_alloc_slot(rel.identifier),
+                    rel_type: rel.rel_type,
+                    start_node_slot: pc.get_or_alloc_slot(rel.right_node.unwrap()),
+                    end_node_slot: pc.get_or_alloc_slot(rel.left_node),
+                });
+            }
+            None => return Err(Error{ msg: "relationships in CREATE clauses must have a direction".to_string() })
         }
-        rels.push(rel);
     }
 
     return Ok(LogicalPlan::Create {
@@ -161,6 +191,22 @@ fn plan_create(pc: &mut PlanningContext, src: LogicalPlan, create_stmt: Pair<Rul
         nodes,
         rels,
     });
+}
+
+// Specification of a node to create
+#[derive(Debug,PartialEq)]
+pub struct NodeSpec {
+    slot: usize,
+    labels: Vec<Token>,
+}
+
+// Specification of a rel to create
+#[derive(Debug,PartialEq)]
+pub struct RelSpec {
+    slot: usize,
+    rel_type: Token,
+    start_node_slot: usize,
+    end_node_slot: usize,
 }
 
 fn plan_return(pc: &mut PlanningContext, src: LogicalPlan, return_stmt: Pair<Rule>) -> LogicalPlan {
@@ -239,6 +285,7 @@ pub struct PatternRel {
     rel_type: Token,
     left_node: Token,
     right_node: Option<Token>,
+    // From the perspective of the left node, is this pattern inbound or outbound?
     dir: Option<Dir>,
     solved: bool,
 }
@@ -443,7 +490,7 @@ pub enum Expr {
 
 #[cfg(test)]
 mod tests {
-    use crate::frontend::{Frontend, LogicalPlan, PatternNode, PlanningContext, PatternRel};
+    use crate::frontend::{Frontend, LogicalPlan, PatternNode, PlanningContext, PatternRel, NodeSpec, RelSpec};
     use crate::backend::Tokens;
     use std::cell::RefCell;
     use std::rc::Rc;
@@ -473,10 +520,9 @@ mod tests {
         let id_n = pc.tokenize("n");
         assert_eq!(plan, LogicalPlan::Create{
             src: Box::new(LogicalPlan::Argument),
-            nodes: vec![PatternNode{
-                identifier: id_n,
+            nodes: vec![NodeSpec{
+                slot: pc.get_or_alloc_slot(id_n),
                 labels: vec![lbl_person],
-                solved: false
             }],
             rels: vec![]
         })
@@ -493,19 +539,80 @@ mod tests {
         assert_eq!(plan, LogicalPlan::Create{
             src: Box::new(LogicalPlan::Argument),
             nodes: vec![
-                PatternNode{
-                    identifier: id_n,
+                NodeSpec{
+                    slot: pc.get_or_alloc_slot(id_n),
                     labels: vec![lbl_person],
-                    solved: false
                 }],
             rels: vec![
-                PatternRel{
-                    identifier: id_r,
+                RelSpec{
+                    slot: pc.get_or_alloc_slot(id_r),
                     rel_type: rt_knows,
-                    left_node: id_n,
-                    right_node: Some(id_n),
-                    dir: Some(Dir::Out),
-                    solved: false
+                    start_node_slot: pc.get_or_alloc_slot(id_n),
+                    end_node_slot: pc.get_or_alloc_slot(id_n)
+                },
+            ]
+        })
+    }
+
+    #[test]
+    fn plan_create_outbound_rel_on_preexisting_node() {
+        let (plan, mut pc) = plan("MATCH (n:Person) CREATE (n)-[r:KNOWS]->(o:Person)");
+
+        let rt_knows = pc.tokenize("KNOWS");
+        let lbl_person = pc.tokenize("Person");
+        let id_n = pc.tokenize("n");
+        let id_o = pc.tokenize("o");
+        let id_r = pc.tokenize("r");
+        assert_eq!(plan, LogicalPlan::Create{
+            src: Box::new(LogicalPlan::NodeScan {
+                src: Box::new(LogicalPlan::Argument),
+                slot: pc.get_or_alloc_slot(id_n),
+                labels: Some(lbl_person),
+            }),
+            nodes: vec![
+                // Note there is just one node here, the planner should understand "n" already exists
+                NodeSpec{
+                    slot: pc.get_or_alloc_slot(id_o),
+                    labels: vec![lbl_person],
+                }],
+            rels: vec![
+                RelSpec{
+                    slot: id_r,
+                    rel_type: rt_knows,
+                    start_node_slot: pc.get_or_alloc_slot(id_n),
+                    end_node_slot: pc.get_or_alloc_slot(id_o),
+                },
+            ]
+        })
+    }
+
+    #[test]
+    fn plan_create_inbound_rel_on_preexisting_node() {
+        let (plan, mut pc) = plan("MATCH (n:Person) CREATE (n)<-[r:KNOWS]-(o:Person)");
+
+        let rt_knows = pc.tokenize("KNOWS");
+        let lbl_person = pc.tokenize("Person");
+        let id_n = pc.tokenize("n");
+        let id_o = pc.tokenize("o");
+        let id_r = pc.tokenize("r");
+        assert_eq!(plan, LogicalPlan::Create{
+            src: Box::new(LogicalPlan::NodeScan {
+                src: Box::new(LogicalPlan::Argument),
+                slot: pc.get_or_alloc_slot(id_n),
+                labels: Some(lbl_person),
+            }),
+            nodes: vec![
+                // Note there is just one node here, the planner should understand "n" already exists
+                NodeSpec{
+                    slot: pc.get_or_alloc_slot(id_o),
+                    labels: vec![lbl_person],
+                }],
+            rels: vec![
+                RelSpec{
+                    slot: id_r,
+                    rel_type: rt_knows,
+                    start_node_slot: pc.get_or_alloc_slot(id_o),
+                    end_node_slot: pc.get_or_alloc_slot(id_n),
                 },
             ]
         })
