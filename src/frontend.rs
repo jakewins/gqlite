@@ -59,6 +59,7 @@ impl Frontend {
     }
 }
 
+// The slots here are indexes into the row being produced
 #[derive(Debug)]
 pub enum LogicalPlan {
     Argument,

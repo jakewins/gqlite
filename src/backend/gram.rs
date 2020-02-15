@@ -366,7 +366,7 @@ mod parser {
     use crate::backend::Tokens;
 
     #[derive(Parser)]
-    #[grammar = "gram.pest"]
+    #[grammar = "backend/gram.pest"]
     pub struct GramParser;
 
     pub fn load(tokens: &mut Tokens, path: &str) -> Result<Graph, Error> {
