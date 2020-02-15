@@ -1,3 +1,7 @@
+//
+// The gqlite frontend contains the gql parser and logical planner.
+// It produces a LogicalPlan, describing what needs to occur to fulfill the input query.
+//
 
 use pest::Parser;
 
@@ -12,34 +16,6 @@ use std::cell::RefCell;
 #[derive(Parser)]
 #[grammar = "cypher.pest"]
 pub struct CypherParser;
-
-
-#[derive(Debug)]
-pub struct Projection {
-    pub expr: Expr,
-    pub alias: String, // TODO this should be Token
-}
-
-#[derive(Debug)]
-pub enum LogicalPlan {
-    Argument,
-    NodeScan{
-        src: Box<Self>,
-        slot: usize,
-        labels: Option<Token>,
-    },
-    Expand{
-        src: Box<Self>,
-        src_slot: usize,
-        rel_slot: usize,
-        dst_slot: usize,
-        rel_type: Token,
-    },
-    Return{
-        src: Box<Self>,
-        projections: Vec<Projection>,
-    }
-}
 
 #[derive(Debug)]
 pub struct Frontend {
@@ -81,6 +57,33 @@ impl Frontend {
 
         return Ok(plan)
     }
+}
+
+#[derive(Debug)]
+pub enum LogicalPlan {
+    Argument,
+    NodeScan{
+        src: Box<Self>,
+        slot: usize,
+        labels: Option<Token>,
+    },
+    Expand{
+        src: Box<Self>,
+        src_slot: usize,
+        rel_slot: usize,
+        dst_slot: usize,
+        rel_type: Token,
+    },
+    Return{
+        src: Box<Self>,
+        projections: Vec<Projection>,
+    }
+}
+
+#[derive(Debug)]
+pub struct Projection {
+    pub expr: Expr,
+    pub alias: String, // TODO this should be Token
 }
 
 

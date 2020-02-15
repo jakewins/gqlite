@@ -12,8 +12,7 @@ The `gqlite` program and the libgqlite c bindings are both wrappers around the g
 ### Internal structure
 
 gqlite is organized into a "frontend" and a "backend". The frontend contains the parser and planner. 
-Backends take logical plans from the frontend and convert them to an executable form. 
-There is wide leeway for how backends go about their business.
+Backends contain storage and provides executable implementations of the logical operators emitted by the frontend.
 
 # License
 

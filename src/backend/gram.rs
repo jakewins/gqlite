@@ -1,3 +1,7 @@
+
+// The Gram backend is a backend implementation that acts on a Gram file.
+// It is currently single threaded, and provides no data durability guarantees.
+
 use crate::{Error, Token, Val, Dir, Slot, Row, Cursor, frontend, CursorState};
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
@@ -23,7 +27,7 @@ impl GramBackend {
         })
     }
 
-    fn convert(&self, plan: Box<LogicalPlan>) -> Result<Box<dyn PlanStep>, Error> {
+    fn convert(&self, plan: Box<LogicalPlan>) -> Result<Box<dyn Operator>, Error> {
         match *plan {
             LogicalPlan::Argument => Ok(Box::new(Argument{})),
             LogicalPlan::NodeScan { src, slot, labels } => Ok(Box::new(NodeScan{
@@ -81,7 +85,7 @@ impl super::Backend for GramBackend {
 #[derive(Debug)]
 struct Statement {
     g: Rc<Graph>,
-    plan: Box<dyn PlanStep>,
+    plan: Box<dyn Operator>,
     num_slots: usize,
 }
 
@@ -101,7 +105,7 @@ impl PreparedStatement for Statement {
 #[derive(Debug)]
 struct GramCursorState {
     ctx: Context,
-    plan: Box<dyn PlanStep>
+    plan: Box<dyn Operator>
 }
 
 impl CursorState for GramCursorState {
@@ -153,11 +157,12 @@ impl Expr {
     }
 }
 
-trait PlanStep: Debug {
+// Physical operator. We have one of these for each Logical operator the frontend emits.
+trait Operator: Debug {
     fn next(&mut self, ctx: &mut Context, row: &mut Row) -> Result<bool, Error>;
 
     // I can't figure out how do implement the normal "Clone" trait for this trait..
-    fn clone(&self) -> Box<dyn PlanStep>;
+    fn clone(&self) -> Box<dyn Operator>;
 }
 
 #[derive(Debug)]
@@ -168,7 +173,7 @@ pub enum ExpandState {
 
 #[derive(Debug)]
 struct Expand {
-    pub src: Box<dyn PlanStep>,
+    pub src: Box<dyn Operator>,
 
     pub src_slot: usize,
 
@@ -185,7 +190,7 @@ struct Expand {
 }
 
 impl Expand {
-    pub fn new (src: Box<dyn PlanStep>, src_slot: usize, dst_slot: usize, rel_slot: usize, rel_type: Token) -> Expand {
+    pub fn new (src: Box<dyn Operator>, src_slot: usize, dst_slot: usize, rel_slot: usize, rel_type: Token) -> Expand {
         return Expand{
             src,
             src_slot,
@@ -198,7 +203,7 @@ impl Expand {
     }
 }
 
-impl PlanStep for Expand {
+impl Operator for Expand {
     fn next(&mut self, ctx: &mut Context, out: &mut Row) -> Result<bool, Error> {
         loop {
             match &self.state {
@@ -232,7 +237,7 @@ impl PlanStep for Expand {
         }
     }
 
-    fn clone(&self) -> Box<dyn PlanStep> {
+    fn clone(&self) -> Box<dyn Operator> {
         Box::new(Expand{
             src: self.src.clone(),
             src_slot: self.src_slot,
@@ -248,7 +253,7 @@ impl PlanStep for Expand {
 // For each src row, perform a full no de scan with the specified filters
 #[derive(Debug)]
 struct NodeScan {
-    pub src: Box<dyn PlanStep>,
+    pub src: Box<dyn Operator>,
 
     // Next node id in g to return
     pub next_node: usize,
@@ -260,7 +265,7 @@ struct NodeScan {
     pub labels: Option<Token>,
 }
 
-impl PlanStep for NodeScan {
+impl Operator for NodeScan {
     fn next(&mut self, ctx: &mut Context, out: &mut Row) -> Result<bool, Error> {
         loop {
             if ctx.g.nodes.len() > self.next_node {
@@ -280,7 +285,7 @@ impl PlanStep for NodeScan {
         }
     }
 
-    fn clone(&self) -> Box<dyn PlanStep> {
+    fn clone(&self) -> Box<dyn Operator> {
         Box::new(NodeScan{
             src: self.src.clone(),
             next_node: 0,
@@ -293,12 +298,12 @@ impl PlanStep for NodeScan {
 #[derive(Debug, Clone)]
 struct Argument;
 
-impl PlanStep for Argument {
+impl Operator for Argument {
     fn next(&mut self, ctx: &mut Context, out: &mut Row) -> Result<bool, Error> {
         unimplemented!()
     }
 
-    fn clone(&self) -> Box<dyn PlanStep> {
+    fn clone(&self) -> Box<dyn Operator> {
         Box::new(Argument{})
     }
 }
@@ -311,11 +316,11 @@ struct Projection {
 
 #[derive(Debug)]
 struct Return {
-    pub src: Box<dyn PlanStep>,
+    pub src: Box<dyn Operator>,
     pub projections: Vec<Projection>,
 }
 
-impl PlanStep for Return {
+impl Operator for Return {
     fn next(&mut self, ctx: &mut Context, out: &mut Row) -> Result<bool, Error> {
         println!("----");
         let mut first = true;
@@ -345,7 +350,7 @@ impl PlanStep for Return {
         Ok(false)
     }
 
-    fn clone(&self) -> Box<dyn PlanStep> {
+    fn clone(&self) -> Box<dyn Operator> {
         Box::new(Return{
             src: self.src.clone(),
             projections: self.projections.clone(),

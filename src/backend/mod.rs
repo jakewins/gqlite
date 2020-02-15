@@ -1,3 +1,7 @@
+//
+// Backends implement the actual storage of graphs, and provide implementations of the
+// logical operators the frontend emits that can act on that storage.
+//
 use crate::{Cursor, Error, Token};
 use crate::frontend::{LogicalPlan};
 use std::fmt::Debug;
