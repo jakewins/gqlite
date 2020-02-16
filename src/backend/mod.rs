@@ -64,5 +64,5 @@ impl Tokens {
     }
 }
 
-
+#[cfg(feature = "gram")]
 pub(crate) mod gram;

@@ -18,11 +18,20 @@ pub struct Database {
 }
 
 impl Database {
+    #[cfg(feature = "gram")]
     pub fn open(path: &str) -> Result<Database, Error> {
         let backend = backend::gram::GramBackend::open(path)?;
         let frontend = Frontend{ tokens: backend.tokens() };
         return Ok(Database {
             backend: Box::new(backend),
+            frontend,
+        })
+    }
+
+    pub fn with_backend(backend: Box<dyn Backend>) -> Result<Database, Error> {
+        let frontend = Frontend{ tokens: backend.tokens() };
+        return Ok(Database {
+            backend,
             frontend,
         })
     }
