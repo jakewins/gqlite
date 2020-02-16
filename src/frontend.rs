@@ -160,7 +160,7 @@ fn plan_create(pc: &mut PlanningContext, src: LogicalPlan, create_stmt: Pair<Rul
         nodes.push(NodeSpec{
             slot: pc.get_or_alloc_slot(node.identifier),
             labels: node.labels,
-            props: vec![]
+            props: node.props,
         });
     }
 
@@ -240,7 +240,8 @@ fn plan_expr(pc: & mut PlanningContext, expression: Pair<Rule>) -> Expr {
     for inner in expression.into_inner() {
         match inner.as_rule() {
             Rule::string => {
-                return Expr::Lit(Val::String(String::from(inner.as_str())))
+                let content = inner.into_inner().next().expect("Strings should always have an inner value").as_str();
+                return Expr::Lit(Val::String(String::from(content)))
             }
             Rule::id => {
                 let tok = pc.tokenize(inner.as_str());
@@ -433,6 +434,7 @@ fn parse_pattern_graph(pc: &mut PlanningContext, patterns: Pair<Rule>) -> Result
 fn parse_pattern_node(pc: &mut PlanningContext, pattern_node: Pair<Rule>) -> PatternNode {
     let mut identifier = None;
     let mut label = None;
+    let mut props = Vec::new();
     for part in pattern_node.into_inner() {
         match part.as_rule() {
             Rule::id => {
@@ -440,6 +442,9 @@ fn parse_pattern_node(pc: &mut PlanningContext, pattern_node: Pair<Rule>) -> Pat
             }
             Rule::label => {
                 label = Some(pc.tokenize(part.as_str()))
+            }
+            Rule::map => {
+                props = parse_map_expression(pc, part);
             }
             _ => panic!("don't know how to handle: {}", part),
         }
@@ -453,7 +458,7 @@ fn parse_pattern_node(pc: &mut PlanningContext, pattern_node: Pair<Rule>) -> Pat
         vec![]
     };
 
-    return PatternNode{ identifier: id, labels, props: vec![], solved: false }
+    return PatternNode{ identifier: id, labels, props, solved: false }
 }
 
 fn parse_pattern_rel(pc: &mut PlanningContext, left_node: Token, pattern_rel: Pair<Rule>) -> Result<PatternRel, Error> {
@@ -484,6 +489,25 @@ fn parse_pattern_rel(pc: &mut PlanningContext, left_node: Token, pattern_rel: Pa
     let id = identifier.unwrap_or_else(|| pc.new_anon_rel());
     let rt = rel_type.unwrap_or_else(||pc.new_anon_rel());
     return Ok(PatternRel{ left_node, right_node: None, identifier: id, rel_type: rt, dir, props: vec![], solved: false })
+}
+
+fn parse_map_expression(pc: &mut PlanningContext, map_expr: Pair<Rule>) -> Vec<MapEntryExpr> {
+    let mut out = Vec::new();
+    for pair in map_expr.into_inner() {
+        match pair.as_rule() {
+            Rule::map_pair => {
+                let mut pair_iter = pair.into_inner();
+                let id_token = pair_iter.next().expect("Map pair must contain an identifier");
+                let identifier = pc.tokenize(id_token.as_str());
+
+                let expr_token = pair_iter.next().expect("Map pair must contain an expression");
+                let expr = plan_expr(pc, expr_token);
+                out.push(MapEntryExpr{ key: identifier, val: expr })
+            }
+            _ => unreachable!(),
+        }
+    }
+    return out;
 }
 
 #[derive(Debug, PartialEq)]
