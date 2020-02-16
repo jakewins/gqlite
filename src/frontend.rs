@@ -161,6 +161,7 @@ fn plan_create(pc: &mut PlanningContext, src: LogicalPlan, create_stmt: Pair<Rul
         nodes.push(NodeSpec{
             slot: pc.get_or_alloc_slot(node.identifier),
             labels: node.labels,
+            props: vec![]
         });
     }
 
@@ -172,6 +173,7 @@ fn plan_create(pc: &mut PlanningContext, src: LogicalPlan, create_stmt: Pair<Rul
                     rel_type: rel.rel_type,
                     start_node_slot: pc.get_or_alloc_slot(rel.left_node),
                     end_node_slot: pc.get_or_alloc_slot(rel.right_node.unwrap()),
+                    props: vec![]
                 });
             }
             Some(Dir::In) => {
@@ -180,6 +182,7 @@ fn plan_create(pc: &mut PlanningContext, src: LogicalPlan, create_stmt: Pair<Rul
                     rel_type: rel.rel_type,
                     start_node_slot: pc.get_or_alloc_slot(rel.right_node.unwrap()),
                     end_node_slot: pc.get_or_alloc_slot(rel.left_node),
+                    props: vec![]
                 });
             }
             None => return Err(Error{ msg: "relationships in CREATE clauses must have a direction".to_string() })
@@ -198,6 +201,7 @@ fn plan_create(pc: &mut PlanningContext, src: LogicalPlan, create_stmt: Pair<Rul
 pub struct NodeSpec {
     slot: usize,
     labels: Vec<Token>,
+    props: Vec<MapEntryExpr>,
 }
 
 // Specification of a rel to create
@@ -207,6 +211,7 @@ pub struct RelSpec {
     rel_type: Token,
     start_node_slot: usize,
     end_node_slot: usize,
+    props: Vec<MapEntryExpr>,
 }
 
 fn plan_return(pc: &mut PlanningContext, src: LogicalPlan, return_stmt: Pair<Rule>) -> LogicalPlan {
@@ -270,6 +275,7 @@ fn plan_expr(pc: & mut PlanningContext, expression: Pair<Rule>) -> Expr {
 pub struct PatternNode {
     identifier: Token,
     labels: Vec<Token>,
+    props: Vec<MapEntryExpr>,
     solved: bool,
 }
 
@@ -287,6 +293,7 @@ pub struct PatternRel {
     right_node: Option<Token>,
     // From the perspective of the left node, is this pattern inbound or outbound?
     dir: Option<Dir>,
+    props: Vec<MapEntryExpr>,
     solved: bool,
 }
 
@@ -447,7 +454,7 @@ fn parse_pattern_node(pc: &mut PlanningContext, pattern_node: Pair<Rule>) -> Pat
         vec![]
     };
 
-    return PatternNode{ identifier: id, labels, solved: false }
+    return PatternNode{ identifier: id, labels, props: vec![], solved: false }
 }
 
 fn parse_pattern_rel(pc: &mut PlanningContext, left_node: Token, pattern_rel: Pair<Rule>) -> Result<PatternRel, Error> {
@@ -477,7 +484,7 @@ fn parse_pattern_rel(pc: &mut PlanningContext, left_node: Token, pattern_rel: Pa
     // TODO don't use this empty identifier here
     let id = identifier.unwrap_or_else(|| pc.new_anon_rel());
     let rt = rel_type.unwrap_or_else(||pc.new_anon_rel());
-    return Ok(PatternRel{ left_node, right_node: None, identifier: id, rel_type: rt, dir, solved: false })
+    return Ok(PatternRel{ left_node, right_node: None, identifier: id, rel_type: rt, dir, props: vec![], solved: false })
 }
 
 #[derive(Debug, PartialEq)]
@@ -486,6 +493,15 @@ pub enum Expr {
     // Lookup a property by id
     Prop(Box<Self>, Vec<Token>),
     Slot(Slot),
+    // Note that this is different from a literal map; map expressions can have expressions as
+    // values, while a Val map is "values all the way down".
+    Map(Vec<MapEntryExpr>)
+}
+
+#[derive(Debug, PartialEq)]
+pub struct MapEntryExpr {
+    key: Token,
+    val: Expr,
 }
 
 #[cfg(test)]
@@ -523,6 +539,7 @@ mod tests {
             nodes: vec![NodeSpec{
                 slot: pc.get_or_alloc_slot(id_n),
                 labels: vec![lbl_person],
+                props: vec![]
             }],
             rels: vec![]
         })
@@ -542,13 +559,15 @@ mod tests {
                 NodeSpec{
                     slot: pc.get_or_alloc_slot(id_n),
                     labels: vec![lbl_person],
+                    props: vec![]
                 }],
             rels: vec![
                 RelSpec{
                     slot: pc.get_or_alloc_slot(id_r),
                     rel_type: rt_knows,
                     start_node_slot: pc.get_or_alloc_slot(id_n),
-                    end_node_slot: pc.get_or_alloc_slot(id_n)
+                    end_node_slot: pc.get_or_alloc_slot(id_n),
+                    props: vec![]
                 },
             ]
         })
@@ -574,6 +593,7 @@ mod tests {
                 NodeSpec{
                     slot: pc.get_or_alloc_slot(id_o),
                     labels: vec![lbl_person],
+                    props: vec![]
                 }],
             rels: vec![
                 RelSpec{
@@ -581,6 +601,7 @@ mod tests {
                     rel_type: rt_knows,
                     start_node_slot: pc.get_or_alloc_slot(id_n),
                     end_node_slot: pc.get_or_alloc_slot(id_o),
+                    props: vec![]
                 },
             ]
         })
@@ -606,6 +627,7 @@ mod tests {
                 NodeSpec{
                     slot: pc.get_or_alloc_slot(id_o),
                     labels: vec![lbl_person],
+                    props: vec![]
                 }],
             rels: vec![
                 RelSpec{
@@ -613,6 +635,7 @@ mod tests {
                     rel_type: rt_knows,
                     start_node_slot: pc.get_or_alloc_slot(id_o),
                     end_node_slot: pc.get_or_alloc_slot(id_n),
+                    props: vec![]
                 },
             ]
         })
