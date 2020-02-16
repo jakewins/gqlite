@@ -73,19 +73,32 @@ impl Cursor {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq)]
 pub enum Dir {
     Out, In
 }
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub struct Error {
+    // TODO I think maybe this should be &str?
     msg: String,
+}
+
+impl Display for Error {
+    fn fmt(&self, f: &mut Formatter<'_>) -> Result<(), fmt::Error> {
+        f.write_str(&self.msg)
+    }
 }
 
 impl std::convert::From<std::io::Error> for Error {
     fn from(e: std::io::Error) -> Self {
         Error{ msg: format!("from io.error: {:?}", e) }
+    }
+}
+
+impl std::convert::From<pest::error::Error<frontend::Rule>> for Error {
+    fn from(e: pest::error::Error<frontend::Rule>) -> Self {
+        Error{ msg: format!("{}", e)}
     }
 }
 
@@ -97,7 +110,7 @@ pub struct Row {
 // Pointer to a Val in a row
 pub type Slot = usize;
 
-#[derive(Debug,Clone)]
+#[derive(Debug,Clone,PartialEq)]
 pub enum Val {
     Null,
     String(String),

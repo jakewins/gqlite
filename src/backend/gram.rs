@@ -45,6 +45,9 @@ impl GramBackend {
                 next_rel_index: 0,
                 state: ExpandState::NextNode
             })),
+            LogicalPlan::Create { .. } => {
+                panic!("The gram backend does not yet support CREATE statements")
+            }
             LogicalPlan::Return { src, projections } => {
                 let mut converted_projections = Vec::new();
                 for projection in projections {
@@ -65,6 +68,7 @@ impl GramBackend {
             frontend::Expr::Lit(v) => Expr::Lit(v),
             frontend::Expr::Prop(e, props) => Expr::Prop(Box::new(self.convert_expr(*e)), props),
             frontend::Expr::Slot(s) => Expr::Slot(s),
+            _ => panic!("The gram backend does not support this expression type yet: {:?}", expr)
         }
     }
 }
@@ -120,7 +124,7 @@ struct Context {
 }
 
 #[derive(Debug, Clone)]
-pub enum Expr {
+enum Expr {
     Lit(Val),
     // Lookup a property by id
     Prop(Box<Expr>, Vec<Token>),
