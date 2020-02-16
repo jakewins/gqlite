@@ -39,10 +39,6 @@ impl Database {
     // TODO obviously the query string shouldn't be static
     pub fn run(&mut self, query_str: &'static str, cursor: &mut Cursor) -> Result<(), Error> {
         let plan = self.frontend.plan(query_str)?;
-
-        println!("plan: {:?}", plan);
-
-        let mut row = Row{ slots: vec![] };
         let mut prepped = self.backend.prepare(Box::new(plan))?;
 
         // The API then allows us to modify this to reuse existing CursorState if we like
