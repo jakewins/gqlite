@@ -172,7 +172,7 @@ fn plan_create(pc: &mut PlanningContext, src: LogicalPlan, create_stmt: Pair<Rul
                     rel_type: rel.rel_type,
                     start_node_slot: pc.get_or_alloc_slot(rel.left_node),
                     end_node_slot: pc.get_or_alloc_slot(rel.right_node.unwrap()),
-                    props: vec![]
+                    props: rel.props,
                 });
             }
             Some(Dir::In) => {
@@ -465,6 +465,7 @@ fn parse_pattern_rel(pc: &mut PlanningContext, left_node: Token, pattern_rel: Pa
     let mut identifier = None;
     let mut rel_type = None;
     let mut dir = None;
+    let mut props = Vec::new();
     for part in pattern_rel.into_inner() {
         match part.as_rule() {
             Rule::id => {
@@ -482,13 +483,16 @@ fn parse_pattern_rel(pc: &mut PlanningContext, left_node: Token, pattern_rel: Pa
                 }
                 dir = Some(Dir::Out)
             }
+            Rule::map => {
+                props = parse_map_expression(pc, part);
+            }
             _ => unreachable!(),
         }
     }
     // TODO don't use this empty identifier here
     let id = identifier.unwrap_or_else(|| pc.new_anon_rel());
     let rt = rel_type.unwrap_or_else(||pc.new_anon_rel());
-    return Ok(PatternRel{ left_node, right_node: None, identifier: id, rel_type: rt, dir, props: vec![], solved: false })
+    return Ok(PatternRel{ left_node, right_node: None, identifier: id, rel_type: rt, dir, props, solved: false })
 }
 
 fn parse_map_expression(pc: &mut PlanningContext, map_expr: Pair<Rule>) -> Vec<MapEntryExpr> {
@@ -618,6 +622,38 @@ mod tests {
                     start_node_slot: pc.get_or_alloc_slot(id_n),
                     end_node_slot: pc.get_or_alloc_slot(id_n),
                     props: vec![]
+                },
+            ]
+        });
+        Ok(())
+    }
+
+
+    #[test]
+    fn plan_create_rel_with_props() -> Result<(), Error> {
+        let (plan, mut pc) = plan("CREATE (n:Person)-[r:KNOWS {since:\"2012\"}]->(n)")?;
+
+        let rt_knows = pc.tokenize("KNOWS");
+        let lbl_person = pc.tokenize("Person");
+        let id_n = pc.tokenize("n");
+        let id_r = pc.tokenize("r");
+        assert_eq!(plan, LogicalPlan::Create{
+            src: Box::new(LogicalPlan::Argument),
+            nodes: vec![
+                NodeSpec{
+                    slot: pc.get_or_alloc_slot(id_n),
+                    labels: vec![lbl_person],
+                    props: vec![]
+                }],
+            rels: vec![
+                RelSpec{
+                    slot: pc.get_or_alloc_slot(id_r),
+                    rel_type: rt_knows,
+                    start_node_slot: pc.get_or_alloc_slot(id_n),
+                    end_node_slot: pc.get_or_alloc_slot(id_n),
+                    props: vec![
+                        MapEntryExpr{ key: pc.tokenize("since"), val: Expr::Lit(Val::String("2012".to_string())) },
+                    ]
                 },
             ]
         });
