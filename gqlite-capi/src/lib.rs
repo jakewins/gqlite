@@ -7,6 +7,7 @@ use std::os::raw::{c_char, c_int};
 use std::mem::transmute;
 use gqlite::{Database, Cursor};
 use std::borrow::BorrowMut;
+use std::fs::File;
 
 #[repr(C)]
 #[derive(Debug)]
@@ -25,7 +26,8 @@ pub struct cursor {
 pub extern fn gqlite_open(raw_url: *const c_char) -> *mut database {
     let url_bytes = unsafe { CStr::from_ptr(raw_url).to_bytes() };
     let url: &str = str::from_utf8(url_bytes).unwrap();
-    return unsafe { transmute(Box::new(database { db: Database::open(url).unwrap() })) }
+    let mut file = File::open(url)?;
+    return unsafe { transmute(Box::new(database { db: Database::open(&mut file).unwrap() })) }
 }
 
 // Close the database, free associated file handles and cursors

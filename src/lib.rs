@@ -10,6 +10,7 @@ use std::fmt;
 
 use backend::Backend;
 use crate::frontend::Frontend;
+use std::fs::File;
 
 #[derive(Debug)]
 pub struct Database {
@@ -19,8 +20,8 @@ pub struct Database {
 
 impl Database {
     #[cfg(feature = "gram")]
-    pub fn open(path: &str) -> Result<Database, Error> {
-        let backend = backend::gram::GramBackend::open(path)?;
+    pub fn open(file: &mut File) -> Result<Database, Error> {
+        let backend = backend::gram::GramBackend::open(file)?;
         let frontend = Frontend{ tokens: backend.tokens() };
         return Ok(Database {
             backend: Box::new(backend),
