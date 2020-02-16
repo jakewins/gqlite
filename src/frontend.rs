@@ -32,7 +32,7 @@ impl Frontend {
     }
 
     pub fn plan_in_context(&self, query_str: &'static str, mut pc: &mut PlanningContext) -> Result<LogicalPlan, Error> {
-        let query = CypherParser::parse(Rule::query, query_str)?
+        let query = CypherParser::parse(Rule::query, query_str).unwrap_or_else(|e| panic!("unsuccessful parse: {}", e))
             .next().unwrap(); // get and unwrap the `query` rule; never fails
 
         let mut plan = LogicalPlan::Argument;
@@ -85,15 +85,27 @@ pub enum LogicalPlan {
         nodes: Vec<NodeSpec>,
         rels: Vec<RelSpec>,
     },
-    Return{
+    Aggregate {
         src: Box<Self>,
         projections: Vec<Projection>,
-    }
+        aggregates: Vec<Aggregate>,
+    },
+    Return {
+        src: Box<Self>,
+        projections: Vec<Projection>,
+    },
 }
 
 #[derive(Debug, PartialEq)]
 pub struct Projection {
     pub expr: Expr,
+    pub alias: String, // TODO this should be Token
+}
+
+
+#[derive(Debug, PartialEq)]
+pub struct Aggregate {
+    pub agg: Agg,
     pub alias: String, // TODO this should be Token
 }
 
@@ -110,7 +122,6 @@ pub struct PlanningContext {
 }
 
 impl PlanningContext {
-
     fn tokenize(&mut self, contents: &str) -> Token {
         self.tokens.borrow_mut().tokenize(contents)
     }
@@ -215,22 +226,71 @@ pub struct RelSpec {
 
 fn plan_return(pc: &mut PlanningContext, src: LogicalPlan, return_stmt: Pair<Rule>) -> LogicalPlan {
     let mut parts = return_stmt.into_inner();
-    let projections = parts.next().and_then(|p| Some(plan_return_projections(pc, p))).expect("RETURN must start with projections");
-    return LogicalPlan::Return{ src: Box::new(src), projections };
+
+    let projection_type = parts.next().expect("return required").into_inner().next().expect("inner return required");
+    match projection_type.as_rule() {
+        Rule::map_projections => {
+            let projections = plan_return_projections(pc, projection_type);
+            return LogicalPlan::Return { src: Box::new(src), projections };
+        }
+        Rule::reduce_projections => {
+            let projections_and_aggregations = plan_return_aggregates(pc, projection_type);
+            return LogicalPlan::Aggregate { src: Box::new(src), projections: projections_and_aggregations.projections, aggregates: projections_and_aggregations.aggregations };
+        }
+        _ => panic!()
+    };
 }
 
-fn plan_return_projections(pc: & mut PlanningContext, projections: Pair<Rule>) -> Vec<Projection> {
+fn plan_projection(pc: &mut PlanningContext, projection: Pair<Rule>) -> Projection {
+    if let Rule::projection = projection.as_rule() {
+        let default_alias = String::from(projection.as_str());
+        let mut parts = projection.into_inner();
+        let expr = parts.next().and_then(|p| Some(plan_expr(pc, p))).unwrap();
+        let alias = parts.next().and_then(|p| match p.as_rule() {
+            Rule::id => Some(String::from(p.as_str())),
+            _ => None
+        }).unwrap_or(default_alias);
+        return Projection { expr, alias };
+    }
+    unreachable!(projection)
+}
+
+fn plan_return_projections(pc: &mut PlanningContext, projections: Pair<Rule>) -> Vec<Projection> {
     let mut out = Vec::new();
     for projection in projections.into_inner() {
-        if let Rule::projection = projection.as_rule() {
-            let default_alias = String::from(projection.as_str());
-            let mut parts = projection.into_inner();
-            let expr = parts.next().and_then(|p| Some(plan_expr(pc, p))).unwrap();
-            let alias = parts.next().and_then(|p| match p.as_rule() {
-                Rule::id => Some(String::from(p.as_str())),
-                _ => None
-            }).unwrap_or(default_alias);
-            out.push(Projection{expr, alias});
+        out.push(plan_projection(pc, projection))
+    }
+
+    return out;
+}
+
+struct AggregateProjections {
+    projections: Vec<Projection>,
+    aggregations: Vec<Aggregate>,
+}
+
+fn plan_return_aggregates(pc: &mut PlanningContext, projections: Pair<Rule>) -> AggregateProjections {
+    let mut out = AggregateProjections{
+        projections: Vec::new(),
+        aggregations: Vec::new(),
+    };
+
+    for inner in projections.into_inner() {
+        match inner.as_rule() {
+            Rule::projection => {
+                out.projections.push(plan_projection(pc, inner))
+            },
+            Rule::aggregation => {
+                let default_alias = String::from(inner.as_str());
+                let mut parts = inner.into_inner();
+                let agg = parts.next().and_then(|p| Some(plan_agg(pc, p))).unwrap();
+                let alias = parts.next().and_then(|p| match p.as_rule() {
+                    Rule::id => Some(String::from(p.as_str())),
+                    _ => None
+                }).unwrap_or(default_alias);
+                out.aggregations.push(Aggregate { agg, alias });
+            },
+            _ => unreachable!(inner)
         }
     }
     return out;
@@ -271,7 +331,21 @@ fn plan_expr(pc: & mut PlanningContext, expression: Pair<Rule>) -> Expr {
     panic!("Invalid expression from parser.")
 }
 
-#[derive(Debug,PartialEq)]
+fn plan_agg(pc: &mut PlanningContext, inner: Pair<Rule>) -> Agg {
+    match inner.as_rule() {
+        Rule::count_agg => {
+            let mut inner = inner.into_inner().next().unwrap();
+            return Agg::Count(plan_expr(pc, inner));
+        }
+        Rule::sum_agg => {
+            let mut inner = inner.into_inner().next().unwrap();
+            return Agg::Sum(plan_expr(pc, inner));
+        }
+        _ => panic!(String::from(inner.as_str())),
+    }
+}
+
+#[derive(Debug, PartialEq)]
 pub struct PatternNode {
     identifier: Token,
     labels: Vec<Token>,
@@ -522,7 +596,14 @@ pub enum Expr {
     Slot(Slot),
     // Map expressions differ from eg. Lit(Val::Map) in that they can have expressions as
     // values, like `{ name: trim_spaces(n.name) }`, and evaluate to Val maps.
-    Map(Vec<MapEntryExpr>)
+    Map(Vec<MapEntryExpr>),
+}
+
+#[derive(Debug, PartialEq)]
+pub enum Agg {
+    Count(Expr),
+    //Sum some property
+    Sum(Expr),
 }
 
 #[derive(Debug, PartialEq)]

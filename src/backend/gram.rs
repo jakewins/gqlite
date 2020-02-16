@@ -18,6 +18,7 @@ pub struct GramBackend {
 }
 
 impl GramBackend {
+
     pub fn open(path: &str) -> Result<GramBackend, Error> {
         let mut tokens = Tokens { table: Default::default() };
         let mut g = parser::load(&mut tokens, path)?;
@@ -47,7 +48,10 @@ impl GramBackend {
             })),
             LogicalPlan::Create { .. } => {
                 panic!("The gram backend does not yet support CREATE statements")
-            }
+            },
+            LogicalPlan::Aggregate { .. } => {
+                panic!("The gram backend does not yet support aggregations")
+            },
             LogicalPlan::Return { src, projections } => {
                 let mut converted_projections = Vec::new();
                 for projection in projections {
@@ -376,7 +380,6 @@ mod parser {
     pub fn load(tokens: &mut Tokens, path: &str) -> Result<Graph, Error> {
         let mut g = Graph{ nodes: vec![] };
 
-
         let query_str = std::fs::read_to_string(path).unwrap();
         let maybe_parse = GramParser::parse(Rule::gram, &query_str);
 
@@ -384,7 +387,7 @@ mod parser {
             .expect("unsuccessful parse") // unwrap the parse result
             .next().unwrap(); // get and unwrap the `file` rule; never fails
 
-//    let id_map = HashMap::new();
+        //let id_map = HashMap::new();
         let mut node_ids = Tokens{ table: Default::default() };
 
         for item in gram.into_inner() {

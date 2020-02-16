@@ -32,7 +32,14 @@ right_arrow = { ">" }
 pattern = { node  ~ ( rel ~ node )* }
 
 projection = { expr ~ ("AS" ~ id)? }
-projections = { projection ~ ( "," ~ projection )* }
+reduce_projections = { ( aggregation | projection ) ~ ( "," ~ ( aggregation | projection ) )* }
+map_projections = { ( !aggregation ~ projection ) ~ ( "," ~ ( !aggregation ~ projection ) )* }
+projections = { map_projections | reduce_projections }
+
+count_agg = { "COUNT(" ~ expr? ~ ")" }
+sum_agg = { "SUM(" ~ expr? ~ ")" }
+agg = _{ count_agg | sum_agg }
+aggregation = { agg ~ ("AS" ~ id)?  }
 
 create_stmt = { "CREATE" ~ pattern }
 match_stmt = { "MATCH" ~ pattern }
