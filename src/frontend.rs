@@ -32,9 +32,8 @@ impl Frontend {
     }
 
     pub fn plan_in_context(&self, query_str: &'static str, mut pc: &mut PlanningContext) -> Result<LogicalPlan, Error> {
-        let query = CypherParser::parse(Rule::query, query_str)
-            .expect("unsuccessful parse") // unwrap the parse result
-            .next().unwrap(); // get and unwrap the `file` rule; never fails
+        let query = CypherParser::parse(Rule::query, query_str)?
+            .next().unwrap(); // get and unwrap the `query` rule; never fails
 
         let mut plan = LogicalPlan::Argument;
 
@@ -493,8 +492,8 @@ pub enum Expr {
     // Lookup a property by id
     Prop(Box<Self>, Vec<Token>),
     Slot(Slot),
-    // Note that this is different from a literal map; map expressions can have expressions as
-    // values, while a Val map is "values all the way down".
+    // Map expressions differ from eg. Lit(Val::Map) in that they can have expressions as
+    // values, like `{ name: trim_spaces(n.name) }`, and evaluate to Val maps.
     Map(Vec<MapEntryExpr>)
 }
 
@@ -506,14 +505,14 @@ pub struct MapEntryExpr {
 
 #[cfg(test)]
 mod tests {
-    use crate::frontend::{Frontend, LogicalPlan, PatternNode, PlanningContext, PatternRel, NodeSpec, RelSpec};
+    use crate::frontend::{Frontend, LogicalPlan, PatternNode, PlanningContext, PatternRel, NodeSpec, RelSpec, MapEntryExpr, Expr};
     use crate::backend::Tokens;
     use std::cell::RefCell;
     use std::rc::Rc;
     use crate::Dir::Out;
-    use crate::Dir;
+    use crate::{Dir, Val, Error};
 
-    fn plan(q: &'static str) -> (LogicalPlan, PlanningContext) {
+    fn plan(q: &'static str) -> Result<(LogicalPlan, PlanningContext), Error> {
         let tokens = Rc::new(RefCell::new(Tokens::new()));
 
         let frontend = Frontend { tokens: Rc::clone(&tokens) };
@@ -524,13 +523,18 @@ mod tests {
             tokens: Rc::clone(&tokens)
         };
 
-        let plan = frontend.plan_in_context(q, &mut pc).unwrap();
-        return (plan, pc)
+        match frontend.plan_in_context(q, &mut pc) {
+            Ok(plan) => Ok((plan, pc)),
+            Err(e) => {
+                println!("{}", e);
+                Err(e)
+            }
+        }
     }
 
     #[test]
-    fn plan_create() {
-        let (plan, mut pc) = plan("CREATE (n:Person)");
+    fn plan_create() -> Result<(), Error> {
+        let (plan, mut pc) = plan("CREATE (n:Person)")?;
 
         let lbl_person = pc.tokenize("Person");
         let id_n = pc.tokenize("n");
@@ -542,12 +546,34 @@ mod tests {
                 props: vec![]
             }],
             rels: vec![]
-        })
+        });
+        Ok(())
     }
 
     #[test]
-    fn plan_create_rel() {
-        let (plan, mut pc) = plan("CREATE (n:Person)-[r:KNOWS]->(n)");
+    fn plan_create_with_props() -> Result<(), Error> {
+        let (plan, mut pc) = plan("CREATE (n:Person {name: \"Bob\"})")?;
+
+        let lbl_person = pc.tokenize("Person");
+        let id_n = pc.tokenize("n");
+        let key_name = pc.tokenize("name");
+        assert_eq!(plan, LogicalPlan::Create{
+            src: Box::new(LogicalPlan::Argument),
+            nodes: vec![NodeSpec{
+                slot: pc.get_or_alloc_slot(id_n),
+                labels: vec![lbl_person],
+                props: vec![MapEntryExpr{
+                    key: key_name, val: Expr::Lit(Val::String("Bob".to_string())),
+                }]
+            }],
+            rels: vec![]
+        });
+        Ok(())
+    }
+
+    #[test]
+    fn plan_create_rel() -> Result<(), Error> {
+        let (plan, mut pc) = plan("CREATE (n:Person)-[r:KNOWS]->(n)")?;
 
         let rt_knows = pc.tokenize("KNOWS");
         let lbl_person = pc.tokenize("Person");
@@ -570,12 +596,13 @@ mod tests {
                     props: vec![]
                 },
             ]
-        })
+        });
+        Ok(())
     }
 
     #[test]
-    fn plan_create_outbound_rel_on_preexisting_node() {
-        let (plan, mut pc) = plan("MATCH (n:Person) CREATE (n)-[r:KNOWS]->(o:Person)");
+    fn plan_create_outbound_rel_on_preexisting_node() -> Result<(), Error> {
+        let (plan, mut pc) = plan("MATCH (n:Person) CREATE (n)-[r:KNOWS]->(o:Person)")?;
 
         let rt_knows = pc.tokenize("KNOWS");
         let lbl_person = pc.tokenize("Person");
@@ -604,12 +631,13 @@ mod tests {
                     props: vec![]
                 },
             ]
-        })
+        });
+        Ok(())
     }
 
     #[test]
-    fn plan_create_inbound_rel_on_preexisting_node() {
-        let (plan, mut pc) = plan("MATCH (n:Person) CREATE (n)<-[r:KNOWS]-(o:Person)");
+    fn plan_create_inbound_rel_on_preexisting_node() -> Result<(), Error> {
+        let (plan, mut pc) = plan("MATCH (n:Person) CREATE (n)<-[r:KNOWS]-(o:Person)")?;
 
         let rt_knows = pc.tokenize("KNOWS");
         let lbl_person = pc.tokenize("Person");
@@ -638,6 +666,7 @@ mod tests {
                     props: vec![]
                 },
             ]
-        })
+        });
+        Ok(())
     }
 }
