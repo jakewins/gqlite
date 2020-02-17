@@ -2,7 +2,8 @@
 // The Gram backend is a backend implementation that acts on a Gram file.
 // It is currently single threaded, and provides no data durability guarantees.
 
-use crate::{Error, Val, Dir, Slot, Row, Cursor, frontend, CursorState};
+use crate::{Val, Dir, Slot, Row, Cursor, frontend, CursorState};
+use anyhow::Result;
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 use std::cell::RefCell;
@@ -19,7 +20,7 @@ pub struct GramBackend {
 }
 
 impl GramBackend {
-    pub fn open(file: &mut File) -> Result<GramBackend, Error> {
+    pub fn open(file: &mut File) -> Result<GramBackend> {
         let mut tokens = Tokens { table: Default::default() };
         let g = parser::load(&mut tokens, file)?;
 
@@ -28,7 +29,7 @@ impl GramBackend {
         })
     }
 
-    fn convert(&self, plan: Box<LogicalPlan>) -> Result<Box<dyn Operator>, Error> {
+    fn convert(&self, plan: Box<LogicalPlan>) -> Result<Box<dyn Operator>> {
         match *plan {
             LogicalPlan::Argument => Ok(Box::new(Argument{})),
             LogicalPlan::NodeScan { src, slot, labels } => Ok(Box::new(NodeScan{
@@ -79,7 +80,7 @@ impl super::Backend for GramBackend {
         Rc::clone(&self.tokens)
     }
 
-    fn prepare(&self, logical_plan: Box<LogicalPlan>) -> Result<Box<dyn PreparedStatement>, Error> {
+    fn prepare(&self, logical_plan: Box<LogicalPlan>) -> Result<Box<dyn PreparedStatement>> {
         let plan = self.convert(logical_plan)?;
         return Ok(Box::new(Statement{ g: Rc::clone(&self.g), plan,
             // TODO: pipe this knowledge through from logial plan
@@ -95,7 +96,7 @@ struct Statement {
 }
 
 impl PreparedStatement for Statement {
-    fn run(&mut self, cursor: &mut Cursor) -> Result<(), Error> {
+    fn run(&mut self, cursor: &mut Cursor) -> Result<()> {
         cursor.state = Some(Box::new(GramCursorState{
             ctx: Context{ g: Rc::clone(&self.g)},
             plan: self.plan.clone(),
@@ -114,7 +115,7 @@ struct GramCursorState {
 }
 
 impl CursorState for GramCursorState {
-    fn next(&mut self, row: &mut Row) -> Result<bool, Error> {
+    fn next(&mut self, row: &mut Row) -> Result<bool> {
         self.plan.next(&mut self.ctx, row)
     }
 }
@@ -134,12 +135,12 @@ enum Expr {
 
 impl Expr {
 
-    fn eval_prop(ctx: &mut Context, row: &mut Row, expr: &Box<Expr>, props: &Vec<Token>) -> Result<Val, Error> {
+    fn eval_prop(ctx: &mut Context, row: &mut Row, expr: &Box<Expr>, props: &Vec<Token>) -> Result<Val> {
         let mut v = expr.eval(ctx, row)?;
         for prop in props {
             v = match v {
-                Val::Null=> Err(Error{ msg: format!("NULL has no property {}", prop) }),
-                Val::String(_) => Err(Error{ msg: format!("STRING has no property {}", prop) }),
+                Val::Null=> Err(anyhow!("NULL has no property {}", prop)),
+                Val::String(_) => Err(anyhow!("STRING has no property {}", prop)),
                 Val::Node(id) => match ctx.g.get_node_prop(id, *prop) {
                     Some(v) => Ok(v),
                     None => Ok(Val::Null),
@@ -153,7 +154,7 @@ impl Expr {
         return Ok(v)
     }
 
-    fn eval(&self, ctx: &mut Context, row: &mut Row) -> Result<Val, Error> {
+    fn eval(&self, ctx: &mut Context, row: &mut Row) -> Result<Val> {
         match self {
             Expr::Prop(expr, props) => Expr::eval_prop(ctx, row, expr, props),
             Expr::Slot(slot) => Ok(row.slots[*slot].clone()), // TODO not this
@@ -164,7 +165,7 @@ impl Expr {
 
 // Physical operator. We have one of these for each Logical operator the frontend emits.
 trait Operator: Debug {
-    fn next(&mut self, ctx: &mut Context, row: &mut Row) -> Result<bool, Error>;
+    fn next(&mut self, ctx: &mut Context, row: &mut Row) -> Result<bool>;
 
     // I can't figure out how do implement the normal "Clone" trait for this trait..
     fn clone(&self) -> Box<dyn Operator>;
@@ -199,7 +200,7 @@ impl Expand {
 }
 
 impl Operator for Expand {
-    fn next(&mut self, ctx: &mut Context, out: &mut Row) -> Result<bool, Error> {
+    fn next(&mut self, ctx: &mut Context, out: &mut Row) -> Result<bool> {
         loop {
             match &self.state {
                 ExpandState::NextNode => {
@@ -261,7 +262,7 @@ struct NodeScan {
 }
 
 impl Operator for NodeScan {
-    fn next(&mut self, ctx: &mut Context, out: &mut Row) -> Result<bool, Error> {
+    fn next(&mut self, ctx: &mut Context, out: &mut Row) -> Result<bool> {
         loop {
             if ctx.g.nodes.len() > self.next_node {
                 let node = ctx.g.nodes.get(self.next_node).unwrap();
@@ -294,7 +295,7 @@ impl Operator for NodeScan {
 struct Argument;
 
 impl Operator for Argument {
-    fn next(&mut self, _ctx: &mut Context, _out: &mut Row) -> Result<bool, Error> {
+    fn next(&mut self, _ctx: &mut Context, _out: &mut Row) -> Result<bool> {
         unimplemented!()
     }
 
@@ -316,7 +317,7 @@ struct Return {
 }
 
 impl Operator for Return {
-    fn next(&mut self, ctx: &mut Context, out: &mut Row) -> Result<bool, Error> {
+    fn next(&mut self, ctx: &mut Context, out: &mut Row) -> Result<bool> {
         println!("----");
         let mut first = true;
         for cell in &self.projections {
@@ -354,13 +355,13 @@ impl Operator for Return {
 }
 
 mod parser {
+    use anyhow::Result;
     use std::collections::{HashMap};
     use crate::pest::Parser;
     use crate::backend::gram::{Node, Graph};
-    use crate::{Error, Val};
+    use crate::Val;
     use crate::backend::{Tokens, Token};
     use std::fs::File;
-    use std::io;
     use std::io::Read;
 
     #[derive(Parser)]
@@ -375,13 +376,13 @@ mod parser {
         file.metadata().map(|m| m.len() as usize + 1).unwrap_or(0)
     }
 
-    fn read_to_string(file: &mut File) -> io::Result<String> {
+    fn read_to_string(file: &mut File) -> Result<String> {
         let mut string = String::with_capacity(initial_buffer_size(&file));
         file.read_to_string(&mut string)?;
         Ok(string)
     }
 
-    pub fn load(tokens: &mut Tokens, file: &mut File) -> Result<Graph, Error> {
+    pub fn load(tokens: &mut Tokens, file: &mut File) -> Result<Graph> {
         let mut g = Graph{ nodes: vec![] };
 
 

@@ -2,15 +2,16 @@
 // Backends implement the actual storage of graphs, and provide implementations of the
 // logical operators the frontend emits that can act on that storage.
 //
-use crate::{Cursor, Error};
+use crate::Cursor;
 use crate::frontend::{LogicalPlan};
+use anyhow::Result;
 use std::fmt::Debug;
 use std::rc::Rc;
 use std::cell::RefCell;
 use std::collections::HashMap;
 
 pub trait PreparedStatement: Debug {
-    fn run(&mut self, cursor: &mut Cursor) -> Result<(), Error>;
+    fn run(&mut self, cursor: &mut Cursor) -> Result<()>;
 }
 
 // I don't know if any of this makes any sense, but the thoughts here is like.. lets make it
@@ -23,7 +24,7 @@ pub trait Backend: Debug {
     fn tokens(&self) -> Rc<RefCell<Tokens>>;
 
     // Convert a logical plan into something executable
-    fn prepare(&self, plan: Box<LogicalPlan>) -> Result<Box<dyn PreparedStatement>, Error>;
+    fn prepare(&self, plan: Box<LogicalPlan>) -> Result<Box<dyn PreparedStatement>>;
 }
 
 
