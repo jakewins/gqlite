@@ -36,7 +36,7 @@ pub type Token = usize;
 // Simple in-memory string-to-token mapper.
 #[derive(Debug)]
 pub struct Tokens {
-    table: HashMap<String, Token>,
+    pub table: HashMap<String, Token>,
 }
 
 impl Tokens {

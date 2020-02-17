@@ -2,8 +2,8 @@ extern crate pest;
 #[macro_use]
 extern crate pest_derive;
 
-mod backend;
-mod frontend;
+pub mod backend;
+pub mod frontend;
 
 use std::fmt::{Display, Formatter, Debug};
 use std::fmt;
@@ -59,8 +59,8 @@ pub trait CursorState : Debug {
 // valid until next time you call "next", or until the transaction you are in is closed.
 #[derive(Debug)]
 pub struct Cursor {
-    state: Option<Box<dyn CursorState>>,
-    row: Row,
+    pub state: Option<Box<dyn CursorState>>,
+    pub row: Row,
 }
 
 impl Cursor {
@@ -90,7 +90,7 @@ pub enum Dir {
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub struct Error {
     // TODO I think maybe this should be &str?
-    msg: String,
+    pub msg: String,
 }
 
 impl Display for Error {
@@ -113,7 +113,7 @@ impl std::convert::From<pest::error::Error<frontend::Rule>> for Error {
 
 #[derive(Debug)]
 pub struct Row {
-    slots: Vec<Val>
+    pub slots: Vec<Val>
 }
 
 // Pointer to a Val in a row
@@ -128,7 +128,7 @@ pub enum Val {
 }
 
 impl Val {
-    fn as_node_id(&self) -> usize {
+    pub fn as_node_id(&self) -> usize {
         match self {
             Val::Node(id) => *id,
             _ => panic!("invalid execution plan, non-node value feeds into thing expecting node value")
