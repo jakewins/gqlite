@@ -4,7 +4,7 @@ fn main() -> anyhow::Result<()> {
     #[cfg(all(feature = "cli", feature = "gram"))]
     {
         use clap::{App, AppSettings};
-        use gqlite::{Database, Cursor};
+        use gqlite::{Cursor, Database};
 
         let matches = App::new("g")
             .version("0.0")
@@ -13,24 +13,23 @@ fn main() -> anyhow::Result<()> {
             .args_from_usage(
                 "-f, --file=[FILE] @graph.gram 'Sets the gram file to use'
             -h, --help 'Print help information'
-            <QUERY> 'Query to execute'")
+            <QUERY> 'Query to execute'",
+            )
             .get_matches();
 
         let query_str = string_to_static_str(matches.value_of("QUERY").unwrap());
         let path = matches.value_of("file").unwrap_or("graph.gram");
 
-        let mut file = File::open(path)?;let mut db = Database::open(&mut file)?;
+        let mut file = File::open(path)?;
+        let mut db = Database::open(&mut file)?;
         let mut cursor = Cursor::new();
         db.run(query_str, &mut cursor)?;
 
-        while cursor.next()? {
-
-        }
+        while cursor.next()? {}
     }
 
     Ok(())
 }
-
 
 // TODO: The reason for this is that the cursor borrows part of the query string when you
 //       run a query, and rather than deal with setting proper lifetimes for that I think we can

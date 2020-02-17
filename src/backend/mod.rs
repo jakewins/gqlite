@@ -2,13 +2,13 @@
 // Backends implement the actual storage of graphs, and provide implementations of the
 // logical operators the frontend emits that can act on that storage.
 //
+use crate::frontend::LogicalPlan;
 use crate::Cursor;
-use crate::frontend::{LogicalPlan};
 use anyhow::Result;
-use std::fmt::Debug;
-use std::rc::Rc;
 use std::cell::RefCell;
 use std::collections::HashMap;
+use std::fmt::Debug;
+use std::rc::Rc;
 
 pub trait PreparedStatement: Debug {
     fn run(&mut self, cursor: &mut Cursor) -> Result<()>;
@@ -26,7 +26,6 @@ pub trait Backend: Debug {
     // Convert a logical plan into something executable
     fn prepare(&self, plan: Box<LogicalPlan>) -> Result<Box<dyn PreparedStatement>>;
 }
-
 
 // gql databases are filled with short string keys. Both things stored in the graph, like property
 // keys, labels and relationship types. But also strings used for identifiers in queries, like
@@ -56,7 +55,7 @@ impl Tokens {
 
     pub fn tokenize(&mut self, content: &str) -> usize {
         match self.table.get(content) {
-            Some(tok) => { *tok }
+            Some(tok) => *tok,
             None => {
                 let tok = self.table.len();
                 self.table.insert(content.to_string(), tok);

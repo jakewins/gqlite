@@ -22,22 +22,24 @@ pub struct cursor {
 
 // Open a database file
 #[no_mangle]
-pub unsafe extern fn gqlite_open(raw_url: *const c_char) -> *const database {
+pub unsafe extern "C" fn gqlite_open(raw_url: *const c_char) -> *const database {
     let url_bytes = CStr::from_ptr(raw_url).to_bytes();
     let url: &str = str::from_utf8(url_bytes).unwrap();
 
     match File::open(url) {
-        Ok(mut file) => {
-            Box::into_raw(Box::new(database { db: Some(Database::open(&mut file).unwrap()), last_error: None }))
-        }
-        Err(error) => {
-            Box::into_raw(Box::new(database { db: None, last_error: Some(error.into()) }))
-        }
+        Ok(mut file) => Box::into_raw(Box::new(database {
+            db: Some(Database::open(&mut file).unwrap()),
+            last_error: None,
+        })),
+        Err(error) => Box::into_raw(Box::new(database {
+            db: None,
+            last_error: Some(error.into()),
+        })),
     }
 }
 
 #[no_mangle]
-pub unsafe extern fn gqlite_last_error(ptr: *const database) -> i32 {
+pub unsafe extern "C" fn gqlite_last_error(ptr: *const database) -> i32 {
     // TODO: expose error information properly to caller
     let db = {
         assert!(!ptr.is_null());
@@ -55,7 +57,7 @@ pub unsafe extern fn gqlite_last_error(ptr: *const database) -> i32 {
 
 // Close the database, free associated file handles and cursors
 #[no_mangle]
-pub unsafe extern fn gqlite_close(ptr: *mut database) -> c_int {
+pub unsafe extern "C" fn gqlite_close(ptr: *mut database) -> c_int {
     // from https://stackoverflow.com/questions/34754036/who-is-responsible-to-free-the-memory-after-consuming-the-box/34754403
     // Need to test this actually works to deallocate
     let mut db = Box::from_raw(ptr);
@@ -66,19 +68,25 @@ pub unsafe extern fn gqlite_close(ptr: *mut database) -> c_int {
 
 // Move cursor to next row
 #[no_mangle]
-pub unsafe extern fn gqlite_cursor_close(raw_cursor: *mut cursor) {
+pub unsafe extern "C" fn gqlite_cursor_close(raw_cursor: *mut cursor) {
     let _cur = Box::from_raw(raw_cursor);
 }
 
 // Allocate a new cursor for the specified database
 #[no_mangle]
-pub extern fn gqlite_cursor_new() -> *mut cursor {
-    Box::into_raw(Box::new(cursor { cursor: Cursor::new() }))
+pub extern "C" fn gqlite_cursor_new() -> *mut cursor {
+    Box::into_raw(Box::new(cursor {
+        cursor: Cursor::new(),
+    }))
 }
 
 // Run a query, provide result in cursor
 #[no_mangle]
-pub unsafe extern fn gqlite_run(raw_db: *mut database, raw_cursor: *mut cursor, raw_query: *const c_char) -> c_int {
+pub unsafe extern "C" fn gqlite_run(
+    raw_db: *mut database,
+    raw_cursor: *mut cursor,
+    raw_query: *const c_char,
+) -> c_int {
     let query_bytes = CStr::from_ptr(raw_query).to_bytes();
     let query: &str = str::from_utf8(query_bytes).unwrap();
     println!("Running {}", query);
@@ -98,7 +106,7 @@ pub unsafe extern fn gqlite_run(raw_db: *mut database, raw_cursor: *mut cursor, 
 
 // Move cursor to next row
 #[no_mangle]
-pub unsafe extern fn gqlite_cursor_next(raw_cursor: *mut cursor) -> c_int {
+pub unsafe extern "C" fn gqlite_cursor_next(raw_cursor: *mut cursor) -> c_int {
     let cursor = &mut *raw_cursor;
     match cursor.cursor.next() {
         Ok(_) => 0,
