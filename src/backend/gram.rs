@@ -24,22 +24,22 @@ impl GramBackend {
         let mut tokens = Tokens { table: Default::default() };
         let g = parser::load(&mut tokens, file)?;
 
-        return Ok(GramBackend {
+        Ok(GramBackend {
             tokens: Rc::new(RefCell::new(tokens)), g: Rc::new(g)
         })
     }
 
-    fn convert(&self, plan: Box<LogicalPlan>) -> Result<Box<dyn Operator>> {
-        match *plan {
+    fn convert(&self, plan: LogicalPlan) -> Result<Box<dyn Operator>> {
+        match plan {
             LogicalPlan::Argument => Ok(Box::new(Argument{})),
             LogicalPlan::NodeScan { src, slot, labels } => Ok(Box::new(NodeScan{
-                src: self.convert(src)?,
+                src: self.convert(*src)?,
                 next_node: 0,
                 slot,
                 labels
             })),
             LogicalPlan::Expand { src, src_slot, rel_slot, dst_slot, rel_type } => Ok(Box::new(Expand{
-                src: self.convert(src)?,
+                src: self.convert(*src)?,
                 src_slot,
                 rel_slot,
                 dst_slot,
@@ -59,7 +59,7 @@ impl GramBackend {
                 }
 
                 Ok(Box::new(Return{
-                    src: self.convert(src)?,
+                    src: self.convert(*src)?,
                     projections: converted_projections }))
             },
         }
@@ -81,8 +81,8 @@ impl super::Backend for GramBackend {
     }
 
     fn prepare(&self, logical_plan: Box<LogicalPlan>) -> Result<Box<dyn PreparedStatement>> {
-        let plan = self.convert(logical_plan)?;
-        return Ok(Box::new(Statement{ g: Rc::clone(&self.g), plan,
+        let plan = self.convert(*logical_plan)?;
+        Ok(Box::new(Statement{ g: Rc::clone(&self.g), plan,
             // TODO: pipe this knowledge through from logial plan
             num_slots: 16 }))
     }
@@ -104,7 +104,7 @@ impl PreparedStatement for Statement {
         if cursor.row.slots.len() < self.num_slots {
             cursor.row.slots.resize(self.num_slots, Val::Null);
         }
-        return Ok(())
+        Ok(())
     }
 }
 
@@ -135,23 +135,17 @@ enum Expr {
 
 impl Expr {
 
-    fn eval_prop(ctx: &mut Context, row: &mut Row, expr: &Box<Expr>, props: &Vec<Token>) -> Result<Val> {
+    fn eval_prop(ctx: &mut Context, row: &mut Row, expr: &Expr, props: &[Token]) -> Result<Val> {
         let mut v = expr.eval(ctx, row)?;
         for prop in props {
             v = match v {
-                Val::Null=> Err(anyhow!("NULL has no property {}", prop)),
-                Val::String(_) => Err(anyhow!("STRING has no property {}", prop)),
-                Val::Node(id) => match ctx.g.get_node_prop(id, *prop) {
-                    Some(v) => Ok(v),
-                    None => Ok(Val::Null),
-                },
-                Val::Rel{node, rel_index} => match ctx.g.get_rel_prop(node, rel_index, *prop) {
-                    Some(v) => Ok(v),
-                    None => Ok(Val::Null),
-                },
-            }?;
+                Val::Null=> bail!("NULL has no property {}", prop),
+                Val::String(_) => bail!("STRING has no property {}", prop),
+                Val::Node(id) => ctx.g.get_node_prop(id, *prop).unwrap_or(Val::Null),
+                Val::Rel{node, rel_index} => ctx.g.get_rel_prop(node, rel_index, *prop).unwrap_or(Val::Null),
+            };
         }
-        return Ok(v)
+        Ok(v)
     }
 
     fn eval(&self, ctx: &mut Context, row: &mut Row) -> Result<Val> {
@@ -193,10 +187,6 @@ struct Expand {
     pub next_rel_index: usize,
 
     pub state: ExpandState,
-}
-
-impl Expand {
-
 }
 
 impl Operator for Expand {
@@ -469,7 +459,7 @@ mod parser {
             }
         }
 
-        return Ok(g)
+        Ok(g)
     }
 }
 
@@ -489,10 +479,6 @@ pub struct Node {
     rels: Vec<RelHalf>,
 }
 
-impl Node {
-
-}
-
 #[derive(Debug)]
 pub struct Graph  {
     nodes: Vec<Node>
@@ -500,19 +486,11 @@ pub struct Graph  {
 
 impl Graph {
     fn get_node_prop(&self, node_id: usize, prop: Token) -> Option<Val> {
-        if let Some(v) = self.nodes[node_id].properties.get(&prop) {
-            Some(v.clone())
-        } else {
-            None
-        }
+        self.nodes[node_id].properties.get(&prop).cloned()
     }
 
     fn get_rel_prop(&self, node_id: usize, rel_index: usize, prop: Token) -> Option<Val> {
-        if let Some(v) = self.nodes[node_id].rels[rel_index].properties.get(&prop) {
-            Some(v.clone())
-        } else {
-            None
-        }
+        self.nodes[node_id].rels[rel_index].properties.get(&prop).cloned()
     }
 
     fn add_node(&mut self, id: usize, n: Node) {

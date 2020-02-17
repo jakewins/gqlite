@@ -26,7 +26,7 @@ impl Database {
     pub fn open(file: &mut File) -> Result<Database> {
         let backend = backend::gram::GramBackend::open(file)?;
         let frontend = Frontend{ tokens: backend.tokens() };
-        return Ok(Database {
+        Ok(Database {
             backend: Box::new(backend),
             frontend,
         })
@@ -34,7 +34,7 @@ impl Database {
 
     pub fn with_backend(backend: Box<dyn Backend>) -> Result<Database> {
         let frontend = Frontend{ tokens: backend.tokens() };
-        return Ok(Database {
+        Ok(Database {
             backend,
             frontend,
         })
@@ -57,7 +57,7 @@ pub trait CursorState : Debug {
 
 // Cursors are like iterators, except they don't require malloc for each row; the row you read is
 // valid until next time you call "next", or until the transaction you are in is closed.
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub struct Cursor {
     pub state: Option<Box<dyn CursorState>>,
     pub row: Row,
@@ -65,15 +65,14 @@ pub struct Cursor {
 
 impl Cursor {
     pub fn new() -> Cursor {
-        return Cursor {
-            state: None,
-            row: Row { slots: vec![] }
-        }
+        Cursor::default()
     }
+
+    #[allow(clippy::should_implement_trait)]
     pub fn next(&mut self) -> Result<bool> {
         match &mut self.state {
             Some(state) => {
-                return state.next(&mut self.row)
+                state.next(&mut self.row)
             }
             None => {
                 panic!("Use of uninitialized cursor")
@@ -87,7 +86,7 @@ pub enum Dir {
     Out, In
 }
 
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub struct Row {
     pub slots: Vec<Val>
 }

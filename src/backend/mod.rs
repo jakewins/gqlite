@@ -35,31 +35,32 @@ pub trait Backend: Debug {
 pub type Token = usize;
 
 // Simple in-memory string-to-token mapper.
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub struct Tokens {
     pub table: HashMap<String, Token>,
 }
 
 impl Tokens {
     pub fn new() -> Tokens {
-        Tokens{ table: Default::default() }
+        Tokens::default()
     }
+
     pub fn lookup(&self, tok: usize) -> Option<&str> {
         for (content, candidate) in self.table.iter() {
             if *candidate == tok {
                 return Some(&content);
             }
         }
-        return None
+        None
     }
 
     pub fn tokenize(&mut self, content: &str) -> usize {
         match self.table.get(content) {
-            Some(tok) => { return *tok }
+            Some(tok) => { *tok }
             None => {
                 let tok = self.table.len();
                 self.table.insert(content.to_string(), tok);
-                return tok
+                tok
             }
         }
     }

@@ -33,7 +33,7 @@ impl Frontend {
             tokens: Rc::clone(&self.tokens)})
     }
 
-    pub fn plan_in_context(&self, query_str: &str, mut pc: &mut PlanningContext) -> Result<LogicalPlan> {
+    pub fn plan_in_context(&self, query_str: &str, pc: &mut PlanningContext) -> Result<LogicalPlan> {
         let query = CypherParser::parse(Rule::query, &query_str)?
             .next().unwrap(); // get and unwrap the `query` rule; never fails
 
@@ -42,13 +42,13 @@ impl Frontend {
         for stmt in query.into_inner() {
             match stmt.as_rule() {
                 Rule::match_stmt => {
-                    plan = plan_match(&mut pc, plan, stmt)?;
+                    plan = plan_match(pc, plan, stmt)?;
                 }
                 Rule::create_stmt => {
-                    plan = plan_create(&mut pc, plan, stmt)?;
+                    plan = plan_create(pc, plan, stmt)?;
                 }
                 Rule::return_stmt => {
-                    plan = plan_return(&mut pc, plan, stmt);
+                    plan = plan_return(pc, plan, stmt);
                 }
                 Rule::EOI => (),
                 _ => unreachable!(),
@@ -57,7 +57,7 @@ impl Frontend {
 
         println!("plan: {:?}", plan);
 
-        return Ok(plan)
+        Ok(plan)
     }
 }
 
@@ -126,11 +126,11 @@ impl PlanningContext {
 
     pub fn get_or_alloc_slot(&mut self, tok: Token) -> usize {
         match self.slots.get(&tok) {
-            Some(slot) => { return *slot },
+            Some(slot) => { *slot },
             None => {
                 let slot = self.slots.len();
                 self.slots.insert(tok, slot);
-                return slot
+                slot
             }
         }
     }
@@ -138,13 +138,13 @@ impl PlanningContext {
     pub fn new_anon_rel(&mut self) -> Token {
         let seq = self.anon_rel_seq;
         self.anon_rel_seq += 1;
-        return self.tokenize(&format!("AnonRel#{}", seq))
+        self.tokenize(&format!("AnonRel#{}", seq))
     }
 
     pub fn new_anon_node(&mut self) -> Token {
         let seq = self.anon_node_seq;
         self.anon_node_seq += 1;
-        return self.tokenize(&format!("AnonNode#{}", seq))
+        self.tokenize(&format!("AnonNode#{}", seq))
     }
 }
 
@@ -190,11 +190,11 @@ fn plan_create(pc: &mut PlanningContext, src: LogicalPlan, create_stmt: Pair<Rul
         }
     }
 
-    return Ok(LogicalPlan::Create {
+    Ok(LogicalPlan::Create {
         src: Box::new(src),
         nodes,
         rels,
-    });
+    })
 }
 
 // Specification of a node to create
@@ -217,17 +217,17 @@ pub struct RelSpec {
 
 fn plan_return(pc: &mut PlanningContext, src: LogicalPlan, return_stmt: Pair<Rule>) -> LogicalPlan {
     let mut parts = return_stmt.into_inner();
-    let projections = parts.next().and_then(|p| Some(plan_return_projections(pc, p))).expect("RETURN must start with projections");
-    return LogicalPlan::Return{ src: Box::new(src), projections };
+    let projections = parts.next().map(|p| plan_return_projections(pc, p)).expect("RETURN must start with projections");
+    LogicalPlan::Return{ src: Box::new(src), projections }
 }
 
-fn plan_return_projections(pc: & mut PlanningContext, projections: Pair<Rule>) -> Vec<Projection> {
+fn plan_return_projections(pc: &mut PlanningContext, projections: Pair<Rule>) -> Vec<Projection> {
     let mut out = Vec::new();
     for projection in projections.into_inner() {
         if let Rule::projection = projection.as_rule() {
             let default_alias = String::from(projection.as_str());
             let mut parts = projection.into_inner();
-            let expr = parts.next().and_then(|p| Some(plan_expr(pc, p))).unwrap();
+            let expr = parts.next().map(|p| plan_expr(pc, p)).unwrap();
             let alias = parts.next().and_then(|p| match p.as_rule() {
                 Rule::id => Some(String::from(p.as_str())),
                 _ => None
@@ -235,10 +235,10 @@ fn plan_return_projections(pc: & mut PlanningContext, projections: Pair<Rule>) -
             out.push(Projection{expr, alias});
         }
     }
-    return out;
+    out
 }
 
-fn plan_expr(pc: & mut PlanningContext, expression: Pair<Rule>) -> Expr {
+fn plan_expr(pc: &mut PlanningContext, expression: Pair<Rule>) -> Expr {
     for inner in expression.into_inner() {
         match inner.as_rule() {
             Rule::string => {
@@ -283,7 +283,6 @@ pub struct PatternNode {
 
 impl PatternNode {
     fn merge(&mut self, _other: &PatternNode) {
-        // TODO
     }
 }
 
@@ -335,7 +334,7 @@ fn plan_match(pc: &mut PlanningContext, src: LogicalPlan, match_stmt: Pair<Rule>
     for id in &pg.e_order {
         let candidate = pg.e.get_mut(id).unwrap();
         // Advanced algorithm: Pick first node with a label filter on it and call it an afternoon
-        if candidate.labels.len() > 0 {
+        if !candidate.labels.is_empty() {
             plan = LogicalPlan::NodeScan{
                 src: Box::new(plan),
                 slot: pc.get_or_alloc_slot(*id),
@@ -403,7 +402,7 @@ fn plan_match(pc: &mut PlanningContext, src: LogicalPlan, match_stmt: Pair<Rule>
         }
     }
 
-    return Ok(plan)
+    Ok(plan)
 }
 
 fn parse_pattern_graph(pc: &mut PlanningContext, patterns: Pair<Rule>) -> Result<PatternGraph> {
@@ -439,7 +438,7 @@ fn parse_pattern_graph(pc: &mut PlanningContext, patterns: Pair<Rule>) -> Result
         }
     }
 
-    return Ok(pg);
+    Ok(pg)
 }
 
 // Figures out what step we need to find the specified node
@@ -470,7 +469,7 @@ fn parse_pattern_node(pc: &mut PlanningContext, pattern_node: Pair<Rule>) -> Pat
         vec![]
     };
 
-    return PatternNode{ identifier: id, labels, props, solved: false }
+    PatternNode{ identifier: id, labels, props, solved: false }
 }
 
 fn parse_pattern_rel(pc: &mut PlanningContext, left_node: Token, pattern_rel: Pair<Rule>) -> Result<PatternRel> {
@@ -504,7 +503,7 @@ fn parse_pattern_rel(pc: &mut PlanningContext, left_node: Token, pattern_rel: Pa
     // TODO don't use this empty identifier here
     let id = identifier.unwrap_or_else(|| pc.new_anon_rel());
     let rt = rel_type.unwrap_or_else(||pc.new_anon_rel());
-    return Ok(PatternRel{ left_node, right_node: None, identifier: id, rel_type: rt, dir, props, solved: false })
+    Ok(PatternRel{ left_node, right_node: None, identifier: id, rel_type: rt, dir, props, solved: false })
 }
 
 fn parse_map_expression(pc: &mut PlanningContext, map_expr: Pair<Rule>) -> Vec<MapEntryExpr> {
@@ -523,7 +522,7 @@ fn parse_map_expression(pc: &mut PlanningContext, map_expr: Pair<Rule>) -> Vec<M
             _ => unreachable!(),
         }
     }
-    return out;
+    out
 }
 
 #[derive(Debug, PartialEq)]
