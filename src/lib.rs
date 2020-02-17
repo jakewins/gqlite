@@ -36,8 +36,7 @@ impl Database {
         })
     }
 
-    // TODO obviously the query string shouldn't be static
-    pub fn run(&mut self, query_str: &'static str, cursor: &mut Cursor) -> Result<(), Error> {
+    pub fn run<'a>(&mut self, query_str: &'a str, cursor: &mut Cursor) -> Result<(), Error> {
         let plan = self.frontend.plan(query_str)?;
 
         println!("plan: {:?}", plan);
