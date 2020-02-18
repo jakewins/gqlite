@@ -7,7 +7,7 @@ use pest::Parser;
 
 use std::fmt::{Debug};
 use pest::iterators::Pair;
-use crate::{Slot, Val, Error, Row, Dir};
+use crate::{Slot, Val, Error, Dir};
 use std::collections::HashMap;
 use std::rc::Rc;
 use crate::backend::{Tokens, Token};
@@ -281,8 +281,8 @@ pub struct PatternNode {
 }
 
 impl PatternNode {
-    fn merge(&mut self, other: &PatternNode) {
-
+    fn merge(&mut self, _other: &PatternNode) {
+        // TODO
     }
 }
 
@@ -306,7 +306,7 @@ pub struct PatternGraph {
 }
 
 impl PatternGraph {
-    fn merge_node(&mut self, pc: &mut PlanningContext, n: PatternNode) {
+    fn merge_node(&mut self, n: PatternNode) {
         let entry = self.e.entry(n.identifier);
         match entry {
             Entry::Occupied(mut on) => {
@@ -319,7 +319,7 @@ impl PatternGraph {
         };
     }
 
-    fn merge_rel(&mut self, pc: &mut PlanningContext, r: PatternRel) {
+    fn merge_rel(&mut self, r: PatternRel) {
         self.v.push(r)
     }
 }
@@ -419,10 +419,10 @@ fn parse_pattern_graph(pc: &mut PlanningContext, patterns: Pair<Rule>) -> Result
                         Rule::node => {
                             let prior_node = parse_pattern_node(pc, segment);
                             prior_node_id = Some(prior_node.identifier);
-                            pg.merge_node(pc, prior_node);
+                            pg.merge_node(prior_node);
                             if let Some(mut rel) = prior_rel {
                                 rel.right_node = prior_node_id;
-                                pg.merge_rel(pc, rel);
+                                pg.merge_rel(rel);
                                 prior_rel = None
                             }
                         }

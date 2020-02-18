@@ -41,10 +41,6 @@ impl Database {
     pub fn run(&mut self, query_str: &str, cursor: &mut Cursor) -> Result<(), Error> {
         println!("5");
         let plan = self.frontend.plan(query_str)?;
-
-        println!("plan: {:?}", plan);
-
-        let mut row = Row{ slots: vec![] };
         let mut prepped = self.backend.prepare(Box::new(plan))?;
 
         // The API then allows us to modify this to reuse existing CursorState if we like

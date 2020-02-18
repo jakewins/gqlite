@@ -21,7 +21,7 @@ pub struct GramBackend {
 impl GramBackend {
     pub fn open(file: &mut File) -> Result<GramBackend, Error> {
         let mut tokens = Tokens { table: Default::default() };
-        let mut g = parser::load(&mut tokens, file)?;
+        let g = parser::load(&mut tokens, file)?;
 
         return Ok(GramBackend {
             tokens: Rc::new(RefCell::new(tokens)), g: Rc::new(g)
@@ -195,17 +195,7 @@ struct Expand {
 }
 
 impl Expand {
-    pub fn new (src: Box<dyn Operator>, src_slot: usize, dst_slot: usize, rel_slot: usize, rel_type: Token) -> Expand {
-        return Expand{
-            src,
-            src_slot,
-            rel_slot,
-            dst_slot,
-            rel_type,
-            next_rel_index: 0,
-            state: ExpandState::NextNode
-        }
-    }
+
 }
 
 impl Operator for Expand {
@@ -304,7 +294,7 @@ impl Operator for NodeScan {
 struct Argument;
 
 impl Operator for Argument {
-    fn next(&mut self, ctx: &mut Context, out: &mut Row) -> Result<bool, Error> {
+    fn next(&mut self, _ctx: &mut Context, _out: &mut Row) -> Result<bool, Error> {
         unimplemented!()
     }
 
@@ -410,7 +400,6 @@ mod parser {
                 Rule::path => {
                     let mut start_identifier : Option<Token> = None;
                     let mut end_identifier : Option<Token> = None;
-                    let mut props : HashMap<Token, Val> = HashMap::new();
 
                     for part in item.into_inner() {
                         match part.as_rule() {
@@ -500,13 +489,7 @@ pub struct Node {
 }
 
 impl Node {
-    pub fn new(labels: Vec<Token>, properties: HashMap<Token, Val>) -> Node {
-        return Node {
-            labels: labels.iter().cloned().collect(),
-            properties,
-            rels: vec![]
-        }
-    }
+
 }
 
 #[derive(Debug)]
