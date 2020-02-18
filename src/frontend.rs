@@ -25,7 +25,6 @@ pub struct Frontend {
 }
 
 impl Frontend {
-    // TODO obviously the query string shouldn't be static
     pub fn plan(&self, query_str: &str) -> Result<LogicalPlan> {
         self.plan_in_context(
             query_str,

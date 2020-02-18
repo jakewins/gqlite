@@ -40,7 +40,6 @@ impl Database {
         Ok(Database { backend, frontend })
     }
 
-    // TODO obviously the query string shouldn't be static
     pub fn run(&mut self, query_str: &str, cursor: &mut Cursor) -> Result<()> {
         let plan = self.frontend.plan(query_str)?;
         let mut prepped = self.backend.prepare(Box::new(plan))?;
