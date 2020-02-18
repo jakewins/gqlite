@@ -10,6 +10,7 @@ use super::PreparedStatement;
 use crate::frontend::{LogicalPlan};
 use std::fmt::Debug;
 use crate::backend::{Tokens, Token};
+use std::fs::File;
 
 #[derive(Debug)]
 pub struct GramBackend {
@@ -18,9 +19,9 @@ pub struct GramBackend {
 }
 
 impl GramBackend {
-    pub fn open(path: &str) -> Result<GramBackend, Error> {
+    pub fn open(file: &mut File) -> Result<GramBackend, Error> {
         let mut tokens = Tokens { table: Default::default() };
-        let g = parser::load(&mut tokens, path)?;
+        let g = parser::load(&mut tokens, file)?;
 
         return Ok(GramBackend {
             tokens: Rc::new(RefCell::new(tokens)), g: Rc::new(g)
@@ -358,16 +359,33 @@ mod parser {
     use crate::backend::gram::{Node, Graph};
     use crate::{Error, Val};
     use crate::backend::{Tokens, Token};
+    use std::fs::File;
+    use std::io;
+    use std::io::Read;
 
     #[derive(Parser)]
     #[grammar = "backend/gram.pest"]
     pub struct GramParser;
 
-    pub fn load(tokens: &mut Tokens, path: &str) -> Result<Graph, Error> {
+    /// Indicates how large a buffer to pre-allocate before reading the entire file.
+    fn initial_buffer_size(file: &File) -> usize {
+        // Allocate one extra byte so the buffer doesn't need to grow before the
+        // final `read` call at the end of the file.  Don't worry about `usize`
+        // overflow because reading will fail regardless in that case.
+        file.metadata().map(|m| m.len() as usize + 1).unwrap_or(0)
+    }
+
+    fn read_to_string(file: &mut File) -> io::Result<String> {
+        let mut string = String::with_capacity(initial_buffer_size(&file));
+        file.read_to_string(&mut string)?;
+        Ok(string)
+    }
+
+    pub fn load(tokens: &mut Tokens, file: &mut File) -> Result<Graph, Error> {
         let mut g = Graph{ nodes: vec![] };
 
 
-        let query_str = std::fs::read_to_string(path).unwrap();
+        let query_str = read_to_string(file).unwrap();
         let maybe_parse = GramParser::parse(Rule::gram, &query_str);
 
         let gram = maybe_parse

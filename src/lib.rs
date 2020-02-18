@@ -2,14 +2,15 @@ extern crate pest;
 #[macro_use]
 extern crate pest_derive;
 
-mod backend;
-mod frontend;
+pub mod backend;
+pub mod frontend;
 
 use std::fmt::{Display, Formatter, Debug};
 use std::fmt;
 
 use backend::Backend;
 use crate::frontend::Frontend;
+use std::fs::File;
 
 #[derive(Debug)]
 pub struct Database {
@@ -19,8 +20,8 @@ pub struct Database {
 
 impl Database {
     #[cfg(feature = "gram")]
-    pub fn open(path: &str) -> Result<Database, Error> {
-        let backend = backend::gram::GramBackend::open(path)?;
+    pub fn open(file: &mut File) -> Result<Database, Error> {
+        let backend = backend::gram::GramBackend::open(file)?;
         let frontend = Frontend{ tokens: backend.tokens() };
         return Ok(Database {
             backend: Box::new(backend),
@@ -37,7 +38,8 @@ impl Database {
     }
 
     // TODO obviously the query string shouldn't be static
-    pub fn run(&mut self, query_str: &'static str, cursor: &mut Cursor) -> Result<(), Error> {
+    pub fn run(&mut self, query_str: &str, cursor: &mut Cursor) -> Result<(), Error> {
+        println!("5");
         let plan = self.frontend.plan(query_str)?;
         let mut prepped = self.backend.prepare(Box::new(plan))?;
 
@@ -55,8 +57,8 @@ pub trait CursorState : Debug {
 // valid until next time you call "next", or until the transaction you are in is closed.
 #[derive(Debug)]
 pub struct Cursor {
-    state: Option<Box<dyn CursorState>>,
-    row: Row,
+    pub state: Option<Box<dyn CursorState>>,
+    pub row: Row,
 }
 
 impl Cursor {
@@ -86,7 +88,7 @@ pub enum Dir {
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub struct Error {
     // TODO I think maybe this should be &str?
-    msg: String,
+    pub msg: String,
 }
 
 impl Display for Error {
@@ -109,7 +111,7 @@ impl std::convert::From<pest::error::Error<frontend::Rule>> for Error {
 
 #[derive(Debug)]
 pub struct Row {
-    slots: Vec<Val>
+    pub slots: Vec<Val>
 }
 
 // Pointer to a Val in a row
@@ -124,7 +126,7 @@ pub enum Val {
 }
 
 impl Val {
-    fn as_node_id(&self) -> usize {
+    pub fn as_node_id(&self) -> usize {
         match self {
             Val::Node(id) => *id,
             _ => panic!("invalid execution plan, non-node value feeds into thing expecting node value")
