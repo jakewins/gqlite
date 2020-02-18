@@ -7,7 +7,7 @@ extern crate anyhow;
 pub mod backend;
 pub mod frontend;
 
-use anyhow::Result;
+pub use anyhow::{Result, Error};
 use std::fmt::{Display, Formatter, Debug};
 use std::fmt;
 
