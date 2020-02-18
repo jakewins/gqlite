@@ -12,6 +12,7 @@ use std::collections::HashMap;
 use std::rc::Rc;
 use crate::backend::{Tokens, Token};
 use std::cell::RefCell;
+use std::collections::hash_map::Entry;
 
 #[derive(Parser)]
 #[grammar = "cypher.pest"]
@@ -297,16 +298,25 @@ pub struct PatternRel {
     solved: bool,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub struct PatternGraph {
     e: HashMap<Token, PatternNode>,
+    e_order: Vec<Token>,
     v: Vec<PatternRel>,
 }
 
 impl PatternGraph {
     fn merge_node(&mut self, pc: &mut PlanningContext, n: PatternNode) {
         let entry = self.e.entry(n.identifier);
-        entry.and_modify(|on| on.merge(&n)).or_insert(n);
+        match entry {
+            Entry::Occupied(mut on) => {
+                on.get_mut().merge(&n);
+            }
+            Entry::Vacant(entry) => {
+                self.e_order.push(*entry.key());
+                entry.insert(n);
+            }
+        };
     }
 
     fn merge_rel(&mut self, pc: &mut PlanningContext, r: PatternRel) {
@@ -321,7 +331,8 @@ fn plan_match(pc: &mut PlanningContext, src: LogicalPlan, match_stmt: Pair<Rule>
     // Ok, now we have parsed the pattern into a full graph, time to start solving it
     println!("built pg: {:?}", pg);
     // Start by picking one high-selectivity node
-    for (id, candidate) in &mut pg.e {
+    for id in &pg.e_order {
+        let candidate = pg.e.get_mut(id).unwrap();
         // Advanced algorithm: Pick first node with a label filter on it and call it an afternoon
         if candidate.labels.len() > 0 {
             plan = LogicalPlan::NodeScan{
@@ -395,7 +406,7 @@ fn plan_match(pc: &mut PlanningContext, src: LogicalPlan, match_stmt: Pair<Rule>
 }
 
 fn parse_pattern_graph(pc: &mut PlanningContext, patterns: Pair<Rule>) -> Result<PatternGraph, Error> {
-    let mut pg: PatternGraph = PatternGraph{ e: HashMap::new(), v: Vec::new()};
+    let mut pg: PatternGraph = PatternGraph::default();
 
     for part in patterns.into_inner() {
         match part.as_rule() {
