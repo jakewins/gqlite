@@ -1,0 +1,3 @@
+# Ignore the features folder for language detection in Github
+# See https://github.com/github/linguist#using-gitattributes
+features/* linguist-vendored
