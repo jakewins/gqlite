@@ -39,21 +39,9 @@ mod example_steps {
     use cucumber::{steps, Step};
     use gqlite::{Cursor, Database, Error};
 
-    // TODO: The reason for this is that the cursor borrows part of the query string when you
-    //       run a query, and rather than deal with setting proper lifetimes for that I think we can
-    //       get rid of that memory sharing entirely, maybe? Although maybe the borrow is actually
-    //       kind of sensible; it'd mean queries with large string properties don't need to copy those
-    //       strings in, for instance..
-    fn string_to_static_str(s: &str) -> &'static str {
-        Box::leak(s.to_string().into_boxed_str())
-    }
-
     fn run_preparatory_query(world: &mut MyWorld, step: &Step) -> Result<(), Error> {
         let mut cursor = Cursor::new();
-        let result = world.graph.run(
-            string_to_static_str(&step.docstring().unwrap()),
-            &mut cursor,
-        );
+        let result = world.graph.run(&step.docstring().unwrap(), &mut cursor);
         while cursor.next()? {
             // consume
         }
@@ -63,10 +51,7 @@ mod example_steps {
     fn start_query(world: &mut MyWorld, step: &Step) {
         world
             .graph
-            .run(
-                string_to_static_str(&step.docstring().unwrap()),
-                &mut world.result,
-            )
+            .run(&step.docstring().unwrap(), &mut world.result)
             .expect("Should not fail")
     }
 
@@ -82,7 +67,7 @@ mod example_steps {
         let mut cursor = Cursor::new();
         world
             .graph
-            .run(string_to_static_str(&"MATCH (n) RETURN n"), &mut cursor)
+            .run("MATCH (n) RETURN n", &mut cursor)
             .expect("should succeed");
         return count_rows(&mut cursor).unwrap();
     }
