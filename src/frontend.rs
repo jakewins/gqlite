@@ -24,15 +24,15 @@ pub struct Frontend {
 
 impl Frontend {
     // TODO obviously the query string shouldn't be static
-    pub fn plan(&self, query_str: &'static str) -> Result<LogicalPlan, Error> {
+    pub fn plan(&self, query_str: &str) -> Result<LogicalPlan, Error> {
         self.plan_in_context(query_str, &mut PlanningContext{
             slots: Default::default(),
             anon_rel_seq:0, anon_node_seq: 0,
             tokens: Rc::clone(&self.tokens)})
     }
 
-    pub fn plan_in_context(&self, query_str: &'static str, mut pc: &mut PlanningContext) -> Result<LogicalPlan, Error> {
-        let query = CypherParser::parse(Rule::query, query_str)?
+    pub fn plan_in_context(&self, query_str: &str, mut pc: &mut PlanningContext) -> Result<LogicalPlan, Error> {
+        let query = CypherParser::parse(Rule::query, &query_str)?
             .next().unwrap(); // get and unwrap the `query` rule; never fails
 
         let mut plan = LogicalPlan::Argument;

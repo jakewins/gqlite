@@ -26,3 +26,11 @@ serde_yaml = { version = "0.8", optional = true }
 default = ["gram", "cli"]
 cli = ["clap"]
 gram = ["serde", "serde_yaml"]
+
+[dev-dependencies]
+cucumber = { package = "cucumber_rust", version = "^0.6.0" }
+tempfile = "3.1.0"
+
+[[test]]
+name = "cucumber"
+harness = false # Allows Cucumber to print output instead of libtest
