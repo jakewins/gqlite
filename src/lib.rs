@@ -9,6 +9,7 @@ pub mod frontend;
 
 pub use anyhow::{Error, Result};
 use std::fmt::{self, Debug, Display, Formatter};
+#[cfg(feature = "gram")]
 use std::fs::File;
 
 use crate::frontend::Frontend;
