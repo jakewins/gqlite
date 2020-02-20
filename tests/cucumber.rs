@@ -1,4 +1,4 @@
-use cucumber::{after, before, cucumber, Step, steps};
+use cucumber::{after, before, cucumber, steps, Step};
 use gqlite::{Cursor, Database};
 use tempfile::tempfile;
 
@@ -21,9 +21,7 @@ pub struct MyWorld {
 impl cucumber::World for MyWorld {}
 
 impl std::default::Default for MyWorld {
-
     fn default() -> MyWorld {
-
         // This function is called every time a new scenario is started
         MyWorld {
             graph: empty_db(),
@@ -36,24 +34,14 @@ impl std::default::Default for MyWorld {
     }
 }
 
-
 mod example_steps {
-    use cucumber::{Step, steps};
+    use super::{empty_db, MyWorld};
+    use cucumber::{steps, Step};
     use gqlite::{Cursor, Database, Error};
-    use super::{MyWorld, empty_db};
-
-    // TODO: The reason for this is that the cursor borrows part of the query string when you
-    //       run a query, and rather than deal with setting proper lifetimes for that I think we can
-    //       get rid of that memory sharing entirely, maybe? Although maybe the borrow is actually
-    //       kind of sensible; it'd mean queries with large string properties don't need to copy those
-    //       strings in, for instance..
-    fn string_to_static_str(s: &str) -> &'static str {
-        Box::leak(s.to_string().into_boxed_str())
-    }
 
     fn run_preparatory_query(world: &mut MyWorld, step: &Step) -> Result<(), Error> {
         let mut cursor = Cursor::new();
-        let result = world.graph.run(string_to_static_str(&step.docstring().unwrap()), &mut cursor);
+        let result = world.graph.run(&step.docstring().unwrap(), &mut cursor);
         while cursor.next()? {
             // consume
         }
@@ -61,7 +49,10 @@ mod example_steps {
     }
 
     fn start_query(world: &mut MyWorld, step: &Step) {
-        world.graph.run(string_to_static_str(&step.docstring().unwrap()), &mut world.result).expect("Should not fail")
+        world
+            .graph
+            .run(&step.docstring().unwrap(), &mut world.result)
+            .expect("Should not fail")
     }
 
     fn count_rows(result: &mut Cursor) -> Result<i32, Error> {
@@ -74,14 +65,20 @@ mod example_steps {
 
     fn count_nodes(world: &mut MyWorld) -> i32 {
         let mut cursor = Cursor::new();
-        world.graph.run(string_to_static_str(&"MATCH (n) RETURN n"), &mut cursor).expect("should succeed");
+        world
+            .graph
+            .run("MATCH (n) RETURN n", &mut cursor)
+            .expect("should succeed");
         return count_rows(&mut cursor).unwrap();
     }
 
     fn assert_side_effect(world: &mut MyWorld, kind: &str, val: &str) {
         match kind {
-            "+nodes" => assert_eq!(count_nodes(world) - world.starting_graph_properties.node_count, val.parse::<i32>().unwrap()),
-            _ => panic!(format!("unknown side effect: '{}'", kind))
+            "+nodes" => assert_eq!(
+                count_nodes(world) - world.starting_graph_properties.node_count,
+                val.parse::<i32>().unwrap()
+            ),
+            _ => panic!(format!("unknown side effect: '{}'", kind)),
         }
     }
 

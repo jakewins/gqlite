@@ -1,17 +1,16 @@
-
 // The Gram backend is a backend implementation that acts on a Gram file.
 // It is currently single threaded, and provides no data durability guarantees.
 
-use crate::{Val, Dir, Slot, Row, Cursor, frontend, CursorState};
-use anyhow::Result;
-use std::collections::{HashMap, HashSet};
-use std::rc::Rc;
-use std::cell::RefCell;
 use super::PreparedStatement;
-use crate::frontend::{LogicalPlan};
+use crate::backend::{Token, Tokens};
+use crate::frontend::LogicalPlan;
+use crate::{frontend, Cursor, CursorState, Dir, Row, Slot, Val};
+use anyhow::Result;
+use std::cell::RefCell;
+use std::collections::{HashMap, HashSet};
 use std::fmt::Debug;
-use crate::backend::{Tokens, Token};
 use std::fs::File;
+use std::rc::Rc;
 
 #[derive(Debug)]
 pub struct GramBackend {
@@ -21,31 +20,40 @@ pub struct GramBackend {
 
 impl GramBackend {
     pub fn open(file: &mut File) -> Result<GramBackend> {
-        let mut tokens = Tokens { table: Default::default() };
+        let mut tokens = Tokens {
+            table: Default::default(),
+        };
         let g = parser::load(&mut tokens, file)?;
 
-        return Ok(GramBackend {
-            tokens: Rc::new(RefCell::new(tokens)), g: Rc::new(g)
+        Ok(GramBackend {
+            tokens: Rc::new(RefCell::new(tokens)),
+            g: Rc::new(g),
         })
     }
 
-    fn convert(&self, plan: Box<LogicalPlan>) -> Result<Box<dyn Operator>> {
-        match *plan {
-            LogicalPlan::Argument => Ok(Box::new(Argument{})),
-            LogicalPlan::NodeScan { src, slot, labels } => Ok(Box::new(NodeScan{
-                src: self.convert(src)?,
+    fn convert(&self, plan: LogicalPlan) -> Result<Box<dyn Operator>> {
+        match plan {
+            LogicalPlan::Argument => Ok(Box::new(Argument {})),
+            LogicalPlan::NodeScan { src, slot, labels } => Ok(Box::new(NodeScan {
+                src: self.convert(*src)?,
                 next_node: 0,
                 slot,
-                labels
+                labels,
             })),
-            LogicalPlan::Expand { src, src_slot, rel_slot, dst_slot, rel_type } => Ok(Box::new(Expand{
-                src: self.convert(src)?,
+            LogicalPlan::Expand {
+                src,
+                src_slot,
+                rel_slot,
+                dst_slot,
+                rel_type,
+            } => Ok(Box::new(Expand {
+                src: self.convert(*src)?,
                 src_slot,
                 rel_slot,
                 dst_slot,
                 rel_type,
                 next_rel_index: 0,
-                state: ExpandState::NextNode
+                state: ExpandState::NextNode,
             })),
             LogicalPlan::Create { .. } => {
                 panic!("The gram backend does not yet support CREATE statements")
@@ -53,15 +61,17 @@ impl GramBackend {
             LogicalPlan::Return { src, projections } => {
                 let mut converted_projections = Vec::new();
                 for projection in projections {
-                    converted_projections.push(Projection{
+                    converted_projections.push(Projection {
                         expr: self.convert_expr(projection.expr),
-                        alias: projection.alias })
+                        alias: projection.alias,
+                    })
                 }
 
-                Ok(Box::new(Return{
-                    src: self.convert(src)?,
-                    projections: converted_projections }))
-            },
+                Ok(Box::new(Return {
+                    src: self.convert(*src)?,
+                    projections: converted_projections,
+                }))
+            }
         }
     }
 
@@ -70,7 +80,10 @@ impl GramBackend {
             frontend::Expr::Lit(v) => Expr::Lit(v),
             frontend::Expr::Prop(e, props) => Expr::Prop(Box::new(self.convert_expr(*e)), props),
             frontend::Expr::Slot(s) => Expr::Slot(s),
-            _ => panic!("The gram backend does not support this expression type yet: {:?}", expr)
+            _ => panic!(
+                "The gram backend does not support this expression type yet: {:?}",
+                expr
+            ),
         }
     }
 }
@@ -81,10 +94,13 @@ impl super::Backend for GramBackend {
     }
 
     fn prepare(&self, logical_plan: Box<LogicalPlan>) -> Result<Box<dyn PreparedStatement>> {
-        let plan = self.convert(logical_plan)?;
-        return Ok(Box::new(Statement{ g: Rc::clone(&self.g), plan,
+        let plan = self.convert(*logical_plan)?;
+        Ok(Box::new(Statement {
+            g: Rc::clone(&self.g),
+            plan,
             // TODO: pipe this knowledge through from logial plan
-            num_slots: 16 }))
+            num_slots: 16,
+        }))
     }
 }
 
@@ -97,21 +113,23 @@ struct Statement {
 
 impl PreparedStatement for Statement {
     fn run(&mut self, cursor: &mut Cursor) -> Result<()> {
-        cursor.state = Some(Box::new(GramCursorState{
-            ctx: Context{ g: Rc::clone(&self.g)},
+        cursor.state = Some(Box::new(GramCursorState {
+            ctx: Context {
+                g: Rc::clone(&self.g),
+            },
             plan: self.plan.clone(),
         }));
         if cursor.row.slots.len() < self.num_slots {
             cursor.row.slots.resize(self.num_slots, Val::Null);
         }
-        return Ok(())
+        Ok(())
     }
 }
 
 #[derive(Debug)]
 struct GramCursorState {
     ctx: Context,
-    plan: Box<dyn Operator>
+    plan: Box<dyn Operator>,
 }
 
 impl CursorState for GramCursorState {
@@ -134,31 +152,27 @@ enum Expr {
 }
 
 impl Expr {
-
-    fn eval_prop(ctx: &mut Context, row: &mut Row, expr: &Box<Expr>, props: &Vec<Token>) -> Result<Val> {
+    fn eval_prop(ctx: &mut Context, row: &mut Row, expr: &Expr, props: &[Token]) -> Result<Val> {
         let mut v = expr.eval(ctx, row)?;
         for prop in props {
             v = match v {
-                Val::Null=> Err(anyhow!("NULL has no property {}", prop)),
-                Val::String(_) => Err(anyhow!("STRING has no property {}", prop)),
-                Val::Node(id) => match ctx.g.get_node_prop(id, *prop) {
-                    Some(v) => Ok(v),
-                    None => Ok(Val::Null),
-                },
-                Val::Rel{node, rel_index} => match ctx.g.get_rel_prop(node, rel_index, *prop) {
-                    Some(v) => Ok(v),
-                    None => Ok(Val::Null),
-                },
-            }?;
+                Val::Null => bail!("NULL has no property {}", prop),
+                Val::String(_) => bail!("STRING has no property {}", prop),
+                Val::Node(id) => ctx.g.get_node_prop(id, *prop).unwrap_or(Val::Null),
+                Val::Rel { node, rel_index } => ctx
+                    .g
+                    .get_rel_prop(node, rel_index, *prop)
+                    .unwrap_or(Val::Null),
+            };
         }
-        return Ok(v)
+        Ok(v)
     }
 
     fn eval(&self, ctx: &mut Context, row: &mut Row) -> Result<Val> {
         match self {
             Expr::Prop(expr, props) => Expr::eval_prop(ctx, row, expr, props),
             Expr::Slot(slot) => Ok(row.slots[*slot].clone()), // TODO not this
-            Expr::Lit(v) => Ok(v.clone()), // TODO not this
+            Expr::Lit(v) => Ok(v.clone()),                    // TODO not this
         }
     }
 }
@@ -195,21 +209,17 @@ struct Expand {
     pub state: ExpandState,
 }
 
-impl Expand {
-
-}
-
 impl Operator for Expand {
     fn next(&mut self, ctx: &mut Context, out: &mut Row) -> Result<bool> {
         loop {
             match &self.state {
                 ExpandState::NextNode => {
                     // Pull in the next node
-                    if ! self.src.next(ctx, out)? {
-                        return Ok(false)
+                    if !self.src.next(ctx, out)? {
+                        return Ok(false);
                     }
                     self.state = ExpandState::InNode;
-                },
+                }
                 ExpandState::InNode => {
                     let node = out.slots[self.src_slot].as_node_id();
                     let rels = &ctx.g.nodes[node].rels;
@@ -217,24 +227,27 @@ impl Operator for Expand {
                         // No more rels on this node
                         self.state = ExpandState::NextNode;
                         self.next_rel_index = 0;
-                        continue
+                        continue;
                     }
 
                     let rel = &rels[self.next_rel_index];
                     self.next_rel_index += 1;
 
                     if rel.rel_type == self.rel_type {
-                        out.slots[self.rel_slot] = Val::Rel{ node, rel_index: self.next_rel_index-1 };
-                        out.slots[self.dst_slot] = Val::Node( rel.other_node );
+                        out.slots[self.rel_slot] = Val::Rel {
+                            node,
+                            rel_index: self.next_rel_index - 1,
+                        };
+                        out.slots[self.dst_slot] = Val::Node(rel.other_node);
                         return Ok(true);
                     }
-                },
+                }
             }
         }
     }
 
     fn clone(&self) -> Box<dyn Operator> {
-        Box::new(Expand{
+        Box::new(Expand {
             src: self.src.clone(),
             src_slot: self.src_slot,
             rel_slot: self.rel_slot,
@@ -275,14 +288,14 @@ impl Operator for NodeScan {
 
                 out.slots[self.slot] = Val::Node(self.next_node);
                 self.next_node += 1;
-                return Ok(true)
+                return Ok(true);
             }
-            return Ok(false)
+            return Ok(false);
         }
     }
 
     fn clone(&self) -> Box<dyn Operator> {
-        Box::new(NodeScan{
+        Box::new(NodeScan {
             src: self.src.clone(),
             next_node: 0,
             slot: self.slot,
@@ -300,7 +313,7 @@ impl Operator for Argument {
     }
 
     fn clone(&self) -> Box<dyn Operator> {
-        Box::new(Argument{})
+        Box::new(Argument {})
     }
 }
 
@@ -347,7 +360,7 @@ impl Operator for Return {
     }
 
     fn clone(&self) -> Box<dyn Operator> {
-        Box::new(Return{
+        Box::new(Return {
             src: self.src.clone(),
             projections: self.projections.clone(),
         })
@@ -355,12 +368,12 @@ impl Operator for Return {
 }
 
 mod parser {
-    use anyhow::Result;
-    use std::collections::{HashMap};
+    use crate::backend::gram::{Graph, Node};
+    use crate::backend::{Token, Tokens};
     use crate::pest::Parser;
-    use crate::backend::gram::{Node, Graph};
     use crate::Val;
-    use crate::backend::{Tokens, Token};
+    use anyhow::Result;
+    use std::collections::HashMap;
     use std::fs::File;
     use std::io::Read;
 
@@ -383,24 +396,26 @@ mod parser {
     }
 
     pub fn load(tokens: &mut Tokens, file: &mut File) -> Result<Graph> {
-        let mut g = Graph{ nodes: vec![] };
-
+        let mut g = Graph { nodes: vec![] };
 
         let query_str = read_to_string(file).unwrap();
         let maybe_parse = GramParser::parse(Rule::gram, &query_str);
 
         let gram = maybe_parse
             .expect("unsuccessful parse") // unwrap the parse result
-            .next().unwrap(); // get and unwrap the `file` rule; never fails
+            .next()
+            .unwrap(); // get and unwrap the `file` rule; never fails
 
-//    let id_map = HashMap::new();
-        let mut node_ids = Tokens{ table: Default::default() };
+        //    let id_map = HashMap::new();
+        let mut node_ids = Tokens {
+            table: Default::default(),
+        };
 
         for item in gram.into_inner() {
             match item.as_rule() {
                 Rule::path => {
-                    let mut start_identifier : Option<Token> = None;
-                    let mut end_identifier : Option<Token> = None;
+                    let mut start_identifier: Option<Token> = None;
+                    let mut end_identifier: Option<Token> = None;
 
                     for part in item.into_inner() {
                         match part.as_rule() {
@@ -415,22 +430,28 @@ mod parser {
                             Rule::rel => {
                                 for rel_part in part.into_inner() {
                                     match rel_part.as_rule() {
-                                        Rule::map => {
-
-                                        }
-                                        _ => panic!("what? {:?} / {}", rel_part.as_rule(), rel_part.as_str())
+                                        Rule::map => {}
+                                        _ => panic!(
+                                            "what? {:?} / {}",
+                                            rel_part.as_rule(),
+                                            rel_part.as_str()
+                                        ),
                                     }
                                 }
                             }
-                            _ => panic!("what? {:?} / {}", part.as_rule(), part.as_str())
+                            _ => panic!("what? {:?} / {}", part.as_rule(), part.as_str()),
                         }
                     }
 
-                    g.add_rel(start_identifier.unwrap(), end_identifier.unwrap(), tokens.tokenize("KNOWS"));
+                    g.add_rel(
+                        start_identifier.unwrap(),
+                        end_identifier.unwrap(),
+                        tokens.tokenize("KNOWS"),
+                    );
                 }
                 Rule::node => {
-                    let mut identifier : Option<String> = None;
-                    let mut props : HashMap<Token, Val> = HashMap::new();
+                    let mut identifier: Option<String> = None;
+                    let mut props: HashMap<Token, Val> = HashMap::new();
 
                     for part in item.into_inner() {
                         match part.as_rule() {
@@ -443,36 +464,51 @@ mod parser {
                                         Rule::map_pair => {
                                             for pair_part in pair.into_inner() {
                                                 match pair_part.as_rule() {
-                                                    Rule::id => key = Some(pair_part.as_str().to_string()),
-                                                    Rule::expr => val = Some(pair_part.as_str().to_string()),
-                                                    _ => panic!("what? {:?} / {}", pair_part.as_rule(), pair_part.as_str())
+                                                    Rule::id => {
+                                                        key = Some(pair_part.as_str().to_string())
+                                                    }
+                                                    Rule::expr => {
+                                                        val = Some(pair_part.as_str().to_string())
+                                                    }
+                                                    _ => panic!(
+                                                        "what? {:?} / {}",
+                                                        pair_part.as_rule(),
+                                                        pair_part.as_str()
+                                                    ),
                                                 }
                                             }
                                         }
-                                        _ => panic!("what? {:?} / {}", pair.as_rule(), pair.as_str())
+                                        _ => {
+                                            panic!("what? {:?} / {}", pair.as_rule(), pair.as_str())
+                                        }
                                     }
                                     let key_str = key.unwrap();
-                                    props.insert(tokens.tokenize(&key_str), Val::String(val.unwrap()) );
+                                    props.insert(
+                                        tokens.tokenize(&key_str),
+                                        Val::String(val.unwrap()),
+                                    );
                                 }
-                            },
-                            _ => panic!("what? {:?} / {}", part.as_rule(), part.as_str())
+                            }
+                            _ => panic!("what? {:?} / {}", part.as_rule(), part.as_str()),
                         }
                     }
 
-                    g.add_node(node_ids.tokenize(&identifier.unwrap()), Node{
-                        labels: vec![tokens.tokenize("Person")].iter().cloned().collect(),
-                        properties: props,
-                        rels: vec![]
-                    });
-                },
-                _ => ()
+                    g.add_node(
+                        node_ids.tokenize(&identifier.unwrap()),
+                        Node {
+                            labels: vec![tokens.tokenize("Person")].iter().cloned().collect(),
+                            properties: props,
+                            rels: vec![],
+                        },
+                    );
+                }
+                _ => (),
             }
         }
 
-        return Ok(g)
+        Ok(g)
     }
 }
-
 
 #[derive(Debug)]
 pub struct RelHalf {
@@ -489,45 +525,36 @@ pub struct Node {
     rels: Vec<RelHalf>,
 }
 
-impl Node {
-
-}
-
 #[derive(Debug)]
-pub struct Graph  {
-    nodes: Vec<Node>
+pub struct Graph {
+    nodes: Vec<Node>,
 }
 
 impl Graph {
     fn get_node_prop(&self, node_id: usize, prop: Token) -> Option<Val> {
-        if let Some(v) = self.nodes[node_id].properties.get(&prop) {
-            Some(v.clone())
-        } else {
-            None
-        }
+        self.nodes[node_id].properties.get(&prop).cloned()
     }
 
     fn get_rel_prop(&self, node_id: usize, rel_index: usize, prop: Token) -> Option<Val> {
-        if let Some(v) = self.nodes[node_id].rels[rel_index].properties.get(&prop) {
-            Some(v.clone())
-        } else {
-            None
-        }
+        self.nodes[node_id].rels[rel_index]
+            .properties
+            .get(&prop)
+            .cloned()
     }
 
     fn add_node(&mut self, id: usize, n: Node) {
-        self.nodes.insert(id,n);
+        self.nodes.insert(id, n);
     }
 
     fn add_rel(&mut self, from: usize, to: usize, rel_type: Token) {
         let props = Rc::new(Default::default());
-        self.nodes[from].rels.push(RelHalf{
+        self.nodes[from].rels.push(RelHalf {
             rel_type,
             dir: Dir::Out,
             other_node: to,
-            properties: Rc::clone(&props)
+            properties: Rc::clone(&props),
         });
-        self.nodes[to].rels.push(RelHalf{
+        self.nodes[to].rels.push(RelHalf {
             rel_type,
             dir: Dir::In,
             other_node: from,
