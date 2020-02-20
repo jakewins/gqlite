@@ -1,11 +1,13 @@
 
 WHITESPACE = _{ " " | "\t" | "\r" | "\n" }
 
-expr = { string | prop_lookup | id }
+expr = { prop_lookup | func_call | string | id }
 
 id = ${ ( ASCII_ALPHA | "_" | "-" ) + }
 
 prop_lookup = { id ~ ("." ~ id)+ }
+
+func_call = { id ~ "(" ~ (expr ~ ("," ~ expr)*)? ~ ")" }
 
 string = ${ "\"" ~ str_inner ~ "\"" }
 str_inner = @{ char* }

@@ -25,23 +25,20 @@ impl Database {
     #[cfg(feature = "gram")]
     pub fn open(file: &mut File) -> Result<Database> {
         let backend = backend::gram::GramBackend::open(file)?;
-        let frontend = Frontend {
+        return Database::with_backend(Box::new(backend))
+    }
+
+    pub fn with_backend(backend: Box<dyn Backend>) -> Result<Database, Error> {
+        let frontend = Frontend{
             tokens: backend.tokens(),
-        };
-        Ok(Database {
-            backend: Box::new(backend),
+            backend_desc: backend.describe()? };
+        return Ok(Database {
+            backend,
             frontend,
         })
     }
 
-    pub fn with_backend(backend: Box<dyn Backend>) -> Result<Database> {
-        let frontend = Frontend {
-            tokens: backend.tokens(),
-        };
-        Ok(Database { backend, frontend })
-    }
-
-    pub fn run(&mut self, query_str: &str, cursor: &mut Cursor) -> Result<()> {
+    pub fn run(&mut self, query_str: &str, cursor: &mut Cursor) -> Result<(), Error> {
         let plan = self.frontend.plan(query_str)?;
         let mut prepped = self.backend.prepare(Box::new(plan))?;
 
@@ -91,7 +88,33 @@ pub struct Row {
 // Pointer to a Val in a row
 pub type Slot = usize;
 
-#[derive(Debug, Clone, PartialEq)]
+// openCypher 9 enumeration of types
+#[derive(Debug)]
+pub enum Type {
+    // This is not a documented part of the openCypher type system, but.. well I'm not sure how
+    // else we represent the arguments to a function like count(..).
+    Any,
+
+    // Integers and floats are both Numbers
+    Number,
+    // The spec does not specify a maximum bit size, it just says "exact number without decimal"
+    Integer,
+    // IEEE-754 64-bit float
+    Float,
+
+    // Unicode string
+    String,
+    Boolean,
+
+    Node,
+    Relationship,
+    Path,
+
+    List(Box<Type>),
+    Map,
+}
+
+#[derive(Debug,Clone,PartialEq)]
 pub enum Val {
     Null,
     String(String),
