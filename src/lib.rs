@@ -1,10 +1,13 @@
 extern crate pest;
 #[macro_use]
 extern crate pest_derive;
+#[macro_use]
+extern crate anyhow;
 
 pub mod backend;
 pub mod frontend;
 
+pub use anyhow::{Result, Error};
 use std::fmt::{Display, Formatter, Debug};
 use std::fmt;
 
@@ -20,7 +23,7 @@ pub struct Database {
 
 impl Database {
     #[cfg(feature = "gram")]
-    pub fn open(file: &mut File) -> Result<Database, Error> {
+    pub fn open(file: &mut File) -> Result<Database> {
         let backend = backend::gram::GramBackend::open(file)?;
         let frontend = Frontend{ tokens: backend.tokens() };
         return Ok(Database {
@@ -29,7 +32,7 @@ impl Database {
         })
     }
 
-    pub fn with_backend(backend: Box<dyn Backend>) -> Result<Database, Error> {
+    pub fn with_backend(backend: Box<dyn Backend>) -> Result<Database> {
         let frontend = Frontend{ tokens: backend.tokens() };
         return Ok(Database {
             backend,
@@ -38,8 +41,7 @@ impl Database {
     }
 
     // TODO obviously the query string shouldn't be static
-    pub fn run(&mut self, query_str: &str, cursor: &mut Cursor) -> Result<(), Error> {
-        println!("5");
+    pub fn run(&mut self, query_str: &str, cursor: &mut Cursor) -> Result<()> {
         let plan = self.frontend.plan(query_str)?;
         let mut prepped = self.backend.prepare(Box::new(plan))?;
 
@@ -50,7 +52,7 @@ impl Database {
 
 // Backends provide this
 pub trait CursorState : Debug {
-    fn next(&mut self, row:  &mut Row) -> Result<bool, Error>;
+    fn next(&mut self, row:  &mut Row) -> Result<bool>;
 }
 
 // Cursors are like iterators, except they don't require malloc for each row; the row you read is
@@ -68,7 +70,7 @@ impl Cursor {
             row: Row { slots: vec![] }
         }
     }
-    pub fn next(&mut self) -> Result<bool, Error> {
+    pub fn next(&mut self) -> Result<bool> {
         match &mut self.state {
             Some(state) => {
                 return state.next(&mut self.row)
@@ -83,30 +85,6 @@ impl Cursor {
 #[derive(Debug, PartialEq)]
 pub enum Dir {
     Out, In
-}
-
-#[derive(Clone, Debug, Eq, Hash, PartialEq)]
-pub struct Error {
-    // TODO I think maybe this should be &str?
-    pub msg: String,
-}
-
-impl Display for Error {
-    fn fmt(&self, f: &mut Formatter<'_>) -> Result<(), fmt::Error> {
-        f.write_str(&self.msg)
-    }
-}
-
-impl std::convert::From<std::io::Error> for Error {
-    fn from(e: std::io::Error) -> Self {
-        Error{ msg: format!("from io.error: {:?}", e) }
-    }
-}
-
-impl std::convert::From<pest::error::Error<frontend::Rule>> for Error {
-    fn from(e: pest::error::Error<frontend::Rule>) -> Self {
-        Error{ msg: format!("{}", e)}
-    }
 }
 
 #[derive(Debug)]

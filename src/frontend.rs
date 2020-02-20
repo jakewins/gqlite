@@ -5,9 +5,10 @@
 
 use pest::Parser;
 
+use anyhow::Result;
 use std::fmt::{Debug};
 use pest::iterators::Pair;
-use crate::{Slot, Val, Error, Dir};
+use crate::{Slot, Val, Dir};
 use std::collections::HashMap;
 use std::rc::Rc;
 use crate::backend::{Tokens, Token};
@@ -25,14 +26,14 @@ pub struct Frontend {
 
 impl Frontend {
     // TODO obviously the query string shouldn't be static
-    pub fn plan(&self, query_str: &str) -> Result<LogicalPlan, Error> {
+    pub fn plan(&self, query_str: &str) -> Result<LogicalPlan> {
         self.plan_in_context(query_str, &mut PlanningContext{
             slots: Default::default(),
             anon_rel_seq:0, anon_node_seq: 0,
             tokens: Rc::clone(&self.tokens)})
     }
 
-    pub fn plan_in_context(&self, query_str: &str, mut pc: &mut PlanningContext) -> Result<LogicalPlan, Error> {
+    pub fn plan_in_context(&self, query_str: &str, mut pc: &mut PlanningContext) -> Result<LogicalPlan> {
         let query = CypherParser::parse(Rule::query, &query_str)?
             .next().unwrap(); // get and unwrap the `query` rule; never fails
 
@@ -147,7 +148,7 @@ impl PlanningContext {
     }
 }
 
-fn plan_create(pc: &mut PlanningContext, src: LogicalPlan, create_stmt: Pair<Rule>) -> Result<LogicalPlan, Error> {
+fn plan_create(pc: &mut PlanningContext, src: LogicalPlan, create_stmt: Pair<Rule>) -> Result<LogicalPlan> {
     let pg = parse_pattern_graph(pc,create_stmt)?;
 
     let mut nodes = Vec::new();
@@ -185,7 +186,7 @@ fn plan_create(pc: &mut PlanningContext, src: LogicalPlan, create_stmt: Pair<Rul
                     props: vec![]
                 });
             }
-            None => return Err(Error{ msg: "relationships in CREATE clauses must have a direction".to_string() })
+            None => bail!("relationships in CREATE clauses must have a direction")
         }
     }
 
@@ -324,7 +325,7 @@ impl PatternGraph {
     }
 }
 
-fn plan_match(pc: &mut PlanningContext, src: LogicalPlan, match_stmt: Pair<Rule>) -> Result<LogicalPlan, Error> {
+fn plan_match(pc: &mut PlanningContext, src: LogicalPlan, match_stmt: Pair<Rule>) -> Result<LogicalPlan> {
     let mut plan = src;
     let mut pg = parse_pattern_graph(pc, match_stmt)?;
 
@@ -405,7 +406,7 @@ fn plan_match(pc: &mut PlanningContext, src: LogicalPlan, match_stmt: Pair<Rule>
     return Ok(plan)
 }
 
-fn parse_pattern_graph(pc: &mut PlanningContext, patterns: Pair<Rule>) -> Result<PatternGraph, Error> {
+fn parse_pattern_graph(pc: &mut PlanningContext, patterns: Pair<Rule>) -> Result<PatternGraph> {
     let mut pg: PatternGraph = PatternGraph::default();
 
     for part in patterns.into_inner() {
@@ -472,7 +473,7 @@ fn parse_pattern_node(pc: &mut PlanningContext, pattern_node: Pair<Rule>) -> Pat
     return PatternNode{ identifier: id, labels, props, solved: false }
 }
 
-fn parse_pattern_rel(pc: &mut PlanningContext, left_node: Token, pattern_rel: Pair<Rule>) -> Result<PatternRel, Error> {
+fn parse_pattern_rel(pc: &mut PlanningContext, left_node: Token, pattern_rel: Pair<Rule>) -> Result<PatternRel> {
     let mut identifier = None;
     let mut rel_type = None;
     let mut dir = None;
@@ -490,7 +491,7 @@ fn parse_pattern_rel(pc: &mut PlanningContext, left_node: Token, pattern_rel: Pa
             }
             Rule::right_arrow => {
                 if dir.is_some() {
-                    return Err(Error{ msg: "relationship can't be directed in both directions. If you want to find relationships in either direction, leave the arrows out".to_string() })
+                    bail!("relationship can't be directed in both directions. If you want to find relationships in either direction, leave the arrows out")
                 }
                 dir = Some(Dir::Out)
             }
@@ -544,14 +545,15 @@ pub struct MapEntryExpr {
 
 #[cfg(test)]
 mod tests {
+    use anyhow::Result;
     use crate::frontend::{Frontend, LogicalPlan, PatternNode, PlanningContext, PatternRel, NodeSpec, RelSpec, MapEntryExpr, Expr};
     use crate::backend::Tokens;
     use std::cell::RefCell;
     use std::rc::Rc;
     use crate::Dir::Out;
-    use crate::{Dir, Val, Error};
+    use crate::{Dir, Val};
 
-    fn plan(q: &'static str) -> Result<(LogicalPlan, PlanningContext), Error> {
+    fn plan(q: &'static str) -> Result<(LogicalPlan, PlanningContext)> {
         let tokens = Rc::new(RefCell::new(Tokens::new()));
 
         let frontend = Frontend { tokens: Rc::clone(&tokens) };
@@ -572,7 +574,7 @@ mod tests {
     }
 
     #[test]
-    fn plan_create() -> Result<(), Error> {
+    fn plan_create() -> Result<()> {
         let (plan, mut pc) = plan("CREATE (n:Person)")?;
 
         let lbl_person = pc.tokenize("Person");
@@ -590,7 +592,7 @@ mod tests {
     }
 
     #[test]
-    fn plan_create_with_props() -> Result<(), Error> {
+    fn plan_create_with_props() -> Result<()> {
         let (plan, mut pc) = plan("CREATE (n:Person {name: \"Bob\"})")?;
 
         let lbl_person = pc.tokenize("Person");
@@ -611,7 +613,7 @@ mod tests {
     }
 
     #[test]
-    fn plan_create_rel() -> Result<(), Error> {
+    fn plan_create_rel() -> Result<()> {
         let (plan, mut pc) = plan("CREATE (n:Person)-[r:KNOWS]->(n)")?;
 
         let rt_knows = pc.tokenize("KNOWS");
@@ -641,7 +643,7 @@ mod tests {
 
 
     #[test]
-    fn plan_create_rel_with_props() -> Result<(), Error> {
+    fn plan_create_rel_with_props() -> Result<()> {
         let (plan, mut pc) = plan("CREATE (n:Person)-[r:KNOWS {since:\"2012\"}]->(n)")?;
 
         let rt_knows = pc.tokenize("KNOWS");
@@ -672,7 +674,7 @@ mod tests {
     }
 
     #[test]
-    fn plan_create_outbound_rel_on_preexisting_node() -> Result<(), Error> {
+    fn plan_create_outbound_rel_on_preexisting_node() -> Result<()> {
         let (plan, mut pc) = plan("MATCH (n:Person) CREATE (n)-[r:KNOWS]->(o:Person)")?;
 
         let rt_knows = pc.tokenize("KNOWS");
@@ -707,7 +709,7 @@ mod tests {
     }
 
     #[test]
-    fn plan_create_inbound_rel_on_preexisting_node() -> Result<(), Error> {
+    fn plan_create_inbound_rel_on_preexisting_node() -> Result<()> {
         let (plan, mut pc) = plan("MATCH (n:Person) CREATE (n)<-[r:KNOWS]-(o:Person)")?;
 
         let rt_knows = pc.tokenize("KNOWS");

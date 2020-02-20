@@ -1,7 +1,6 @@
-use gqlite::Error;
 use std::fs::File;
 
-fn main() -> Result<(), Error>{
+fn main() -> anyhow::Result<()> {
     #[cfg(all(feature = "cli", feature = "gram"))]
     {
         use clap::{App, AppSettings};

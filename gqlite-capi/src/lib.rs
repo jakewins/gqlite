@@ -1,9 +1,6 @@
 use gqlite::{Cursor, Database, Error};
-use std::any::Any;
 use std::ffi::CStr;
-use std::fmt::Display;
 use std::fs::File;
-use std::mem::transmute;
 use std::os::raw::{c_char, c_int};
 use std::str;
 
@@ -20,14 +17,6 @@ pub struct cursor {
     cursor: Cursor,
 }
 
-fn wrap_error<T: Any + Display>(error: &T) -> Error {
-    let value_any = error as &dyn Any;
-    return match value_any.downcast_ref::<Error>() {
-        Some(as_error) => as_error.clone(),
-        None => Error { msg: format!("{}", error) }
-    };
-}
-
 // Open a database file
 #[no_mangle]
 pub extern fn gqlite_open(raw_url: *const c_char) -> *const database {
@@ -39,7 +28,7 @@ pub extern fn gqlite_open(raw_url: *const c_char) -> *const database {
             return Box::into_raw(Box::new(database { db: Some(Database::open(&mut file).unwrap()), last_error: None }));
         }
         Err(error) => {
-            Box::into_raw(Box::new(database { db: None, last_error: Some(wrap_error(&error)) }))
+            Box::into_raw(Box::new(database { db: None, last_error: Some(error.into()) }))
         }
     };
 }
@@ -67,9 +56,7 @@ pub extern fn gqlite_close(ptr: *mut database) -> c_int {
     // from https://stackoverflow.com/questions/34754036/who-is-responsible-to-free-the-memory-after-consuming-the-box/34754403
     // Need to test this actually works to deallocate
     unsafe {
-        let mut db = unsafe {
-            Box::from_raw(ptr)
-        };
+        let mut db = Box::from_raw(ptr);
         db.db = None
     }
 
@@ -79,7 +66,7 @@ pub extern fn gqlite_close(ptr: *mut database) -> c_int {
 // Move cursor to next row
 #[no_mangle]
 pub extern fn gqlite_cursor_close(raw_cursor: *mut cursor) {
-    let cur = unsafe {
+    let _cur = unsafe {
         Box::from_raw(raw_cursor)
     };
 }
@@ -99,13 +86,13 @@ pub extern fn gqlite_run(raw_db: *mut database, raw_cursor: *mut cursor, raw_que
 
     let cursor = unsafe { &mut *raw_cursor };
 
-    let mut db = unsafe { (&mut *raw_db).db.as_mut().unwrap() };
+    let db = unsafe { (&mut *raw_db).db.as_mut().unwrap() };
 
     return match db.run(&query, &mut cursor.cursor) {
         Ok(_) => 0,
         Err(error) => {
             println!("err: {:?}", error);
-            unsafe { (*raw_db).last_error = Some(wrap_error(&error)) };
+            unsafe { (*raw_db).last_error = Some(error.into()) };
             return 1;
         }
     };
