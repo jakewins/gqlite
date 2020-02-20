@@ -99,8 +99,11 @@ pub enum LogicalPlan {
         // You get one count() per unique n.age per unique n.occupation.
         //
         // It is legal for this to be empty; indicating there is a single global group.
-        grouping: Vec<Projection>,
-        aggregations: Vec<Projection>,
+
+        // "Please evaluate expression expr and store the result in Slot"
+        grouping: Vec<(Expr, Slot)>,
+        // "Please evaluate the aggregating expr and output the final accumulation in Slot"
+        aggregations: Vec<(Expr, Slot)>,
     },
     Return{
         src: Box<Self>,
@@ -241,9 +244,11 @@ pub struct RelSpec {
 
 fn plan_return(pc: &mut PlanningContext, src: LogicalPlan, return_stmt: Pair<Rule>) -> LogicalPlan {
     let mut parts = return_stmt.into_inner();
-    // TODO plan_return_projections could easily tell as it goes if there will be aggregations, so
-    //      we don't need to do all the allocation below if the RETURN doesn't aggregate
-    let projections = parts.next().and_then(|p| Some(plan_return_projections(pc, p))).expect("RETURN must start with projections");
+
+    let (is_aggregate, projections) = parts.next().and_then(|p| Some(plan_return_projections(pc, p))).expect("RETURN must start with projections");
+    if ! is_aggregate {
+        return LogicalPlan::Return { src: Box::new(src), projections }
+    }
 
     // Split the projections into groupings and aggregating projections, so in a statement like
     //
@@ -265,33 +270,32 @@ fn plan_return(pc: &mut PlanningContext, src: LogicalPlan, return_stmt: Pair<Rul
             alias: projection.alias,
         });
         if projection.expr.is_aggregating(&pc.backend_desc.aggregates) {
-            aggregations.push(projection);
+            aggregations.push((projection.expr, pc.get_or_alloc_slot(projection.alias)));
         } else {
-            grouping.push(projection);
+            grouping.push((projection.expr, pc.get_or_alloc_slot(projection.alias)));
         }
     }
 
-    if aggregations.len() > 0 {
-        LogicalPlan::Return {
-            src: Box::new(LogicalPlan::Aggregate {
-                src: Box::new(src),
-                grouping,
-                aggregations
-            }),
-            projections: aggregation_projections
-        }
-    } else {
-        LogicalPlan::Return { src: Box::new(src), projections: grouping }
+    LogicalPlan::Return {
+        src: Box::new(LogicalPlan::Aggregate {
+            src: Box::new(src),
+            grouping,
+            aggregations
+        }),
+        projections: aggregation_projections
     }
 }
 
-fn plan_return_projections(pc: &mut PlanningContext, projections: Pair<Rule>) -> Vec<Projection> {
+// The bool return here is nasty, refactor, maybe make into a struct?
+fn plan_return_projections(pc: & mut PlanningContext, projections: Pair<Rule>) -> (bool, Vec<Projection>) {
     let mut out = Vec::new();
+    let mut contains_aggregations = false;
     for projection in projections.into_inner() {
         if let Rule::projection = projection.as_rule() {
             let default_alias = projection.as_str();
             let mut parts = projection.into_inner();
             let expr = parts.next().and_then(|p| Some(plan_expr(pc, p))).unwrap();
+            contains_aggregations = contains_aggregations || expr.is_aggregating(&pc.backend_desc.aggregates);
             let alias = parts.next().and_then(|p| match p.as_rule() {
                 Rule::id => Some(pc.tokenize(p.as_str())),
                 _ => None
@@ -299,7 +303,7 @@ fn plan_return_projections(pc: &mut PlanningContext, projections: Pair<Rule>) ->
             out.push(Projection{expr, alias});
         }
     }
-    out
+    (contains_aggregations, out)
 }
 
 fn plan_expr(pc: &mut PlanningContext, expression: Pair<Rule>) -> Expr {
@@ -736,9 +740,7 @@ mod tests {
                 src: Box::new(LogicalPlan::Aggregate {
                     src: Box::new(LogicalPlan::NodeScan { src: Box::new(LogicalPlan::Argument), slot: 0, labels: Some(lbl_person) }),
                     grouping: vec![],
-                    aggregations: vec![Projection {
-                        expr: Expr::FuncCall { name: fn_count, args: vec![Expr::Slot(p.slot(id_n))] },
-                        alias: col_count_n }]
+                    aggregations: vec![(Expr::FuncCall { name: fn_count, args: vec![Expr::Slot(p.slot(id_n))] }, p.slot(col_count_n) )]
                 }),
                 projections: vec![Projection { expr: Expr::Slot(p.slot(col_count_n)), alias: col_count_n }]
             });
@@ -761,10 +763,10 @@ mod tests {
                 src: Box::new(LogicalPlan::Aggregate {
                     src: Box::new(LogicalPlan::NodeScan { src: Box::new(LogicalPlan::Argument), slot: 0, labels: Some(lbl_person) }),
                     grouping: vec![
-                        Projection { expr: Expr::Prop(Box::new(Expr::Slot(p.slot(id_n))), vec![key_age]), alias: col_n_age },
-                        Projection { expr: Expr::Prop(Box::new(Expr::Slot(p.slot(id_n))), vec![key_occupation]), alias: col_n_occupation },],
+                        (Expr::Prop(Box::new(Expr::Slot(p.slot(id_n))), vec![key_age]), p.slot(col_n_age) ),
+                        (Expr::Prop(Box::new(Expr::Slot(p.slot(id_n))), vec![key_occupation]), p.slot(col_n_occupation) ),],
                     aggregations: vec![
-                        Projection { expr: Expr::FuncCall { name: fn_count, args: vec![Expr::Slot(p.slot(id_n))] }, alias: col_count_n }]
+                        (Expr::FuncCall { name: fn_count, args: vec![Expr::Slot(p.slot(id_n))] }, p.slot(col_count_n) )]
                 }),
                 projections: vec![
                     Projection { expr: Expr::Slot(p.slot(col_n_age)), alias: col_n_age },
