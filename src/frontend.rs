@@ -744,6 +744,35 @@ mod tests {
             });
             Ok(())
         }
+
+        #[test]
+        fn plan_grouped_count() -> Result<(), Error> {
+            let mut p = plan("MATCH (n:Person) RETURN n.age, n.occupation, count(n)")?;
+
+            let lbl_person = p.tokenize("Person");
+            let id_n = p.tokenize("n");
+            let key_age = p.tokenize("age");
+            let key_occupation = p.tokenize("occupation");
+            let fn_count = p.tokenize("count");
+            let col_count_n = p.tokenize("count(n)");
+            let col_n_age = p.tokenize("n.age");
+            let col_n_occupation = p.tokenize("n.occupation");
+            assert_eq!(p.plan, LogicalPlan::Return {
+                src: Box::new(LogicalPlan::Aggregate {
+                    src: Box::new(LogicalPlan::NodeScan { src: Box::new(LogicalPlan::Argument), slot: 0, labels: Some(lbl_person) }),
+                    grouping: vec![
+                        Projection { expr: Expr::Prop(Box::new(Expr::Slot(p.slot(id_n))), vec![key_age]), alias: col_n_age },
+                        Projection { expr: Expr::Prop(Box::new(Expr::Slot(p.slot(id_n))), vec![key_occupation]), alias: col_n_occupation },],
+                    aggregations: vec![
+                        Projection { expr: Expr::FuncCall { name: fn_count, args: vec![Expr::Slot(p.slot(id_n))] }, alias: col_count_n }]
+                }),
+                projections: vec![
+                    Projection { expr: Expr::Slot(p.slot(col_n_age)), alias: col_n_age },
+                    Projection { expr: Expr::Slot(p.slot(col_n_occupation)), alias: col_n_occupation },
+                    Projection { expr: Expr::Slot(p.slot(col_count_n)), alias: col_count_n },]
+            });
+            Ok(())
+        }
     }
 
     #[cfg(test)]
