@@ -1,16 +1,16 @@
 // The Gram backend is a backend implementation that acts on a Gram file.
 // It is currently single threaded, and provides no data durability guarantees.
 
-use crate::{Error, Val, Dir, Slot, Row, Cursor, frontend, CursorState, Type};
+use crate::{frontend, Cursor, CursorState, Dir, Error, Row, Slot, Type, Val};
+use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
-use std::cell::RefCell;
 
 use super::PreparedStatement;
+use crate::backend::{BackendDesc, FuncSignature, FuncType, Token, Tokens};
 use crate::frontend::LogicalPlan;
 use anyhow::Result;
 use std::fmt::Debug;
-use crate::backend::{Tokens, Token, FuncSignature, FuncType, BackendDesc};
 use std::fs::File;
 
 #[derive(Debug)]
@@ -64,11 +64,12 @@ impl GramBackend {
                         alias: projection.alias,
                     })
                 }
-                Ok(Box::new(Return{
+                Ok(Box::new(Return {
                     src: self.convert(*src)?,
-                    projections: converted_projections }))
-            },
-            _ => panic!("The gram backend does not yet handle {:?}", plan)
+                    projections: converted_projections,
+                }))
+            }
+            _ => panic!("The gram backend does not yet handle {:?}", plan),
         }
     }
 
@@ -103,11 +104,11 @@ impl super::Backend for GramBackend {
     fn describe(&self) -> Result<BackendDesc, Error> {
         let tok_count = self.tokens.borrow_mut().tokenize("count");
         let tok_expr = self.tokens.borrow_mut().tokenize("expr");
-        Ok(BackendDesc::new(vec![FuncSignature{
+        Ok(BackendDesc::new(vec![FuncSignature {
             func_type: FuncType::Scalar,
             name: tok_count,
             returns: Type::Number,
-            args: vec![(tok_expr, Type::Any)]
+            args: vec![(tok_expr, Type::Any)],
         }]))
     }
 }

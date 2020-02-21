@@ -5,15 +5,15 @@
 
 use pest::Parser;
 
+use crate::backend::{BackendDesc, Token, Tokens};
+use crate::{Dir, Error, Slot, Val};
 use anyhow::Result;
 use pest::iterators::Pair;
-use crate::{Slot, Val, Error, Dir};
-use std::collections::{HashMap, HashSet};
-use std::rc::Rc;
-use crate::backend::{Tokens, Token, BackendDesc};
 use std::cell::RefCell;
 use std::collections::hash_map::Entry;
+use std::collections::{HashMap, HashSet};
 use std::fmt::Debug;
+use std::rc::Rc;
 
 #[derive(Parser)]
 #[grammar = "cypher.pest"]
@@ -27,15 +27,23 @@ pub struct Frontend {
 
 impl Frontend {
     pub fn plan(&self, query_str: &str) -> Result<LogicalPlan> {
-        self.plan_in_context(query_str, &mut PlanningContext{
-            slots: Default::default(),
-            anon_rel_seq:0, anon_node_seq: 0,
-            tokens: Rc::clone(&self.tokens),
-            backend_desc: &self.backend_desc,
-        })
+        self.plan_in_context(
+            query_str,
+            &mut PlanningContext {
+                slots: Default::default(),
+                anon_rel_seq: 0,
+                anon_node_seq: 0,
+                tokens: Rc::clone(&self.tokens),
+                backend_desc: &self.backend_desc,
+            },
+        )
     }
 
-    pub fn plan_in_context<'i,'pc>(&self, query_str: &str, pc: &'i mut PlanningContext<'pc>) -> Result<LogicalPlan> {
+    pub fn plan_in_context<'i, 'pc>(
+        &self,
+        query_str: &str,
+        pc: &'i mut PlanningContext<'pc>,
+    ) -> Result<LogicalPlan> {
         let query = CypherParser::parse(Rule::query, &query_str)?
             .next()
             .unwrap(); // get and unwrap the `query` rule; never fails
@@ -105,7 +113,7 @@ pub enum LogicalPlan {
         // "Please evaluate the aggregating expr and output the final accumulation in Slot"
         aggregations: Vec<(Expr, Slot)>,
     },
-    Return{
+    Return {
         src: Box<Self>,
         projections: Vec<Projection>,
     },
@@ -245,9 +253,15 @@ pub struct RelSpec {
 fn plan_return(pc: &mut PlanningContext, src: LogicalPlan, return_stmt: Pair<Rule>) -> LogicalPlan {
     let mut parts = return_stmt.into_inner();
 
-    let (is_aggregate, projections) = parts.next().and_then(|p| Some(plan_return_projections(pc, p))).expect("RETURN must start with projections");
-    if ! is_aggregate {
-        return LogicalPlan::Return { src: Box::new(src), projections }
+    let (is_aggregate, projections) = parts
+        .next()
+        .and_then(|p| Some(plan_return_projections(pc, p)))
+        .expect("RETURN must start with projections");
+    if !is_aggregate {
+        return LogicalPlan::Return {
+            src: Box::new(src),
+            projections,
+        };
     }
 
     // Split the projections into groupings and aggregating projections, so in a statement like
@@ -265,7 +279,7 @@ fn plan_return(pc: &mut PlanningContext, src: LogicalPlan, return_stmt: Pair<Rul
     // the user asked values to be returned in
     let mut aggregation_projections = Vec::new();
     for projection in projections {
-        aggregation_projections.push(Projection{
+        aggregation_projections.push(Projection {
             expr: Expr::Slot(pc.get_or_alloc_slot(projection.alias)),
             alias: projection.alias,
         });
@@ -280,14 +294,17 @@ fn plan_return(pc: &mut PlanningContext, src: LogicalPlan, return_stmt: Pair<Rul
         src: Box::new(LogicalPlan::Aggregate {
             src: Box::new(src),
             grouping,
-            aggregations
+            aggregations,
         }),
-        projections: aggregation_projections
+        projections: aggregation_projections,
     }
 }
 
 // The bool return here is nasty, refactor, maybe make into a struct?
-fn plan_return_projections(pc: & mut PlanningContext, projections: Pair<Rule>) -> (bool, Vec<Projection>) {
+fn plan_return_projections(
+    pc: &mut PlanningContext,
+    projections: Pair<Rule>,
+) -> (bool, Vec<Projection>) {
     let mut out = Vec::new();
     let mut contains_aggregations = false;
     for projection in projections.into_inner() {
@@ -295,12 +312,16 @@ fn plan_return_projections(pc: & mut PlanningContext, projections: Pair<Rule>) -
             let default_alias = projection.as_str();
             let mut parts = projection.into_inner();
             let expr = parts.next().and_then(|p| Some(plan_expr(pc, p))).unwrap();
-            contains_aggregations = contains_aggregations || expr.is_aggregating(&pc.backend_desc.aggregates);
-            let alias = parts.next().and_then(|p| match p.as_rule() {
-                Rule::id => Some(pc.tokenize(p.as_str())),
-                _ => None
-            }).unwrap_or_else(|| pc.tokenize(default_alias));
-            out.push(Projection{expr, alias});
+            contains_aggregations =
+                contains_aggregations || expr.is_aggregating(&pc.backend_desc.aggregates);
+            let alias = parts
+                .next()
+                .and_then(|p| match p.as_rule() {
+                    Rule::id => Some(pc.tokenize(p.as_str())),
+                    _ => None,
+                })
+                .unwrap_or_else(|| pc.tokenize(default_alias));
+            out.push(Projection { expr, alias });
         }
     }
     (contains_aggregations, out)
@@ -341,14 +362,16 @@ fn plan_expr(pc: &mut PlanningContext, expression: Pair<Rule>) -> Expr {
             }
             Rule::func_call => {
                 let mut func_call = inner.into_inner();
-                let func_name_item = func_call.next().expect("All func_calls must start with an identifier");
+                let func_name_item = func_call
+                    .next()
+                    .expect("All func_calls must start with an identifier");
                 let name = pc.tokenize(func_name_item.as_str());
                 // Parse args
                 let mut args = Vec::new();
                 for arg in func_call {
-                    args.push(plan_expr(pc,arg));
+                    args.push(plan_expr(pc, arg));
                 }
-                return Expr::FuncCall { name, args }
+                return Expr::FuncCall { name, args };
             }
             _ => panic!(String::from(inner.as_str())),
         }
@@ -406,7 +429,11 @@ impl PatternGraph {
     }
 }
 
-fn plan_match<'i, 'pc>(pc: &'i mut PlanningContext<'pc>, src: LogicalPlan, match_stmt: Pair<Rule>) -> Result<LogicalPlan, Error> {
+fn plan_match<'i, 'pc>(
+    pc: &'i mut PlanningContext<'pc>,
+    src: LogicalPlan,
+    match_stmt: Pair<Rule>,
+) -> Result<LogicalPlan, Error> {
     let mut plan = src;
     let mut pg = parse_pattern_graph(pc, match_stmt)?;
 
@@ -599,7 +626,10 @@ fn parse_pattern_rel(
     })
 }
 
-fn parse_map_expression<'i, 'pc>(pc: &'i mut PlanningContext<'pc>, map_expr: Pair<Rule>) -> Vec<MapEntryExpr> {
+fn parse_map_expression<'i, 'pc>(
+    pc: &'i mut PlanningContext<'pc>,
+    map_expr: Pair<Rule>,
+) -> Vec<MapEntryExpr> {
     let mut out = Vec::new();
     for pair in map_expr.into_inner() {
         match pair.as_rule() {
@@ -634,7 +664,7 @@ pub enum Expr {
     // Map expressions differ from eg. Lit(Val::Map) in that they can have expressions as
     // values, like `{ name: trim_spaces(n.name) }`, and evaluate to Val maps.
     Map(Vec<MapEntryExpr>),
-    FuncCall{ name: Token, args: Vec<Expr> },
+    FuncCall { name: Token, args: Vec<Expr> },
 }
 
 impl Expr {
@@ -642,10 +672,15 @@ impl Expr {
     pub fn is_aggregating(&self, aggregating_funcs: &HashSet<Token>) -> bool {
         match self {
             Expr::Lit(_) => false,
-            Expr::Prop(c, _)  => c.is_aggregating(aggregating_funcs),
+            Expr::Prop(c, _) => c.is_aggregating(aggregating_funcs),
             Expr::Slot(_) => false,
-            Expr::Map(children) => children.iter().any(|c| c.val.is_aggregating(aggregating_funcs) ),
-            Expr::FuncCall {name, args} => aggregating_funcs.contains(name) || args.iter().any(|c|c.is_aggregating(aggregating_funcs)),
+            Expr::Map(children) => children
+                .iter()
+                .any(|c| c.val.is_aggregating(aggregating_funcs)),
+            Expr::FuncCall { name, args } => {
+                aggregating_funcs.contains(name)
+                    || args.iter().any(|c| c.is_aggregating(aggregating_funcs))
+            }
         }
     }
 }
@@ -658,13 +693,16 @@ pub struct MapEntryExpr {
 
 #[cfg(test)]
 mod tests {
-    use crate::frontend::{Frontend, LogicalPlan, PatternNode, PlanningContext, PatternRel, NodeSpec, RelSpec, MapEntryExpr, Expr};
-    use crate::backend::{Tokens, BackendDesc, FuncSignature, FuncType, Token};
-    use std::cell::RefCell;
-    use std::rc::Rc;
+    use crate::backend::{BackendDesc, FuncSignature, FuncType, Token, Tokens};
+    use crate::frontend::{
+        Expr, Frontend, LogicalPlan, MapEntryExpr, NodeSpec, PatternNode, PatternRel,
+        PlanningContext, RelSpec,
+    };
     use crate::Dir::Out;
-    use crate::{Dir, Val, Error, Type};
-    use std::collections::{HashSet, HashMap};
+    use crate::{Dir, Error, Type, Val};
+    use std::cell::RefCell;
+    use std::collections::{HashMap, HashSet};
+    use std::rc::Rc;
 
     // Outcome of testing planning; the plan plus other related items to do checks on
     #[derive(Debug)]
@@ -692,10 +730,13 @@ mod tests {
             func_type: FuncType::Aggregating,
             name: fn_count,
             returns: Type::Integer,
-            args: vec![(tok_expr, Type::Any)]
+            args: vec![(tok_expr, Type::Any)],
         }]);
 
-        let frontend = Frontend { tokens: Rc::clone(&tokens), backend_desc: BackendDesc::new(vec![]) };
+        let frontend = Frontend {
+            tokens: Rc::clone(&tokens),
+            backend_desc: BackendDesc::new(vec![]),
+        };
         let mut pc = PlanningContext {
             slots: Default::default(),
             anon_rel_seq: 0,
@@ -706,7 +747,7 @@ mod tests {
         let plan = frontend.plan_in_context(q, &mut pc);
 
         match plan {
-            Ok(plan) => Ok(PlanArtifacts{
+            Ok(plan) => Ok(PlanArtifacts {
                 plan,
                 slots: pc.slots,
                 tokens: Rc::clone(&tokens),
@@ -720,13 +761,16 @@ mod tests {
 
     #[cfg(test)]
     mod aggregate {
-        use crate::frontend::{Frontend, LogicalPlan, PatternNode, PlanningContext, PatternRel, NodeSpec, RelSpec, MapEntryExpr, Expr, Projection};
         use crate::backend::Tokens;
+        use crate::frontend::tests::plan;
+        use crate::frontend::{
+            Expr, Frontend, LogicalPlan, MapEntryExpr, NodeSpec, PatternNode, PatternRel,
+            PlanningContext, Projection, RelSpec,
+        };
+        use crate::Dir::Out;
+        use crate::{Dir, Error, Val};
         use std::cell::RefCell;
         use std::rc::Rc;
-        use crate::Dir::Out;
-        use crate::{Dir, Val, Error};
-        use crate::frontend::tests::plan;
 
         #[test]
         fn plan_simple_count() -> Result<(), Error> {
@@ -736,14 +780,30 @@ mod tests {
             let id_n = p.tokenize("n");
             let fn_count = p.tokenize("count");
             let col_count_n = p.tokenize("count(n)");
-            assert_eq!(p.plan, LogicalPlan::Return {
-                src: Box::new(LogicalPlan::Aggregate {
-                    src: Box::new(LogicalPlan::NodeScan { src: Box::new(LogicalPlan::Argument), slot: 0, labels: Some(lbl_person) }),
-                    grouping: vec![],
-                    aggregations: vec![(Expr::FuncCall { name: fn_count, args: vec![Expr::Slot(p.slot(id_n))] }, p.slot(col_count_n) )]
-                }),
-                projections: vec![Projection { expr: Expr::Slot(p.slot(col_count_n)), alias: col_count_n }]
-            });
+            assert_eq!(
+                p.plan,
+                LogicalPlan::Return {
+                    src: Box::new(LogicalPlan::Aggregate {
+                        src: Box::new(LogicalPlan::NodeScan {
+                            src: Box::new(LogicalPlan::Argument),
+                            slot: 0,
+                            labels: Some(lbl_person)
+                        }),
+                        grouping: vec![],
+                        aggregations: vec![(
+                            Expr::FuncCall {
+                                name: fn_count,
+                                args: vec![Expr::Slot(p.slot(id_n))]
+                            },
+                            p.slot(col_count_n)
+                        )]
+                    }),
+                    projections: vec![Projection {
+                        expr: Expr::Slot(p.slot(col_count_n)),
+                        alias: col_count_n
+                    }]
+                }
+            );
             Ok(())
         }
 
@@ -759,33 +819,68 @@ mod tests {
             let col_count_n = p.tokenize("count(n)");
             let col_n_age = p.tokenize("n.age");
             let col_n_occupation = p.tokenize("n.occupation");
-            assert_eq!(p.plan, LogicalPlan::Return {
-                src: Box::new(LogicalPlan::Aggregate {
-                    src: Box::new(LogicalPlan::NodeScan { src: Box::new(LogicalPlan::Argument), slot: 0, labels: Some(lbl_person) }),
-                    grouping: vec![
-                        (Expr::Prop(Box::new(Expr::Slot(p.slot(id_n))), vec![key_age]), p.slot(col_n_age) ),
-                        (Expr::Prop(Box::new(Expr::Slot(p.slot(id_n))), vec![key_occupation]), p.slot(col_n_occupation) ),],
-                    aggregations: vec![
-                        (Expr::FuncCall { name: fn_count, args: vec![Expr::Slot(p.slot(id_n))] }, p.slot(col_count_n) )]
-                }),
-                projections: vec![
-                    Projection { expr: Expr::Slot(p.slot(col_n_age)), alias: col_n_age },
-                    Projection { expr: Expr::Slot(p.slot(col_n_occupation)), alias: col_n_occupation },
-                    Projection { expr: Expr::Slot(p.slot(col_count_n)), alias: col_count_n },]
-            });
+            assert_eq!(
+                p.plan,
+                LogicalPlan::Return {
+                    src: Box::new(LogicalPlan::Aggregate {
+                        src: Box::new(LogicalPlan::NodeScan {
+                            src: Box::new(LogicalPlan::Argument),
+                            slot: 0,
+                            labels: Some(lbl_person)
+                        }),
+                        grouping: vec![
+                            (
+                                Expr::Prop(Box::new(Expr::Slot(p.slot(id_n))), vec![key_age]),
+                                p.slot(col_n_age)
+                            ),
+                            (
+                                Expr::Prop(
+                                    Box::new(Expr::Slot(p.slot(id_n))),
+                                    vec![key_occupation]
+                                ),
+                                p.slot(col_n_occupation)
+                            ),
+                        ],
+                        aggregations: vec![(
+                            Expr::FuncCall {
+                                name: fn_count,
+                                args: vec![Expr::Slot(p.slot(id_n))]
+                            },
+                            p.slot(col_count_n)
+                        )]
+                    }),
+                    projections: vec![
+                        Projection {
+                            expr: Expr::Slot(p.slot(col_n_age)),
+                            alias: col_n_age
+                        },
+                        Projection {
+                            expr: Expr::Slot(p.slot(col_n_occupation)),
+                            alias: col_n_occupation
+                        },
+                        Projection {
+                            expr: Expr::Slot(p.slot(col_count_n)),
+                            alias: col_count_n
+                        },
+                    ]
+                }
+            );
             Ok(())
         }
     }
 
     #[cfg(test)]
     mod create {
-        use crate::frontend::{Frontend, LogicalPlan, PatternNode, PlanningContext, PatternRel, NodeSpec, RelSpec, MapEntryExpr, Expr};
         use crate::backend::Tokens;
+        use crate::frontend::tests::plan;
+        use crate::frontend::{
+            Expr, Frontend, LogicalPlan, MapEntryExpr, NodeSpec, PatternNode, PatternRel,
+            PlanningContext, RelSpec,
+        };
+        use crate::Dir::Out;
+        use crate::{Dir, Error, Val};
         use std::cell::RefCell;
         use std::rc::Rc;
-        use crate::Dir::Out;
-        use crate::{Dir, Val, Error};
-        use crate::frontend::tests::plan;
 
         #[test]
         fn plan_create() -> Result<(), Error> {
@@ -793,15 +888,18 @@ mod tests {
 
             let lbl_person = p.tokenize("Person");
             let id_n = p.tokenize("n");
-            assert_eq!(p.plan, LogicalPlan::Create {
-                src: Box::new(LogicalPlan::Argument),
-                nodes: vec![NodeSpec {
-                    slot: p.slot(id_n),
-                    labels: vec![lbl_person],
-                    props: vec![]
-                }],
-                rels: vec![]
-            });
+            assert_eq!(
+                p.plan,
+                LogicalPlan::Create {
+                    src: Box::new(LogicalPlan::Argument),
+                    nodes: vec![NodeSpec {
+                        slot: p.slot(id_n),
+                        labels: vec![lbl_person],
+                        props: vec![]
+                    }],
+                    rels: vec![]
+                }
+            );
             Ok(())
         }
 
@@ -812,18 +910,21 @@ mod tests {
             let lbl_person = p.tokenize("Person");
             let id_n = p.tokenize("n");
             let key_name = p.tokenize("name");
-            assert_eq!(p.plan, LogicalPlan::Create {
-                src: Box::new(LogicalPlan::Argument),
-                nodes: vec![NodeSpec {
-                    slot: p.slot(id_n),
-                    labels: vec![lbl_person],
-                    props: vec![MapEntryExpr {
-                        key: key_name,
-                        val: Expr::Lit(Val::String("Bob".to_string())),
-                    }]
-                }],
-                rels: vec![]
-            });
+            assert_eq!(
+                p.plan,
+                LogicalPlan::Create {
+                    src: Box::new(LogicalPlan::Argument),
+                    nodes: vec![NodeSpec {
+                        slot: p.slot(id_n),
+                        labels: vec![lbl_person],
+                        props: vec![MapEntryExpr {
+                            key: key_name,
+                            val: Expr::Lit(Val::String("Bob".to_string())),
+                        }]
+                    }],
+                    rels: vec![]
+                }
+            );
             Ok(())
         }
 
@@ -835,27 +936,26 @@ mod tests {
             let lbl_person = p.tokenize("Person");
             let id_n = p.tokenize("n");
             let id_r = p.tokenize("r");
-            assert_eq!(p.plan, LogicalPlan::Create {
-                src: Box::new(LogicalPlan::Argument),
-                nodes: vec![
-                    NodeSpec {
+            assert_eq!(
+                p.plan,
+                LogicalPlan::Create {
+                    src: Box::new(LogicalPlan::Argument),
+                    nodes: vec![NodeSpec {
                         slot: p.slot(id_n),
                         labels: vec![lbl_person],
                         props: vec![]
                     }],
-                rels: vec![
-                    RelSpec {
+                    rels: vec![RelSpec {
                         slot: p.slot(id_r),
                         rel_type: rt_knows,
                         start_node_slot: p.slot(id_n),
                         end_node_slot: p.slot(id_n),
                         props: vec![]
-                    },
-                ]
-            });
+                    },]
+                }
+            );
             Ok(())
         }
-
 
         #[test]
         fn plan_create_rel_with_props() -> Result<(), Error> {
@@ -866,26 +966,27 @@ mod tests {
             let id_n = p.tokenize("n");
             let id_r = p.tokenize("r");
             let k_since = p.tokenize("since");
-            assert_eq!(p.plan, LogicalPlan::Create {
-                src: Box::new(LogicalPlan::Argument),
-                nodes: vec![
-                    NodeSpec {
+            assert_eq!(
+                p.plan,
+                LogicalPlan::Create {
+                    src: Box::new(LogicalPlan::Argument),
+                    nodes: vec![NodeSpec {
                         slot: p.slot(id_n),
                         labels: vec![lbl_person],
                         props: vec![]
                     }],
-                rels: vec![
-                    RelSpec {
+                    rels: vec![RelSpec {
                         slot: p.slot(id_r),
                         rel_type: rt_knows,
                         start_node_slot: p.slot(id_n),
                         end_node_slot: p.slot(id_n),
-                        props: vec![
-                            MapEntryExpr { key: k_since, val: Expr::Lit(Val::String("2012".to_string())) },
-                        ]
-                    },
-                ]
-            });
+                        props: vec![MapEntryExpr {
+                            key: k_since,
+                            val: Expr::Lit(Val::String("2012".to_string()))
+                        },]
+                    },]
+                }
+            );
             Ok(())
         }
 
@@ -898,29 +999,31 @@ mod tests {
             let id_n = p.tokenize("n");
             let id_o = p.tokenize("o");
             let id_r = p.tokenize("r");
-            assert_eq!(p.plan, LogicalPlan::Create {
-                src: Box::new(LogicalPlan::NodeScan {
-                    src: Box::new(LogicalPlan::Argument),
-                    slot: p.slot(id_n),
-                    labels: Some(lbl_person),
-                }),
-                nodes: vec![
-                    // Note there is just one node here, the planner should understand "n" already exists
-                    NodeSpec {
-                        slot: p.slot(id_o),
-                        labels: vec![lbl_person],
-                        props: vec![]
-                    }],
-                rels: vec![
-                    RelSpec {
-                        slot: p.slot(id_r ),
+            assert_eq!(
+                p.plan,
+                LogicalPlan::Create {
+                    src: Box::new(LogicalPlan::NodeScan {
+                        src: Box::new(LogicalPlan::Argument),
+                        slot: p.slot(id_n),
+                        labels: Some(lbl_person),
+                    }),
+                    nodes: vec![
+                        // Note there is just one node here, the planner should understand "n" already exists
+                        NodeSpec {
+                            slot: p.slot(id_o),
+                            labels: vec![lbl_person],
+                            props: vec![]
+                        }
+                    ],
+                    rels: vec![RelSpec {
+                        slot: p.slot(id_r),
                         rel_type: rt_knows,
                         start_node_slot: p.slot(id_n),
                         end_node_slot: p.slot(id_o),
                         props: vec![]
-                    },
-                ]
-            });
+                    },]
+                }
+            );
             Ok(())
         }
 
@@ -933,29 +1036,31 @@ mod tests {
             let id_n = p.tokenize("n");
             let id_o = p.tokenize("o");
             let id_r = p.tokenize("r");
-            assert_eq!(p.plan, LogicalPlan::Create {
-                src: Box::new(LogicalPlan::NodeScan {
-                    src: Box::new(LogicalPlan::Argument),
-                    slot: p.slot(id_n),
-                    labels: Some(lbl_person),
-                }),
-                nodes: vec![
-                    // Note there is just one node here, the planner should understand "n" already exists
-                    NodeSpec {
-                        slot: p.slot(id_o),
-                        labels: vec![lbl_person],
-                        props: vec![]
-                    }],
-                rels: vec![
-                    RelSpec {
+            assert_eq!(
+                p.plan,
+                LogicalPlan::Create {
+                    src: Box::new(LogicalPlan::NodeScan {
+                        src: Box::new(LogicalPlan::Argument),
+                        slot: p.slot(id_n),
+                        labels: Some(lbl_person),
+                    }),
+                    nodes: vec![
+                        // Note there is just one node here, the planner should understand "n" already exists
+                        NodeSpec {
+                            slot: p.slot(id_o),
+                            labels: vec![lbl_person],
+                            props: vec![]
+                        }
+                    ],
+                    rels: vec![RelSpec {
                         slot: p.slot(id_r),
                         rel_type: rt_knows,
                         start_node_slot: p.slot(id_o),
                         end_node_slot: p.slot(id_n),
                         props: vec![]
-                    },
-                ]
-            });
+                    },]
+                }
+            );
             Ok(())
         }
     }

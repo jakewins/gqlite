@@ -25,17 +25,15 @@ impl Database {
     #[cfg(feature = "gram")]
     pub fn open(file: &mut File) -> Result<Database> {
         let backend = backend::gram::GramBackend::open(file)?;
-        return Database::with_backend(Box::new(backend))
+        return Database::with_backend(Box::new(backend));
     }
 
     pub fn with_backend(backend: Box<dyn Backend>) -> Result<Database, Error> {
-        let frontend = Frontend{
+        let frontend = Frontend {
             tokens: backend.tokens(),
-            backend_desc: backend.describe()? };
-        return Ok(Database {
-            backend,
-            frontend,
-        })
+            backend_desc: backend.describe()?,
+        };
+        return Ok(Database { backend, frontend });
     }
 
     pub fn run(&mut self, query_str: &str, cursor: &mut Cursor) -> Result<(), Error> {
@@ -114,7 +112,7 @@ pub enum Type {
     Map,
 }
 
-#[derive(Debug,Clone,PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum Val {
     Null,
     String(String),

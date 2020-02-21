@@ -2,13 +2,13 @@
 // Backends implement the actual storage of graphs, and provide implementations of the
 // logical operators the frontend emits that can act on that storage.
 //
+use crate::frontend::LogicalPlan;
 use crate::{Cursor, Error, Type};
-use crate::frontend::{LogicalPlan};
 use anyhow::Result;
-use std::fmt::Debug;
-use std::rc::Rc;
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
+use std::fmt::Debug;
+use std::rc::Rc;
 
 pub trait PreparedStatement: Debug {
     fn run(&mut self, cursor: &mut Cursor) -> Result<()>;
@@ -49,7 +49,10 @@ impl BackendDesc {
                 aggregates.insert(f.name);
             }
         }
-        return BackendDesc{ functions, aggregates }
+        return BackendDesc {
+            functions,
+            aggregates,
+        };
     }
 }
 
@@ -79,7 +82,7 @@ pub enum FuncType {
     //
     //   MATCH (n) RETURN n.age, count(n)
     //
-    Aggregating
+    Aggregating,
 }
 
 // See the "functions" section in the openCypher spec https://s3.amazonaws.com/artifacts.opencypher.org/openCypher9.pdf
