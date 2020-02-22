@@ -4,6 +4,8 @@
 use crate::{frontend, Cursor, CursorState, Dir, Error, Row, Slot, Type, Val};
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
+use std::fs::File;
+use std::io::{Read, Seek, SeekFrom, Write};
 use std::rc::Rc;
 
 use super::PreparedStatement;
@@ -11,25 +13,26 @@ use crate::backend::{BackendDesc, FuncSignature, FuncType, Token, Tokens};
 use crate::frontend::LogicalPlan;
 use anyhow::Result;
 use std::fmt::Debug;
-use std::fs::File;
 
 #[derive(Debug)]
 pub struct GramBackend {
     tokens: Rc<RefCell<Tokens>>,
     g: Rc<Graph>,
+    file: Rc<RefCell<File>>,
 }
 
 impl GramBackend {
-    pub fn open(file: &mut File) -> Result<GramBackend> {
+    pub fn open(mut file: File) -> Result<GramBackend> {
         let mut tokens = Tokens {
             table: Default::default(),
         };
-        let g = parser::load(&mut tokens, file)?;
+        let g = parser::load(&mut tokens, &mut file)?;
 
-        Ok(GramBackend {
+        return Ok(GramBackend {
             tokens: Rc::new(RefCell::new(tokens)),
             g: Rc::new(g),
-        })
+            file: Rc::new(RefCell::new(file)),
+        });
     }
 
     fn convert(&self, plan: LogicalPlan) -> Result<Box<dyn Operator>> {
@@ -93,12 +96,13 @@ impl super::Backend for GramBackend {
 
     fn prepare(&self, logical_plan: Box<LogicalPlan>) -> Result<Box<dyn PreparedStatement>> {
         let plan = self.convert(*logical_plan)?;
-        Ok(Box::new(Statement {
+        return Ok(Box::new(Statement {
+            file: Rc::clone(&self.file),
             g: Rc::clone(&self.g),
             plan,
             // TODO: pipe this knowledge through from logial plan
             num_slots: 16,
-        }))
+        }));
     }
 
     fn describe(&self) -> Result<BackendDesc, Error> {
@@ -116,22 +120,24 @@ impl super::Backend for GramBackend {
 #[derive(Debug)]
 struct Statement {
     g: Rc<Graph>,
+    file: Rc<RefCell<File>>,
     plan: Box<dyn Operator>,
     num_slots: usize,
 }
 
 impl PreparedStatement for Statement {
-    fn run(&mut self, cursor: &mut Cursor) -> Result<()> {
+    fn run(&mut self, cursor: &mut Cursor) -> Result<(), Error> {
         cursor.state = Some(Box::new(GramCursorState {
             ctx: Context {
                 g: Rc::clone(&self.g),
+                file: Rc::clone(&self.file),
             },
             plan: self.plan.clone(),
         }));
         if cursor.row.slots.len() < self.num_slots {
             cursor.row.slots.resize(self.num_slots, Val::Null);
         }
-        Ok(())
+        return Ok(());
     }
 }
 
@@ -150,6 +156,7 @@ impl CursorState for GramCursorState {
 #[derive(Debug)]
 struct Context {
     g: Rc<Graph>,
+    file: Rc<RefCell<File>>,
 }
 
 #[derive(Debug, Clone)]
@@ -399,6 +406,7 @@ mod parser {
     }
 
     fn read_to_string(file: &mut File) -> Result<String> {
+        //todo lock this (and other io on the file)
         let mut string = String::with_capacity(initial_buffer_size(&file));
         file.read_to_string(&mut string)?;
         Ok(string)
