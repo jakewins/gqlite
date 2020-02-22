@@ -1,16 +1,17 @@
 // The Gram backend is a backend implementation that acts on a Gram file.
 // It is currently single threaded, and provides no data durability guarantees.
 
-use super::PreparedStatement;
-use crate::backend::{Token, Tokens};
-use crate::frontend::LogicalPlan;
-use crate::{frontend, Cursor, CursorState, Dir, Row, Slot, Val};
-use anyhow::Result;
+use crate::{frontend, Cursor, CursorState, Dir, Error, Row, Slot, Type, Val};
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
+use std::rc::Rc;
+
+use super::PreparedStatement;
+use crate::backend::{BackendDesc, FuncSignature, FuncType, Token, Tokens};
+use crate::frontend::LogicalPlan;
+use anyhow::Result;
 use std::fmt::Debug;
 use std::fs::File;
-use std::rc::Rc;
 
 #[derive(Debug)]
 pub struct GramBackend {
@@ -55,9 +56,6 @@ impl GramBackend {
                 next_rel_index: 0,
                 state: ExpandState::NextNode,
             })),
-            LogicalPlan::Create { .. } => {
-                panic!("The gram backend does not yet support CREATE statements")
-            }
             LogicalPlan::Return { src, projections } => {
                 let mut converted_projections = Vec::new();
                 for projection in projections {
@@ -66,12 +64,12 @@ impl GramBackend {
                         alias: projection.alias,
                     })
                 }
-
                 Ok(Box::new(Return {
                     src: self.convert(*src)?,
                     projections: converted_projections,
                 }))
             }
+            _ => panic!("The gram backend does not yet handle {:?}", plan),
         }
     }
 
@@ -101,6 +99,17 @@ impl super::Backend for GramBackend {
             // TODO: pipe this knowledge through from logial plan
             num_slots: 16,
         }))
+    }
+
+    fn describe(&self) -> Result<BackendDesc, Error> {
+        let tok_count = self.tokens.borrow_mut().tokenize("count");
+        let tok_expr = self.tokens.borrow_mut().tokenize("expr");
+        Ok(BackendDesc::new(vec![FuncSignature {
+            func_type: FuncType::Scalar,
+            name: tok_count,
+            returns: Type::Number,
+            args: vec![(tok_expr, Type::Any)],
+        }]))
     }
 }
 
@@ -320,7 +329,7 @@ impl Operator for Argument {
 #[derive(Debug, Clone)]
 struct Projection {
     pub expr: Expr,
-    pub alias: String,
+    pub alias: Token,
 }
 
 #[derive(Debug)]
