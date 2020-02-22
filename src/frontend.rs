@@ -440,18 +440,37 @@ fn plan_match<'i, 'pc>(
     // Ok, now we have parsed the pattern into a full graph, time to start solving it
     println!("built pg: {:?}", pg);
     // Start by picking one high-selectivity node
+    let mut candidate_id = None;
+    let mut solved_for_labelled_node = false;
     for id in &pg.e_order {
-        let candidate = pg.e.get_mut(id).unwrap();
+        let mut candidate = pg.e.get_mut(id).unwrap();
+        candidate_id = Some(id);
         // Advanced algorithm: Pick first node with a label filter on it and call it an afternoon
         if !candidate.labels.is_empty() {
+            if candidate.labels.len() > 1 {
+                panic!("Multiple label match not yet implemented")
+            }
             plan = LogicalPlan::NodeScan {
                 src: Box::new(plan),
                 slot: pc.get_or_alloc_slot(*id),
                 labels: candidate.labels.first().cloned(),
             };
             candidate.solved = true;
+            solved_for_labelled_node = true;
             break;
         }
+    }
+    if !solved_for_labelled_node && candidate_id.is_some() {
+        let mut candidate = pg.e.get_mut(candidate_id.unwrap()).unwrap();
+        if candidate.labels.len() > 1 {
+            panic!("Multiple label match not yet implemented")
+        }
+        plan = LogicalPlan::NodeScan {
+            src: Box::new(plan),
+            slot: pc.get_or_alloc_slot(*candidate_id.unwrap()),
+            labels: candidate.labels.first().cloned(),
+        };
+        candidate.solved = true;
     }
 
     // Now we iterate until the whole pattern is solved. The way this works is that "solving"
@@ -557,12 +576,16 @@ fn parse_pattern_graph(pc: &mut PlanningContext, patterns: Pair<Rule>) -> Result
 // Figures out what step we need to find the specified node
 fn parse_pattern_node(pc: &mut PlanningContext, pattern_node: Pair<Rule>) -> PatternNode {
     let mut identifier = None;
-    let mut label = None;
+    let mut labels = Vec::new();
     let mut props = Vec::new();
     for part in pattern_node.into_inner() {
         match part.as_rule() {
             Rule::id => identifier = Some(pc.tokenize(part.as_str())),
-            Rule::label => label = Some(pc.tokenize(part.as_str())),
+            Rule::label => {
+                for label in part.into_inner() {
+                    labels.push(pc.tokenize(label.as_str()));
+                }
+            }
             Rule::map => {
                 props = parse_map_expression(pc, part);
             }
@@ -571,16 +594,12 @@ fn parse_pattern_node(pc: &mut PlanningContext, pattern_node: Pair<Rule>) -> Pat
     }
 
     let id = identifier.unwrap_or_else(|| pc.new_anon_node());
-
-    let labels = if let Some(lbl) = label {
-        vec![lbl]
-    } else {
-        vec![]
-    };
+    labels.sort_unstable();
+    labels.dedup();
 
     PatternNode {
         identifier: id,
-        labels,
+        labels: labels,
         props,
         solved: false,
     }
@@ -808,6 +827,41 @@ mod tests {
         }
 
         #[test]
+        fn plan_simple_count_no_label() -> Result<(), Error> {
+            let mut p = plan("MATCH (n) RETURN count(n)")?;
+
+            let lbl_person = p.tokenize("Person");
+            let id_n = p.tokenize("n");
+            let fn_count = p.tokenize("count");
+            let col_count_n = p.tokenize("count(n)");
+            assert_eq!(
+                p.plan,
+                LogicalPlan::Return {
+                    src: Box::new(LogicalPlan::Aggregate {
+                        src: Box::new(LogicalPlan::NodeScan {
+                            src: Box::new(LogicalPlan::Argument),
+                            slot: 0,
+                            labels: None
+                        }),
+                        grouping: vec![],
+                        aggregations: vec![(
+                            Expr::FuncCall {
+                                name: fn_count,
+                                args: vec![Expr::Slot(p.slot(id_n))]
+                            },
+                            p.slot(col_count_n)
+                        )]
+                    }),
+                    projections: vec![Projection {
+                        expr: Expr::Slot(p.slot(col_count_n)),
+                        alias: col_count_n
+                    }]
+                }
+            );
+            Ok(())
+        }
+
+        #[test]
         fn plan_grouped_count() -> Result<(), Error> {
             let mut p = plan("MATCH (n:Person) RETURN n.age, n.occupation, count(n)")?;
 
@@ -895,6 +949,49 @@ mod tests {
                     nodes: vec![NodeSpec {
                         slot: p.slot(id_n),
                         labels: vec![lbl_person],
+                        props: vec![]
+                    }],
+                    rels: vec![]
+                }
+            );
+            Ok(())
+        }
+
+        #[test]
+        fn plan_create_no_label() -> Result<(), Error> {
+            let mut p = plan("CREATE (n)")?;
+
+            let id_n = p.tokenize("n");
+            assert_eq!(
+                p.plan,
+                LogicalPlan::Create {
+                    src: Box::new(LogicalPlan::Argument),
+                    nodes: vec![NodeSpec {
+                        slot: p.slot(id_n),
+                        labels: vec![],
+                        props: vec![]
+                    }],
+                    rels: vec![]
+                }
+            );
+            Ok(())
+        }
+
+        #[test]
+        fn plan_create_multiple_labels() -> Result<(), Error> {
+            let mut p = plan("CREATE (n:Person:Actor)")?;
+
+            let id_n = p.tokenize("n");
+            let lbl_person = p.tokenize("Person");
+            let lbl_actor = p.tokenize("Actor");
+
+            assert_eq!(
+                p.plan,
+                LogicalPlan::Create {
+                    src: Box::new(LogicalPlan::Argument),
+                    nodes: vec![NodeSpec {
+                        slot: p.slot(id_n),
+                        labels: vec![lbl_person, lbl_actor],
                         props: vec![]
                     }],
                     rels: vec![]

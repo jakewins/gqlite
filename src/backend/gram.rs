@@ -383,6 +383,7 @@ mod parser {
     use crate::Val;
     use anyhow::Result;
     use std::collections::HashMap;
+    use std::collections::HashSet;
     use std::fs::File;
     use std::io::Read;
 
@@ -461,10 +462,16 @@ mod parser {
                 Rule::node => {
                     let mut identifier: Option<String> = None;
                     let mut props: HashMap<Token, Val> = HashMap::new();
+                    let mut labels: HashSet<Token> = HashSet::new();
 
                     for part in item.into_inner() {
                         match part.as_rule() {
                             Rule::id => identifier = Some(part.as_str().to_string()),
+                            Rule::label => {
+                                for label in part.into_inner() {
+                                    labels.insert(tokens.tokenize(label.as_str()));
+                                }
+                            }
                             Rule::map => {
                                 for pair in part.into_inner() {
                                     let mut key: Option<String> = None;
@@ -505,7 +512,7 @@ mod parser {
                     g.add_node(
                         node_ids.tokenize(&identifier.unwrap()),
                         Node {
-                            labels: vec![tokens.tokenize("Person")].iter().cloned().collect(),
+                            labels,
                             properties: props,
                             rels: vec![],
                         },
