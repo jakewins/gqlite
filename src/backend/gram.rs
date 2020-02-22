@@ -32,30 +32,30 @@ impl GramBackend {
         })
     }
 
-    fn convert(&self, plan: LogicalPlan) -> Result<Box<dyn Operator>> {
-        match plan {
-            LogicalPlan::Argument => Ok(Box::new(Argument {})),
-            LogicalPlan::NodeScan { src, slot, labels } => Ok(Box::new(NodeScan {
-                src: self.convert(*src)?,
+    fn convert(&self, plan: Box<LogicalPlan>) -> Result<Rc<RefCell<dyn Operator>>, Error> {
+        match *plan {
+            LogicalPlan::Argument => Ok(Rc::new(RefCell::new(Argument {}))),
+            LogicalPlan::NodeScan { src, slot, labels } => Ok(Rc::new(RefCell::new(NodeScan {
+                src: self.convert(src)?,
                 next_node: 0,
                 slot,
                 labels,
-            })),
+            }))),
             LogicalPlan::Expand {
                 src,
                 src_slot,
                 rel_slot,
                 dst_slot,
                 rel_type,
-            } => Ok(Box::new(Expand {
-                src: self.convert(*src)?,
+            } => Ok(Rc::new(RefCell::new(Expand {
+                src: self.convert(src)?,
                 src_slot,
                 rel_slot,
                 dst_slot,
                 rel_type,
                 next_rel_index: 0,
                 state: ExpandState::NextNode,
-            })),
+            }))),
             LogicalPlan::Return { src, projections } => {
                 let mut converted_projections = Vec::new();
                 for projection in projections {
@@ -64,10 +64,12 @@ impl GramBackend {
                         alias: projection.alias,
                     })
                 }
-                Ok(Box::new(Return {
-                    src: self.convert(*src)?,
+
+                Ok(Rc::new(RefCell::new(Return {
+                    src: self.convert(src)?,
                     projections: converted_projections,
-                }))
+                    print_header: true,
+                })))
             }
             _ => panic!("The gram backend does not yet handle {:?}", plan),
         }
@@ -92,7 +94,7 @@ impl super::Backend for GramBackend {
     }
 
     fn prepare(&self, logical_plan: Box<LogicalPlan>) -> Result<Box<dyn PreparedStatement>> {
-        let plan = self.convert(*logical_plan)?;
+        let plan = self.convert(logical_plan)?;
         Ok(Box::new(Statement {
             g: Rc::clone(&self.g),
             plan,
@@ -116,7 +118,7 @@ impl super::Backend for GramBackend {
 #[derive(Debug)]
 struct Statement {
     g: Rc<Graph>,
-    plan: Box<dyn Operator>,
+    plan: Rc<RefCell<dyn Operator>>,
     num_slots: usize,
 }
 
@@ -138,12 +140,12 @@ impl PreparedStatement for Statement {
 #[derive(Debug)]
 struct GramCursorState {
     ctx: Context,
-    plan: Box<dyn Operator>,
+    plan: Rc<RefCell<dyn Operator>>,
 }
 
 impl CursorState for GramCursorState {
     fn next(&mut self, row: &mut Row) -> Result<bool> {
-        self.plan.next(&mut self.ctx, row)
+        self.plan.borrow_mut().next(&mut self.ctx, row)
     }
 }
 
@@ -189,9 +191,6 @@ impl Expr {
 // Physical operator. We have one of these for each Logical operator the frontend emits.
 trait Operator: Debug {
     fn next(&mut self, ctx: &mut Context, row: &mut Row) -> Result<bool>;
-
-    // I can't figure out how do implement the normal "Clone" trait for this trait..
-    fn clone(&self) -> Box<dyn Operator>;
 }
 
 #[derive(Debug)]
@@ -202,7 +201,7 @@ pub enum ExpandState {
 
 #[derive(Debug)]
 struct Expand {
-    pub src: Box<dyn Operator>,
+    pub src: Rc<RefCell<dyn Operator>>,
 
     pub src_slot: usize,
 
@@ -224,7 +223,7 @@ impl Operator for Expand {
             match &self.state {
                 ExpandState::NextNode => {
                     // Pull in the next node
-                    if !self.src.next(ctx, out)? {
+                    if !self.src.borrow_mut().next(ctx, out)? {
                         return Ok(false);
                     }
                     self.state = ExpandState::InNode;
@@ -254,24 +253,12 @@ impl Operator for Expand {
             }
         }
     }
-
-    fn clone(&self) -> Box<dyn Operator> {
-        Box::new(Expand {
-            src: self.src.clone(),
-            src_slot: self.src_slot,
-            rel_slot: self.rel_slot,
-            dst_slot: self.dst_slot,
-            rel_type: self.rel_type,
-            next_rel_index: 0,
-            state: ExpandState::NextNode,
-        })
-    }
 }
 
 // For each src row, perform a full no de scan with the specified filters
 #[derive(Debug)]
 struct NodeScan {
-    pub src: Box<dyn Operator>,
+    pub src: Rc<RefCell<dyn Operator>>,
 
     // Next node id in g to return
     pub next_node: usize,
@@ -302,15 +289,6 @@ impl Operator for NodeScan {
             return Ok(false);
         }
     }
-
-    fn clone(&self) -> Box<dyn Operator> {
-        Box::new(NodeScan {
-            src: self.src.clone(),
-            next_node: 0,
-            slot: self.slot,
-            labels: self.labels,
-        })
-    }
 }
 
 #[derive(Debug, Clone)]
@@ -319,10 +297,6 @@ struct Argument;
 impl Operator for Argument {
     fn next(&mut self, _ctx: &mut Context, _out: &mut Row) -> Result<bool> {
         unimplemented!()
-    }
-
-    fn clone(&self) -> Box<dyn Operator> {
-        Box::new(Argument {})
     }
 }
 
@@ -334,26 +308,30 @@ struct Projection {
 
 #[derive(Debug)]
 struct Return {
-    pub src: Box<dyn Operator>,
+    pub src: Rc<RefCell<dyn Operator>>,
     pub projections: Vec<Projection>,
+    print_header: bool,
 }
 
 impl Operator for Return {
     fn next(&mut self, ctx: &mut Context, out: &mut Row) -> Result<bool> {
-        println!("----");
-        let mut first = true;
-        for cell in &self.projections {
-            if first {
-                print!("{}", cell.alias);
-                first = false
-            } else {
-                print!(", {}", cell.alias)
+        if self.print_header {
+            println!("----");
+            let mut first = true;
+            for cell in &self.projections {
+                if first {
+                    print!("{}", cell.alias);
+                    first = false
+                } else {
+                    print!(", {}", cell.alias)
+                }
             }
+            println!();
+            println!("----");
+            self.print_header = false;
         }
-        println!();
-        println!("----");
-        while self.src.next(ctx, out)? {
-            first = true;
+        while self.src.borrow_mut().next(ctx, out)? {
+            let mut first = true;
             for cell in &self.projections {
                 let v = cell.expr.eval(ctx, out)?;
                 if first {
@@ -364,15 +342,10 @@ impl Operator for Return {
                 }
             }
             println!();
+            // Do this to 'yield' one row at a time to the cursor
+            return Ok(true);
         }
         Ok(false)
-    }
-
-    fn clone(&self) -> Box<dyn Operator> {
-        Box::new(Return {
-            src: self.src.clone(),
-            projections: self.projections.clone(),
-        })
     }
 }
 
