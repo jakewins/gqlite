@@ -235,9 +235,9 @@ fn plan_create(
 // Specification of a node to create
 #[derive(Debug, PartialEq)]
 pub struct NodeSpec {
-    slot: usize,
-    labels: Vec<Token>,
-    props: Vec<MapEntryExpr>,
+    pub slot: usize,
+    pub labels: Vec<Token>,
+    pub props: Vec<MapEntryExpr>,
 }
 
 // Specification of a rel to create
@@ -706,8 +706,8 @@ impl Expr {
 
 #[derive(Debug, PartialEq)]
 pub struct MapEntryExpr {
-    key: Token,
-    val: Expr,
+    pub key: Token,
+    pub val: Expr,
 }
 
 #[cfg(test)]
@@ -819,7 +819,6 @@ mod tests {
         fn plan_simple_count_no_label() -> Result<(), Error> {
             let mut p = plan("MATCH (n) RETURN count(n)")?;
 
-            let lbl_person = p.tokenize("Person");
             let id_n = p.tokenize("n");
             let fn_count = p.tokenize("count");
             let col_count_n = p.tokenize("count(n)");

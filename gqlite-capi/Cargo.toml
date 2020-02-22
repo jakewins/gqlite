@@ -16,3 +16,4 @@ crate-type = ["staticlib", "cdylib"]
 libc = "0.2"
 gqlite = { version = "0", path = ".." }
 lazy_static = "1.4.0"
+uuid = "0.8"

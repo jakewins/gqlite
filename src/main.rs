@@ -1,4 +1,3 @@
-use std::fs::File;
 use std::fs::OpenOptions;
 
 fn main() -> anyhow::Result<()> {
@@ -20,7 +19,7 @@ fn main() -> anyhow::Result<()> {
 
         let query_str = string_to_static_str(matches.value_of("QUERY").unwrap());
         let path = matches.value_of("file").unwrap_or("graph.gram");
-        let mut file = OpenOptions::new()
+        let file = OpenOptions::new()
             .create(false)
             .write(true)
             .read(true)
