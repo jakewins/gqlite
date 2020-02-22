@@ -1,20 +1,19 @@
 // The Gram backend is a backend implementation that acts on a Gram file.
 // It is currently single threaded, and provides no data durability guarantees.
 
+use super::PreparedStatement;
+use crate::backend::{BackendDesc, FuncSignature, FuncType, Token, Tokens};
+use crate::frontend::LogicalPlan;
 use crate::{frontend, Cursor, CursorState, Dir, Error, Row, Slot, Type, Val};
+use anyhow::Result;
+use rand::Rng;
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
+use std::fmt::Debug;
 use std::fs::File;
 use std::io::{Seek, SeekFrom, Write};
 use std::rc::Rc;
 use std::time::SystemTime;
-
-use super::PreparedStatement;
-use crate::backend::{BackendDesc, FuncSignature, FuncType, Token, Tokens};
-use crate::frontend::LogicalPlan;
-use anyhow::Result;
-use rand::Rng;
-use std::fmt::Debug;
 use uuid::v1::{Context as UuidContext, Timestamp};
 use uuid::Uuid;
 
@@ -48,6 +47,30 @@ impl GramBackend {
                 slot,
                 labels,
             }))),
+            LogicalPlan::Create { src, nodes, .. } => {
+                let mut out_nodes = Vec::with_capacity(nodes.len());
+                let mut i = 0;
+                for ns in nodes {
+                    let mut props = HashMap::new();
+                    for k in ns.props {
+                        props.insert(k.key, self.convert_expr(k.val));
+                    }
+                    out_nodes.insert(
+                        i,
+                        NodeSpec {
+                            slot: ns.slot,
+                            labels: ns.labels.iter().copied().collect(),
+                            props: props,
+                        },
+                    );
+                    i += 1;
+                }
+                Ok(Rc::new(RefCell::new(Create {
+                    src: self.convert(src)?,
+                    nodes: out_nodes,
+                    tokens: self.tokens.clone(),
+                })))
+            }
             LogicalPlan::Expand {
                 src,
                 src_slot,
@@ -63,34 +86,6 @@ impl GramBackend {
                 next_rel_index: 0,
                 state: ExpandState::NextNode,
             }))),
-            LogicalPlan::Create {
-                src,
-                nodes,
-                rels: _,
-            } => {
-                let mut out_nodes = Vec::with_capacity(nodes.len());
-                let mut i = 0;
-                for ns in nodes {
-                    let mut props = HashMap::new();
-                    for k in ns.props {
-                        props.insert(k.key, self.convert_expr(k.val));
-                    }
-                    out_nodes.insert(
-                        i,
-                        NodeSpec {
-                            slot: ns.slot,
-                            labels: ns.labels.iter().map(|t| *t).collect(),
-                            props: props,
-                        },
-                    );
-                    i += 1;
-                }
-                Ok(Rc::new(RefCell::new(Create {
-                    src: self.convert(src)?,
-                    nodes: out_nodes,
-                    tokens: self.tokens.clone(),
-                })))
-            }
             LogicalPlan::Return { src, projections } => {
                 let mut converted_projections = Vec::new();
                 for projection in projections {
@@ -398,7 +393,7 @@ impl Operator for Return {
             println!("----");
             self.print_header = false;
         }
-        while self.src.borrow_mut().next(ctx, out)? {
+        if self.src.borrow_mut().next(ctx, out)? {
             let mut first = true;
             for cell in &self.projections {
                 let v = cell.expr.eval(ctx, out)?;
@@ -667,7 +662,7 @@ fn append_node(
         .collect();
     let gram_identifier = generate_uuid().to_hyphenated().to_string();
     let gram_string: String;
-    if labels.len() > 0 {
+    if !labels.is_empty() {
         let labels_gram_ready: Vec<&str> =
             labels.iter().map(|l| tokens.lookup(*l).unwrap()).collect();
         gram_string = format!(
