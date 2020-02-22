@@ -713,14 +713,10 @@ pub struct MapEntryExpr {
 #[cfg(test)]
 mod tests {
     use crate::backend::{BackendDesc, FuncSignature, FuncType, Token, Tokens};
-    use crate::frontend::{
-        Expr, Frontend, LogicalPlan, MapEntryExpr, NodeSpec, PatternNode, PatternRel,
-        PlanningContext, RelSpec,
-    };
-    use crate::Dir::Out;
-    use crate::{Dir, Error, Type, Val};
+    use crate::frontend::{Frontend, LogicalPlan, PlanningContext};
+    use crate::{Error, Type};
     use std::cell::RefCell;
-    use std::collections::{HashMap, HashSet};
+    use std::collections::HashMap;
     use std::rc::Rc;
 
     // Outcome of testing planning; the plan plus other related items to do checks on
@@ -780,16 +776,9 @@ mod tests {
 
     #[cfg(test)]
     mod aggregate {
-        use crate::backend::Tokens;
         use crate::frontend::tests::plan;
-        use crate::frontend::{
-            Expr, Frontend, LogicalPlan, MapEntryExpr, NodeSpec, PatternNode, PatternRel,
-            PlanningContext, Projection, RelSpec,
-        };
-        use crate::Dir::Out;
-        use crate::{Dir, Error, Val};
-        use std::cell::RefCell;
-        use std::rc::Rc;
+        use crate::frontend::{Expr, LogicalPlan, Projection};
+        use crate::Error;
 
         #[test]
         fn plan_simple_count() -> Result<(), Error> {
@@ -925,16 +914,9 @@ mod tests {
 
     #[cfg(test)]
     mod create {
-        use crate::backend::Tokens;
         use crate::frontend::tests::plan;
-        use crate::frontend::{
-            Expr, Frontend, LogicalPlan, MapEntryExpr, NodeSpec, PatternNode, PatternRel,
-            PlanningContext, RelSpec,
-        };
-        use crate::Dir::Out;
-        use crate::{Dir, Error, Val};
-        use std::cell::RefCell;
-        use std::rc::Rc;
+        use crate::frontend::{Expr, LogicalPlan, MapEntryExpr, NodeSpec, RelSpec};
+        use crate::{Error, Val};
 
         #[test]
         fn plan_create() -> Result<(), Error> {
