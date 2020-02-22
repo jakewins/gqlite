@@ -330,7 +330,7 @@ impl Operator for Return {
             println!("----");
             self.print_header = false;
         }
-        while self.src.borrow_mut().next(ctx, out)? {
+        if self.src.borrow_mut().next(ctx, out)? {
             let mut first = true;
             for cell in &self.projections {
                 let v = cell.expr.eval(ctx, out)?;
