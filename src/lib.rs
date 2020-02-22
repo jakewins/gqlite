@@ -3,6 +3,7 @@ extern crate pest;
 extern crate pest_derive;
 #[macro_use]
 extern crate anyhow;
+extern crate rand;
 
 pub mod backend;
 pub mod frontend;
@@ -126,6 +127,14 @@ impl Val {
             Val::Node(id) => *id,
             _ => panic!(
                 "invalid execution plan, non-node value feeds into thing expecting node value"
+            ),
+        }
+    }
+    pub fn as_string_literal(&self) -> &str {
+        match self {
+            Val::String(string) => &**string, // TODO: not clone
+            _ => panic!(
+                "invalid execution plan, non-property value feeds into thing expecting node value"
             ),
         }
     }

@@ -235,9 +235,9 @@ fn plan_create(
 // Specification of a node to create
 #[derive(Debug, PartialEq)]
 pub struct NodeSpec {
-    slot: usize,
-    labels: Vec<Token>,
-    props: Vec<MapEntryExpr>,
+    pub slot: usize,
+    pub labels: Vec<Token>,
+    pub props: Vec<MapEntryExpr>,
 }
 
 // Specification of a rel to create
@@ -687,8 +687,8 @@ impl Expr {
 
 #[derive(Debug, PartialEq)]
 pub struct MapEntryExpr {
-    key: Token,
-    val: Expr,
+    pub key: Token,
+    pub val: Expr,
 }
 
 #[cfg(test)]
@@ -701,7 +701,7 @@ mod tests {
     use crate::Dir::Out;
     use crate::{Dir, Error, Type, Val};
     use std::cell::RefCell;
-    use std::collections::{HashMap, HashSet};
+    use std::collections::HashMap;
     use std::rc::Rc;
 
     // Outcome of testing planning; the plan plus other related items to do checks on

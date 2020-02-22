@@ -4,19 +4,23 @@
 use crate::{frontend, Cursor, CursorState, Dir, Error, Row, Slot, Type, Val};
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
+use std::fs::File;
 use std::rc::Rc;
+use std::time::SystemTime;
 
 use super::PreparedStatement;
 use crate::backend::{BackendDesc, FuncSignature, FuncType, Token, Tokens};
 use crate::frontend::LogicalPlan;
 use anyhow::Result;
+use rand::Rng;
 use std::fmt::Debug;
-use std::fs::File;
+use uuid::v1::{Context as UuidContext, Timestamp};
+use uuid::Uuid;
 
 #[derive(Debug)]
 pub struct GramBackend {
     tokens: Rc<RefCell<Tokens>>,
-    g: Rc<Graph>,
+    g: Rc<RefCell<Graph>>,
 }
 
 impl GramBackend {
@@ -28,7 +32,7 @@ impl GramBackend {
 
         Ok(GramBackend {
             tokens: Rc::new(RefCell::new(tokens)),
-            g: Rc::new(g),
+            g: Rc::new(RefCell::new(g)),
         })
     }
 
@@ -56,6 +60,34 @@ impl GramBackend {
                 next_rel_index: 0,
                 state: ExpandState::NextNode,
             })),
+            LogicalPlan::Create {
+                src,
+                nodes,
+                rels: _,
+            } => {
+                let mut out_nodes = Vec::with_capacity(nodes.len());
+                let mut i = 0;
+                for ns in nodes {
+                    let mut props = HashMap::new();
+                    for k in ns.props {
+                        props.insert(k.key, self.convert_expr(k.val));
+                    }
+                    out_nodes.insert(
+                        i,
+                        NodeSpec {
+                            slot: ns.slot,
+                            labels: ns.labels.iter().map(|t| *t).collect(),
+                            props: props,
+                        },
+                    );
+                    i += 1;
+                }
+                Ok(Box::new(Create {
+                    src: self.convert(*src)?,
+                    nodes: out_nodes,
+                    tokens: self.tokens.clone(),
+                }))
+            }
             LogicalPlan::Return { src, projections } => {
                 let mut converted_projections = Vec::new();
                 for projection in projections {
@@ -115,7 +147,7 @@ impl super::Backend for GramBackend {
 
 #[derive(Debug)]
 struct Statement {
-    g: Rc<Graph>,
+    g: Rc<RefCell<Graph>>,
     plan: Box<dyn Operator>,
     num_slots: usize,
 }
@@ -149,7 +181,7 @@ impl CursorState for GramCursorState {
 
 #[derive(Debug)]
 struct Context {
-    g: Rc<Graph>,
+    g: Rc<RefCell<Graph>>,
 }
 
 #[derive(Debug, Clone)]
@@ -167,9 +199,10 @@ impl Expr {
             v = match v {
                 Val::Null => bail!("NULL has no property {}", prop),
                 Val::String(_) => bail!("STRING has no property {}", prop),
-                Val::Node(id) => ctx.g.get_node_prop(id, *prop).unwrap_or(Val::Null),
+                Val::Node(id) => ctx.g.borrow().get_node_prop(id, *prop).unwrap_or(Val::Null),
                 Val::Rel { node, rel_index } => ctx
                     .g
+                    .borrow()
                     .get_rel_prop(node, rel_index, *prop)
                     .unwrap_or(Val::Null),
             };
@@ -231,7 +264,8 @@ impl Operator for Expand {
                 }
                 ExpandState::InNode => {
                     let node = out.slots[self.src_slot].as_node_id();
-                    let rels = &ctx.g.nodes[node].rels;
+                    let g = ctx.g.borrow();
+                    let rels = &g.nodes[node].rels;
                     if self.next_rel_index >= rels.len() {
                         // No more rels on this node
                         self.state = ExpandState::NextNode;
@@ -286,8 +320,9 @@ struct NodeScan {
 impl Operator for NodeScan {
     fn next(&mut self, ctx: &mut Context, out: &mut Row) -> Result<bool> {
         loop {
-            if ctx.g.nodes.len() > self.next_node {
-                let node = ctx.g.nodes.get(self.next_node).unwrap();
+            let g = ctx.g.borrow();
+            if g.nodes.len() > self.next_node {
+                let node = g.nodes.get(self.next_node).unwrap();
                 if let Some(tok) = self.labels {
                     if !node.labels.contains(&tok) {
                         self.next_node += 1;
@@ -330,6 +365,40 @@ impl Operator for Argument {
 struct Projection {
     pub expr: Expr,
     pub alias: Token,
+}
+
+#[derive(Debug)]
+struct Create {
+    pub src: Box<dyn Operator>,
+    nodes: Vec<NodeSpec>,
+    tokens: Rc<RefCell<Tokens>>,
+}
+
+impl Operator for Create {
+    fn next(&mut self, ctx: &mut Context, out: &mut Row) -> Result<bool, Error> {
+        for node in &self.nodes {
+            let node_properties = node
+                .props
+                .iter()
+                .map(|p| (*p.0, (p.1.eval(ctx, out).unwrap())))
+                .collect();
+            out.slots[node.slot] = append_node(
+                ctx,
+                Rc::clone(&self.tokens),
+                node.labels.clone(),
+                node_properties,
+            )?;
+        }
+        Ok(false)
+    }
+
+    fn clone(&self) -> Box<dyn Operator> {
+        return Box::new(Create {
+            src: self.src.clone(),
+            nodes: self.nodes.iter().cloned().collect(),
+            tokens: self.tokens.clone(),
+        });
+    }
 }
 
 #[derive(Debug)]
@@ -528,6 +597,27 @@ pub struct RelHalf {
 }
 
 #[derive(Debug)]
+struct NodeSpec {
+    pub slot: usize,
+    pub labels: HashSet<Token>,
+    pub props: HashMap<Token, Expr>,
+}
+
+impl Clone for NodeSpec {
+    fn clone(&self) -> Self {
+        return NodeSpec {
+            slot: self.slot,
+            labels: self.labels.iter().cloned().collect(),
+            props: self.props.clone(),
+        };
+    }
+
+    fn clone_from(&mut self, _source: &'_ Self) {
+        unimplemented!()
+    }
+}
+
+#[derive(Debug)]
 pub struct Node {
     labels: HashSet<Token>,
     properties: HashMap<Token, Val>,
@@ -570,4 +660,73 @@ impl Graph {
             properties: props,
         })
     }
+}
+
+fn generate_uuid() -> Uuid {
+    // TODO: there should be a single context for the whole backend
+    let context = UuidContext::new(42);
+    // TODO: there should be a single node id generated per process execution
+    let node_id: [u8; 6] = rand::thread_rng().gen();
+    let now = SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .unwrap();
+    let ts = Timestamp::from_unix(&context, now.as_secs(), now.subsec_nanos());
+    return Uuid::new_v1(ts, &node_id).expect("failed to generate UUID");
+}
+
+fn append_node(
+    ctx: &mut Context,
+    tokens_in: Rc<RefCell<Tokens>>,
+    labels: HashSet<Token>,
+    node_properties: HashMap<Token, Val>,
+) -> Result<Val, Error> {
+    let tokens = tokens_in.borrow();
+    let properties_gram_ready: HashMap<&str, &str> = node_properties
+        .iter()
+        .map(|kvp| (tokens.lookup(*kvp.0).unwrap(), (*kvp.1).as_string_literal()))
+        .collect();
+    let gram_identifier = generate_uuid().to_hyphenated().to_string();
+    let gram_string: String;
+    if labels.len() > 0 {
+        let labels_gram_ready: Vec<&str> =
+            labels.iter().map(|l| tokens.lookup(*l).unwrap()).collect();
+        gram_string = format!(
+            "(`{}`:{} {})\n",
+            gram_identifier,
+            labels_gram_ready.join(":"),
+            json::stringify(properties_gram_ready)
+        );
+    } else {
+        gram_string = format!(
+            "(`{}` {})\n",
+            gram_identifier,
+            json::stringify(properties_gram_ready)
+        );
+    }
+
+    let out_node = Node {
+        labels: labels,
+        properties: node_properties,
+        rels: vec![],
+    };
+
+    let node_id = ctx.g.borrow().nodes.len();
+    ctx.g.borrow_mut().add_node(node_id, out_node);
+
+    println!("--- About to write ---");
+    println!("{}", gram_string);
+    println!("------");
+    // TODO: actually write to the file:
+    /*
+    ctx.file
+        .borrow_mut()
+        .seek(SeekFrom::End(0))
+        .expect("seek error");
+
+    return match ctx.file.borrow_mut().write_all(gram_string.as_bytes()) {
+        Ok(_) => Ok(Val::Node(node_id)),
+        Err(e) => Err(Error::new(e)),
+    };
+    */
+    Ok(Val::Node(node_id))
 }
