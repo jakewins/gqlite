@@ -23,7 +23,7 @@ pub struct Database {
 
 impl Database {
     #[cfg(feature = "gram")]
-    pub fn open(file: &mut File) -> Result<Database> {
+    pub fn open(mut file: File) -> Result<Database> {
         let backend = backend::gram::GramBackend::open(file)?;
         return Database::with_backend(Box::new(backend));
     }

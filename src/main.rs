@@ -1,4 +1,5 @@
 use std::fs::File;
+use std::fs::OpenOptions;
 
 fn main() -> anyhow::Result<()> {
     #[cfg(all(feature = "cli", feature = "gram"))]
@@ -19,9 +20,12 @@ fn main() -> anyhow::Result<()> {
 
         let query_str = string_to_static_str(matches.value_of("QUERY").unwrap());
         let path = matches.value_of("file").unwrap_or("graph.gram");
-
-        let mut file = File::open(path)?;
-        let mut db = Database::open(&mut file)?;
+        let mut file = OpenOptions::new()
+            .create(false)
+            .write(true)
+            .read(true)
+            .open(path)?;
+        let mut db = Database::open(file)?;
         let mut cursor = Cursor::new();
         db.run(query_str, &mut cursor)?;
 
