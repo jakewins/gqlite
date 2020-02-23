@@ -22,8 +22,8 @@ map = {
 }
 map_pair = { id ~ ":" ~ expr }
 
-
-node = { "(" ~ id? ~ ( ":" ~ label )? ~ map? ~ ")" }
+// Multiple labels are supported for CREATE but not yet for MATCH
+node = { "(" ~ id? ~ ( ":" ~ label )* ~ map? ~ ")" }
 label = { id }
 
 rel = { left_arrow? ~ "-" ~ ( "[" ~ id? ~ ( ":" ~ rel_type )? ~ map? ~ "]" )? ~ "-" ~ right_arrow? }

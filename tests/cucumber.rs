@@ -8,7 +8,7 @@ pub struct GraphProperties {
 }
 
 fn empty_db() -> Database {
-    Database::open(&mut tempfile().unwrap()).unwrap()
+    Database::open(tempfile().unwrap()).unwrap()
 }
 
 pub struct MyWorld {

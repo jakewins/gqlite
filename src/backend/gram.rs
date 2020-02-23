@@ -1,61 +1,91 @@
 // The Gram backend is a backend implementation that acts on a Gram file.
 // It is currently single threaded, and provides no data durability guarantees.
 
-use crate::{frontend, Cursor, CursorState, Dir, Error, Row, Slot, Type, Val};
-use std::cell::RefCell;
-use std::collections::{HashMap, HashSet};
-use std::rc::Rc;
-
 use super::PreparedStatement;
 use crate::backend::{BackendDesc, FuncSignature, FuncType, Token, Tokens};
 use crate::frontend::LogicalPlan;
+use crate::{frontend, Cursor, CursorState, Dir, Error, Row, Slot, Type, Val};
 use anyhow::Result;
+use rand::Rng;
+use std::cell::RefCell;
+use std::collections::{HashMap, HashSet};
 use std::fmt::Debug;
 use std::fs::File;
+use std::io::{Seek, SeekFrom, Write};
+use std::rc::Rc;
+use std::time::SystemTime;
+use uuid::v1::{Context as UuidContext, Timestamp};
+use uuid::Uuid;
 
 #[derive(Debug)]
 pub struct GramBackend {
     tokens: Rc<RefCell<Tokens>>,
-    g: Rc<Graph>,
+    g: Rc<RefCell<Graph>>,
+    file: Rc<RefCell<File>>,
 }
 
 impl GramBackend {
-    pub fn open(file: &mut File) -> Result<GramBackend> {
+    pub fn open(mut file: File) -> Result<GramBackend> {
         let mut tokens = Tokens {
             table: Default::default(),
         };
-        let g = parser::load(&mut tokens, file)?;
+        let g = parser::load(&mut tokens, &mut file)?;
 
-        Ok(GramBackend {
+        return Ok(GramBackend {
             tokens: Rc::new(RefCell::new(tokens)),
-            g: Rc::new(g),
-        })
+            g: Rc::new(RefCell::new(g)),
+            file: Rc::new(RefCell::new(file)),
+        });
     }
 
-    fn convert(&self, plan: LogicalPlan) -> Result<Box<dyn Operator>> {
-        match plan {
-            LogicalPlan::Argument => Ok(Box::new(Argument {})),
-            LogicalPlan::NodeScan { src, slot, labels } => Ok(Box::new(NodeScan {
-                src: self.convert(*src)?,
+    fn convert(&self, plan: Box<LogicalPlan>) -> Result<Rc<RefCell<dyn Operator>>, Error> {
+        match *plan {
+            LogicalPlan::Argument => Ok(Rc::new(RefCell::new(Argument {}))),
+            LogicalPlan::NodeScan { src, slot, labels } => Ok(Rc::new(RefCell::new(NodeScan {
+                src: self.convert(src)?,
                 next_node: 0,
                 slot,
                 labels,
-            })),
+            }))),
+            LogicalPlan::Create { src, nodes, .. } => {
+                let mut out_nodes = Vec::with_capacity(nodes.len());
+                let mut i = 0;
+                for ns in nodes {
+                    let mut props = HashMap::new();
+                    for k in ns.props {
+                        props.insert(k.key, self.convert_expr(k.val));
+                    }
+                    out_nodes.insert(
+                        i,
+                        NodeSpec {
+                            slot: ns.slot,
+                            labels: ns.labels.iter().copied().collect(),
+                            props: props,
+                        },
+                    );
+                    i += 1;
+                }
+                Ok(Rc::new(RefCell::new(Create {
+                    src: self.convert(src)?,
+                    nodes: out_nodes,
+                    tokens: self.tokens.clone(),
+                })))
+            }
             LogicalPlan::Expand {
                 src,
                 src_slot,
                 rel_slot,
                 dst_slot,
                 rel_type,
-            } => Ok(Box::new(Expand {
-                src: self.convert(*src)?,
+            } => Ok(Rc::new(RefCell::new(Expand {
+                src: self.convert(src)?,
                 src_slot,
                 rel_slot,
                 dst_slot,
                 rel_type,
                 next_rel_index: 0,
                 state: ExpandState::NextNode,
-            })),
+            }))),
             LogicalPlan::Return { src, projections } => {
                 let mut converted_projections = Vec::new();
                 for projection in projections {
@@ -64,10 +94,12 @@ impl GramBackend {
                         alias: projection.alias,
                     })
                 }
-                Ok(Box::new(Return {
-                    src: self.convert(*src)?,
+
+                Ok(Rc::new(RefCell::new(Return {
+                    src: self.convert(src)?,
                     projections: converted_projections,
-                }))
+                    print_header: true,
+                })))
             }
             _ => panic!("The gram backend does not yet handle {:?}", plan),
         }
@@ -92,13 +124,14 @@ impl super::Backend for GramBackend {
     }
 
     fn prepare(&self, logical_plan: Box<LogicalPlan>) -> Result<Box<dyn PreparedStatement>> {
-        let plan = self.convert(*logical_plan)?;
-        Ok(Box::new(Statement {
+        let plan = self.convert(logical_plan)?;
+        return Ok(Box::new(Statement {
+            file: Rc::clone(&self.file),
             g: Rc::clone(&self.g),
             plan,
             // TODO: pipe this knowledge through from logial plan
             num_slots: 16,
-        }))
+        }));
     }
 
     fn describe(&self) -> Result<BackendDesc, Error> {
@@ -115,41 +148,44 @@ impl super::Backend for GramBackend {
 
 #[derive(Debug)]
 struct Statement {
-    g: Rc<Graph>,
-    plan: Box<dyn Operator>,
+    g: Rc<RefCell<Graph>>,
+    file: Rc<RefCell<File>>,
+    plan: Rc<RefCell<dyn Operator>>,
     num_slots: usize,
 }
 
 impl PreparedStatement for Statement {
-    fn run(&mut self, cursor: &mut Cursor) -> Result<()> {
+    fn run(&mut self, cursor: &mut Cursor) -> Result<(), Error> {
         cursor.state = Some(Box::new(GramCursorState {
             ctx: Context {
                 g: Rc::clone(&self.g),
+                file: Rc::clone(&self.file),
             },
             plan: self.plan.clone(),
         }));
         if cursor.row.slots.len() < self.num_slots {
             cursor.row.slots.resize(self.num_slots, Val::Null);
         }
-        Ok(())
+        return Ok(());
     }
 }
 
 #[derive(Debug)]
 struct GramCursorState {
     ctx: Context,
-    plan: Box<dyn Operator>,
+    plan: Rc<RefCell<dyn Operator>>,
 }
 
 impl CursorState for GramCursorState {
     fn next(&mut self, row: &mut Row) -> Result<bool> {
-        self.plan.next(&mut self.ctx, row)
+        self.plan.borrow_mut().next(&mut self.ctx, row)
     }
 }
 
 #[derive(Debug)]
 struct Context {
-    g: Rc<Graph>,
+    g: Rc<RefCell<Graph>>,
+    file: Rc<RefCell<File>>,
 }
 
 #[derive(Debug, Clone)]
@@ -167,9 +203,10 @@ impl Expr {
             v = match v {
                 Val::Null => bail!("NULL has no property {}", prop),
                 Val::String(_) => bail!("STRING has no property {}", prop),
-                Val::Node(id) => ctx.g.get_node_prop(id, *prop).unwrap_or(Val::Null),
+                Val::Node(id) => ctx.g.borrow().get_node_prop(id, *prop).unwrap_or(Val::Null),
                 Val::Rel { node, rel_index } => ctx
                     .g
+                    .borrow()
                     .get_rel_prop(node, rel_index, *prop)
                     .unwrap_or(Val::Null),
             };
@@ -189,9 +226,6 @@ impl Expr {
 // Physical operator. We have one of these for each Logical operator the frontend emits.
 trait Operator: Debug {
     fn next(&mut self, ctx: &mut Context, row: &mut Row) -> Result<bool>;
-
-    // I can't figure out how do implement the normal "Clone" trait for this trait..
-    fn clone(&self) -> Box<dyn Operator>;
 }
 
 #[derive(Debug)]
@@ -202,7 +236,7 @@ pub enum ExpandState {
 
 #[derive(Debug)]
 struct Expand {
-    pub src: Box<dyn Operator>,
+    pub src: Rc<RefCell<dyn Operator>>,
 
     pub src_slot: usize,
 
@@ -224,14 +258,15 @@ impl Operator for Expand {
             match &self.state {
                 ExpandState::NextNode => {
                     // Pull in the next node
-                    if !self.src.next(ctx, out)? {
+                    if !self.src.borrow_mut().next(ctx, out)? {
                         return Ok(false);
                     }
                     self.state = ExpandState::InNode;
                 }
                 ExpandState::InNode => {
                     let node = out.slots[self.src_slot].as_node_id();
-                    let rels = &ctx.g.nodes[node].rels;
+                    let g = ctx.g.borrow();
+                    let rels = &g.nodes[node].rels;
                     if self.next_rel_index >= rels.len() {
                         // No more rels on this node
                         self.state = ExpandState::NextNode;
@@ -254,24 +289,12 @@ impl Operator for Expand {
             }
         }
     }
-
-    fn clone(&self) -> Box<dyn Operator> {
-        Box::new(Expand {
-            src: self.src.clone(),
-            src_slot: self.src_slot,
-            rel_slot: self.rel_slot,
-            dst_slot: self.dst_slot,
-            rel_type: self.rel_type,
-            next_rel_index: 0,
-            state: ExpandState::NextNode,
-        })
-    }
 }
 
 // For each src row, perform a full no de scan with the specified filters
 #[derive(Debug)]
 struct NodeScan {
-    pub src: Box<dyn Operator>,
+    pub src: Rc<RefCell<dyn Operator>>,
 
     // Next node id in g to return
     pub next_node: usize,
@@ -286,8 +309,9 @@ struct NodeScan {
 impl Operator for NodeScan {
     fn next(&mut self, ctx: &mut Context, out: &mut Row) -> Result<bool> {
         loop {
-            if ctx.g.nodes.len() > self.next_node {
-                let node = ctx.g.nodes.get(self.next_node).unwrap();
+            let g = ctx.g.borrow();
+            if g.nodes.len() > self.next_node {
+                let node = g.nodes.get(self.next_node).unwrap();
                 if let Some(tok) = self.labels {
                     if !node.labels.contains(&tok) {
                         self.next_node += 1;
@@ -302,15 +326,6 @@ impl Operator for NodeScan {
             return Ok(false);
         }
     }
-
-    fn clone(&self) -> Box<dyn Operator> {
-        Box::new(NodeScan {
-            src: self.src.clone(),
-            next_node: 0,
-            slot: self.slot,
-            labels: self.labels,
-        })
-    }
 }
 
 #[derive(Debug, Clone)]
@@ -319,10 +334,6 @@ struct Argument;
 impl Operator for Argument {
     fn next(&mut self, _ctx: &mut Context, _out: &mut Row) -> Result<bool> {
         unimplemented!()
-    }
-
-    fn clone(&self) -> Box<dyn Operator> {
-        Box::new(Argument {})
     }
 }
 
@@ -333,27 +344,57 @@ struct Projection {
 }
 
 #[derive(Debug)]
+struct Create {
+    pub src: Rc<RefCell<dyn Operator>>,
+    nodes: Vec<NodeSpec>,
+    tokens: Rc<RefCell<Tokens>>,
+}
+
+impl Operator for Create {
+    fn next(&mut self, ctx: &mut Context, out: &mut Row) -> Result<bool, Error> {
+        for node in &self.nodes {
+            let node_properties = node
+                .props
+                .iter()
+                .map(|p| (*p.0, (p.1.eval(ctx, out).unwrap())))
+                .collect();
+            out.slots[node.slot] = append_node(
+                ctx,
+                Rc::clone(&self.tokens),
+                node.labels.clone(),
+                node_properties,
+            )?;
+        }
+        Ok(false)
+    }
+}
+
+#[derive(Debug)]
 struct Return {
-    pub src: Box<dyn Operator>,
+    pub src: Rc<RefCell<dyn Operator>>,
     pub projections: Vec<Projection>,
+    print_header: bool,
 }
 
 impl Operator for Return {
     fn next(&mut self, ctx: &mut Context, out: &mut Row) -> Result<bool> {
-        println!("----");
-        let mut first = true;
-        for cell in &self.projections {
-            if first {
-                print!("{}", cell.alias);
-                first = false
-            } else {
-                print!(", {}", cell.alias)
+        if self.print_header {
+            println!("----");
+            let mut first = true;
+            for cell in &self.projections {
+                if first {
+                    print!("{}", cell.alias);
+                    first = false
+                } else {
+                    print!(", {}", cell.alias)
+                }
             }
+            println!();
+            println!("----");
+            self.print_header = false;
         }
-        println!();
-        println!("----");
-        while self.src.next(ctx, out)? {
-            first = true;
+        if self.src.borrow_mut().next(ctx, out)? {
+            let mut first = true;
             for cell in &self.projections {
                 let v = cell.expr.eval(ctx, out)?;
                 if first {
@@ -364,15 +405,10 @@ impl Operator for Return {
                 }
             }
             println!();
+            // Do this to 'yield' one row at a time to the cursor
+            return Ok(true);
         }
         Ok(false)
-    }
-
-    fn clone(&self) -> Box<dyn Operator> {
-        Box::new(Return {
-            src: self.src.clone(),
-            projections: self.projections.clone(),
-        })
     }
 }
 
@@ -383,6 +419,7 @@ mod parser {
     use crate::Val;
     use anyhow::Result;
     use std::collections::HashMap;
+    use std::collections::HashSet;
     use std::fs::File;
     use std::io::Read;
 
@@ -399,6 +436,7 @@ mod parser {
     }
 
     fn read_to_string(file: &mut File) -> Result<String> {
+        //todo lock this (and other io on the file)
         let mut string = String::with_capacity(initial_buffer_size(&file));
         file.read_to_string(&mut string)?;
         Ok(string)
@@ -461,10 +499,16 @@ mod parser {
                 Rule::node => {
                     let mut identifier: Option<String> = None;
                     let mut props: HashMap<Token, Val> = HashMap::new();
+                    let mut labels: HashSet<Token> = HashSet::new();
 
                     for part in item.into_inner() {
                         match part.as_rule() {
                             Rule::id => identifier = Some(part.as_str().to_string()),
+                            Rule::label => {
+                                for label in part.into_inner() {
+                                    labels.insert(tokens.tokenize(label.as_str()));
+                                }
+                            }
                             Rule::map => {
                                 for pair in part.into_inner() {
                                     let mut key: Option<String> = None;
@@ -505,7 +549,7 @@ mod parser {
                     g.add_node(
                         node_ids.tokenize(&identifier.unwrap()),
                         Node {
-                            labels: vec![tokens.tokenize("Person")].iter().cloned().collect(),
+                            labels,
                             properties: props,
                             rels: vec![],
                         },
@@ -525,6 +569,27 @@ pub struct RelHalf {
     dir: Dir,
     other_node: usize,
     properties: Rc<HashMap<Token, Val>>,
+}
+
+#[derive(Debug)]
+struct NodeSpec {
+    pub slot: usize,
+    pub labels: HashSet<Token>,
+    pub props: HashMap<Token, Expr>,
+}
+
+impl Clone for NodeSpec {
+    fn clone(&self) -> Self {
+        return NodeSpec {
+            slot: self.slot,
+            labels: self.labels.iter().cloned().collect(),
+            props: self.props.clone(),
+        };
+    }
+
+    fn clone_from(&mut self, _source: &'_ Self) {
+        unimplemented!()
+    }
 }
 
 #[derive(Debug)]
@@ -570,4 +635,71 @@ impl Graph {
             properties: props,
         })
     }
+}
+
+fn generate_uuid() -> Uuid {
+    // TODO: there should be a single context for the whole backend
+    let context = UuidContext::new(42);
+    // TODO: there should be a single node id generated per process execution
+    let node_id: [u8; 6] = rand::thread_rng().gen();
+    let now = SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .unwrap();
+    let ts = Timestamp::from_unix(&context, now.as_secs(), now.subsec_nanos());
+    return Uuid::new_v1(ts, &node_id).expect("failed to generate UUID");
+}
+
+fn append_node(
+    ctx: &mut Context,
+    tokens_in: Rc<RefCell<Tokens>>,
+    labels: HashSet<Token>,
+    node_properties: HashMap<Token, Val>,
+) -> Result<Val, Error> {
+    let tokens = tokens_in.borrow();
+    let properties_gram_ready: HashMap<&str, &str> = node_properties
+        .iter()
+        .map(|kvp| (tokens.lookup(*kvp.0).unwrap(), (*kvp.1).as_string_literal()))
+        .collect();
+    let gram_identifier = generate_uuid().to_hyphenated().to_string();
+    let gram_string: String;
+    if !labels.is_empty() {
+        let labels_gram_ready: Vec<&str> =
+            labels.iter().map(|l| tokens.lookup(*l).unwrap()).collect();
+        gram_string = format!(
+            "(`{}`:{} {})\n",
+            gram_identifier,
+            labels_gram_ready.join(":"),
+            json::stringify(properties_gram_ready)
+        );
+    } else {
+        gram_string = format!(
+            "(`{}` {})\n",
+            gram_identifier,
+            json::stringify(properties_gram_ready)
+        );
+    }
+
+    let out_node = Node {
+        labels: labels,
+        properties: node_properties,
+        rels: vec![],
+    };
+
+    let node_id = ctx.g.borrow().nodes.len();
+    ctx.g.borrow_mut().add_node(node_id, out_node);
+
+    println!("--- About to write ---");
+    println!("{}", gram_string);
+    println!("------");
+    // TODO: actually write to the file:
+
+    ctx.file
+        .borrow_mut()
+        .seek(SeekFrom::End(0))
+        .expect("seek error");
+
+    return match ctx.file.borrow_mut().write_all(gram_string.as_bytes()) {
+        Ok(_) => Ok(Val::Node(node_id)),
+        Err(e) => Err(Error::new(e)),
+    };
 }

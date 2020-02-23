@@ -30,16 +30,15 @@ map = {
   "{" ~ map_pair ~ ("," ~ map_pair)* ~ "}"
 }
 map_pair = { id ~ ":" ~ expr }
-//
-//
-node = { "(" ~ id?  ~ map? ~ ")" }
 
-// node = { "(" ~ id? ~ ( ":" ~ label )? ~ map? ~ ")" }
-// label = { id }
-//
+
+node = { "(" ~ id? ~ ( ":" ~ label )* ~ map? ~ ")" }
+
+label = { id }
+
 rel = { "<"? ~ "-" ~ ( "[" ~ id? ~ ( ":" ~ rel_type )? ~ map? ~ "]" )? ~ "-" ~ ">"? }
 rel_type = { id }
-//
+
 path = { node ~ ( rel ~ node )+ }
 //
 // projection = { expr ~ ("AS" ~ id)? }
