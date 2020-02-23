@@ -15,6 +15,11 @@ members = [
 name = "gqlite"
 crate-type = ["rlib"]
 
+[[bin]]
+name = "g"
+path = "src/main.rs"
+doc = false
+
 [dependencies]
 anyhow = "1.0"
 clap = { version = "2.33.0", optional = true }
