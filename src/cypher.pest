@@ -1,7 +1,7 @@
 
 WHITESPACE = _{ " " | "\t" | "\r" | "\n" }
 
-expr = { prop_lookup | func_call | string | id }
+expr = { prop_lookup | func_call | string | id | list }
 
 id = ${ ( ASCII_ALPHA | "_" | "-" ) + }
 
@@ -22,6 +22,11 @@ map = {
 }
 map_pair = { id ~ ":" ~ expr }
 
+list = {
+  "[" ~ "]" |
+  "[" ~ expr ~ ("," ~ expr)* ~ "]"
+}
+
 // Multiple labels are supported for CREATE but not yet for MATCH
 node = { "(" ~ id? ~ ( ":" ~ label )* ~ map? ~ ")" }
 label = { id }
@@ -38,7 +43,8 @@ projections = { projection ~ ( "," ~ projection )* }
 
 create_stmt = { "CREATE" ~ pattern }
 match_stmt = { "MATCH" ~ pattern }
+unwind_stmt = { "UNWIND" ~ expr ~ "AS" ~ id }
 return_stmt = { "RETURN" ~ projections }
 
-statement = _{ create_stmt | match_stmt }
+statement = _{ create_stmt | match_stmt | unwind_stmt }
 query = { SOI ~ ( statement )* ~ return_stmt? ~ EOI }
