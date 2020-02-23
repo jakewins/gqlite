@@ -124,6 +124,8 @@ pub enum Type {
 pub enum Val {
     Null,
     String(String),
+    Int(i64),
+    Float(f64),
     Node(usize),
     Rel { node: usize, rel_index: usize },
 }
@@ -154,6 +156,8 @@ impl Display for Val {
             Val::String(s) => f.write_str(&s),
             Val::Node(id) => f.write_str(&format!("Node({})", id)),
             Val::Rel { node, rel_index } => f.write_str(&format!("Rel({}/{})", node, rel_index)),
+            Val::Int(v) => f.write_str(&format!("{}", v)),
+            Val::Float(v) => f.write_str(&format!("{}", v))
         }
     }
 }

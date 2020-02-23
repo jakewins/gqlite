@@ -210,6 +210,7 @@ impl Expr {
                     .borrow()
                     .get_rel_prop(node, rel_index, *prop)
                     .unwrap_or(Val::Null),
+                v => panic!("Gram backend does not yet support {:?}", v)
             };
         }
         Ok(v)
@@ -219,7 +220,7 @@ impl Expr {
         match self {
             Expr::Prop(expr, props) => Expr::eval_prop(ctx, row, expr, props),
             Expr::Slot(slot) => Ok(row.slots[*slot].clone()), // TODO not this
-            Expr::Lit(v) => Ok(v.clone()),                    // TODO not this
+            Expr::Lit(v) => Ok(v.clone()),                    // TODO not this,
         }
     }
 }
