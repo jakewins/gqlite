@@ -2,9 +2,9 @@
 // It is currently single threaded, and provides no data durability guarantees.
 
 use super::PreparedStatement;
-use crate::backend::{BackendDesc, FuncSignature, FuncType, Token, Tokens};
+use crate::backend::{BackendDesc, Token, Tokens};
 use crate::frontend::LogicalPlan;
-use crate::{frontend, Cursor, CursorState, Dir, Error, Row, Slot, Type, Val};
+use crate::{frontend, Cursor, CursorState, Dir, Error, Row, Slot, Val};
 use anyhow::Result;
 use rand::Rng;
 use std::cell::RefCell;
@@ -16,12 +16,14 @@ use std::rc::Rc;
 use std::time::SystemTime;
 use uuid::v1::{Context as UuidContext, Timestamp};
 use uuid::Uuid;
+use crate::backend::gram::functions::AggregatingFuncSpec;
 
 #[derive(Debug)]
 pub struct GramBackend {
     tokens: Rc<RefCell<Tokens>>,
     g: Rc<RefCell<Graph>>,
     file: Rc<RefCell<File>>,
+    aggregators: Box<HashMap<Token, Box<dyn AggregatingFuncSpec>>>,
 }
 
 impl GramBackend {
@@ -31,10 +33,16 @@ impl GramBackend {
         };
         let g = parser::load(&mut tokens, &mut file)?;
 
+        let mut aggregators = HashMap::new();
+        for agg in functions::aggregating(&mut tokens) {
+            aggregators.insert(agg.signature().name, agg);
+        }
+
         Ok(GramBackend {
             tokens: Rc::new(RefCell::new(tokens)),
             g: Rc::new(RefCell::new(g)),
             file: Rc::new(RefCell::new(file)),
+            aggregators: Box::new(aggregators),
         })
     }
 
@@ -136,14 +144,12 @@ impl super::Backend for GramBackend {
     }
 
     fn describe(&self) -> Result<BackendDesc, Error> {
-        let tok_count = self.tokens.borrow_mut().tokenize("count");
-        let tok_expr = self.tokens.borrow_mut().tokenize("expr");
-        Ok(BackendDesc::new(vec![FuncSignature {
-            func_type: FuncType::Scalar,
-            name: tok_count,
-            returns: Type::Number,
-            args: vec![(tok_expr, Type::Any)],
-        }]))
+        let mut functions = Vec::new();
+        for agg in self.aggregators.values() {
+            functions.push(agg.signature().clone())
+        }
+
+        Ok(BackendDesc::new(functions))
     }
 }
 
@@ -703,4 +709,142 @@ fn append_node(
         Ok(_) => Ok(Val::Node(node_id)),
         Err(e) => Err(Error::new(e)),
     }
+}
+
+mod functions {
+    use crate::backend::{FuncSignature, Tokens, FuncType};
+    use crate::backend::gram::{Expr, Context};
+    use crate::{Val, Row, Result, Type};
+    use std::fmt::Debug;
+
+    pub(super) fn aggregating(tokens: &mut Tokens) -> Vec<Box<dyn AggregatingFuncSpec>> {
+        let mut out: Vec<Box<dyn AggregatingFuncSpec>> = Default::default();
+        out.push(Box::new(MinSpec::new(tokens)));
+        out.push(Box::new(MaxSpec::new(tokens)));
+        return out;
+    }
+
+    pub(super) trait AggregatingFuncSpec: Debug {
+        fn signature(&self) -> &FuncSignature;
+        fn init(&mut self) -> Box<dyn AggregatingFunc>;
+    }
+
+    // A running aggregation in an executing query
+    pub(super) trait AggregatingFunc : Debug {
+        fn apply(&mut self, ctx: &mut Context, row: &mut Row, args: &Vec<Expr>) -> Result<()>;
+        fn complete(&mut self) -> Result<&Val>;
+    }
+
+    #[derive(Debug)]
+    struct MinSpec {
+        sig: FuncSignature
+    }
+
+    impl MinSpec {
+        pub fn new(tokens: &mut Tokens) -> MinSpec {
+            let tok_min = tokens.tokenize("min");
+            MinSpec{
+                sig: FuncSignature {
+                    func_type: FuncType::Aggregating,
+                    name: tok_min,
+                    returns: Type::Any,
+                    args: vec![(tokens.tokenize("v"), Type::Any)],
+                }
+            }
+        }
+    }
+
+    impl AggregatingFuncSpec for MinSpec {
+        fn signature(&self) -> &FuncSignature {
+            return &self.sig;
+        }
+
+        fn init(&mut self) -> Box<dyn AggregatingFunc> {
+            Box::new(Min{ min: None })
+        }
+    }
+
+    #[derive(Debug)]
+    struct Min {
+        min: Option<Val>
+    }
+
+    impl AggregatingFunc for Min {
+        fn apply(&mut self, ctx: &mut Context, row: &mut Row, args: &Vec<Expr>) -> Result<()> {
+            let v = args[0].eval(ctx, row)?;
+            if let Some(m) = &self.min {
+                if v.less(m)? {
+                    self.min = Some(v);
+                }
+            } else {
+                self.min = Some(v);
+            }
+            Ok(())
+        }
+
+        fn complete(&mut self) -> Result<&Val> {
+            if let Some(v) = &self.min {
+                return Ok(v)
+            } else {
+                Err(anyhow!("There were no input rows to the aggregation, cannot calculate min(..)"))
+            }
+        }
+    }
+
+    #[derive(Debug)]
+    struct MaxSpec {
+        sig: FuncSignature
+    }
+
+    impl MaxSpec {
+        pub fn new(tokens: &mut Tokens) -> MinSpec {
+            let tok_min = tokens.tokenize("max");
+            MinSpec{
+                sig: FuncSignature {
+                    func_type: FuncType::Aggregating,
+                    name: tok_min,
+                    returns: Type::Any,
+                    args: vec![(tokens.tokenize("v"), Type::Any)],
+                }
+            }
+        }
+    }
+
+    impl AggregatingFuncSpec for MaxSpec {
+        fn signature(&self) -> &FuncSignature {
+            return &self.sig;
+        }
+
+        fn init(&mut self) -> Box<dyn AggregatingFunc> {
+            Box::new(Max{ max: None })
+        }
+    }
+
+    #[derive(Debug)]
+    struct Max {
+        max: Option<Val>
+    }
+
+    impl AggregatingFunc for Max {
+        fn apply(&mut self, ctx: &mut Context, row: &mut Row, args: &Vec<Expr>) -> Result<()> {
+            let v = args[0].eval(ctx, row)?;
+            if let Some(m) = &self.max {
+                if m.less(&v)? {
+                    self.max = Some(v);
+                }
+            } else {
+                self.max = Some(v);
+            }
+            Ok(())
+        }
+
+        fn complete(&mut self) -> Result<&Val> {
+            if let Some(v) = &self.max {
+                return Ok(v)
+            } else {
+                Err(anyhow!("There were no input rows to the aggregation, cannot calculate min(..)"))
+            }
+        }
+    }
+
 }

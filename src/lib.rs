@@ -95,7 +95,7 @@ pub struct Row {
 pub type Slot = usize;
 
 // openCypher 9 enumeration of types
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum Type {
     // This is not a documented part of the openCypher type system, but.. well I'm not sure how
     // else we represent the arguments to a function like count(..).
@@ -145,6 +145,17 @@ impl Val {
             _ => panic!(
                 "invalid execution plan, non-property value feeds into thing expecting node value"
             ),
+        }
+    }
+
+    // Is this val less than other? May fail if we don't know how to compare values.
+    pub fn less(&self, other: &Val) -> Result<bool> {
+        match self {
+            Val::Int(self_v) => match other {
+                Val::Int(other_v) => Ok(self_v < other_v),
+                _ => Err(anyhow!("Don't know how to compare {:?} to {:?}", self, other))
+            }
+            _ => Err(anyhow!("Don't know how to compare {:?} to {:?}", self, other))
         }
     }
 }
