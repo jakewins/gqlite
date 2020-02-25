@@ -45,7 +45,7 @@ mod example_steps {
         while cursor.next()? {
             // consume
         }
-        return result;
+        result
     }
 
     fn start_query(world: &mut MyWorld, step: &Step) {
@@ -60,7 +60,7 @@ mod example_steps {
         while result.next()? {
             ct += 1
         }
-        return Ok(ct);
+        Ok(ct)
     }
 
     fn count_nodes(world: &mut MyWorld) -> i32 {
@@ -69,7 +69,7 @@ mod example_steps {
             .graph
             .run("MATCH (n) RETURN n", &mut cursor)
             .expect("should succeed");
-        return count_rows(&mut cursor).unwrap();
+        count_rows(&mut cursor).unwrap()
     }
 
     fn assert_side_effect(world: &mut MyWorld, kind: &str, val: &str) {

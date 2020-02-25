@@ -26,7 +26,7 @@ impl Database {
     #[cfg(feature = "gram")]
     pub fn open(file: File) -> Result<Database> {
         let backend = backend::gram::GramBackend::open(file)?;
-        return Database::with_backend(Box::new(backend));
+        Database::with_backend(Box::new(backend))
     }
 
     pub fn with_backend(backend: Box<dyn Backend>) -> Result<Database, Error> {
@@ -34,7 +34,7 @@ impl Database {
             tokens: backend.tokens(),
             backend_desc: backend.describe()?,
         };
-        return Ok(Database { backend, frontend });
+        Ok(Database { backend, frontend })
     }
 
     pub fn run(&mut self, query_str: &str, cursor: &mut Cursor) -> Result<(), Error> {

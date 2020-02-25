@@ -141,8 +141,8 @@ impl RelType {
 
 #[derive(Debug, PartialEq)]
 pub enum Predicate {
-    And(Vec<Box<Predicate>>),
-    Or(Vec<Box<Predicate>>),
+    And(Vec<Predicate>),
+    Or(Vec<Predicate>),
     HasLabel(Token),
 }
 
@@ -282,7 +282,7 @@ fn plan_return(pc: &mut PlanningContext, src: LogicalPlan, return_stmt: Pair<Rul
 
     let (is_aggregate, projections) = parts
         .next()
-        .and_then(|p| Some(plan_return_projections(pc, p)))
+        .map(|p| plan_return_projections(pc, p))
         .expect("RETURN must start with projections");
     if !is_aggregate {
         return LogicalPlan::Return {
@@ -338,7 +338,7 @@ fn plan_return_projections(
         if let Rule::projection = projection.as_rule() {
             let default_alias = projection.as_str();
             let mut parts = projection.into_inner();
-            let expr = parts.next().and_then(|p| Some(plan_expr(pc, p))).unwrap();
+            let expr = parts.next().map(|p| plan_expr(pc, p)).unwrap();
             contains_aggregations =
                 contains_aggregations || expr.is_aggregating(&pc.backend_desc.aggregates);
             let alias = parts
@@ -456,31 +456,29 @@ impl PatternGraph {
     }
 }
 
-fn plan_match<'i, 'pc>(
-    pc: &'i mut PlanningContext<'pc>,
+fn plan_match(
+    pc: &mut PlanningContext,
     src: LogicalPlan,
     match_stmt: Pair<Rule>,
 ) -> Result<LogicalPlan> {
     fn filter_expand(expand: LogicalPlan, slot: Token, labels: &[Token]) -> LogicalPlan {
         let labels = labels
             .iter()
-            .map(|&label| Box::new(Predicate::HasLabel(label)))
+            .map(|&label| Predicate::HasLabel(label))
             .collect::<Vec<_>>();
         if labels.is_empty() {
             expand
+        } else if labels.len() == 1 {
+            LogicalPlan::Selection {
+                src: Box::new(expand),
+                slot,
+                predicate: labels.into_iter().next().unwrap(),
+            }
         } else {
-            if labels.len() == 1 {
-                LogicalPlan::Selection {
-                    src: Box::new(expand),
-                    slot,
-                    predicate: *labels.into_iter().next().unwrap(),
-                }
-            } else {
-                LogicalPlan::Selection {
-                    src: Box::new(expand),
-                    slot,
-                    predicate: Predicate::And(labels),
-                }
+            LogicalPlan::Selection {
+                src: Box::new(expand),
+                slot,
+                predicate: Predicate::And(labels),
             }
         }
     }
@@ -511,17 +509,19 @@ fn plan_match<'i, 'pc>(
             break;
         }
     }
-    if !solved_for_labelled_node && candidate_id.is_some() {
-        let mut candidate = pg.e.get_mut(candidate_id.unwrap()).unwrap();
-        if candidate.labels.len() > 1 {
-            panic!("Multiple label match not yet implemented")
+    if !solved_for_labelled_node {
+        if let Some(candidate_id) = candidate_id {
+            let mut candidate = pg.e.get_mut(candidate_id).unwrap();
+            if candidate.labels.len() > 1 {
+                panic!("Multiple label match not yet implemented")
+            }
+            plan = LogicalPlan::NodeScan {
+                src: Box::new(plan),
+                slot: pc.get_or_alloc_slot(*candidate_id),
+                labels: candidate.labels.first().cloned(),
+            };
+            candidate.solved = true;
         }
-        plan = LogicalPlan::NodeScan {
-            src: Box::new(plan),
-            slot: pc.get_or_alloc_slot(*candidate_id.unwrap()),
-            labels: candidate.labels.first().cloned(),
-        };
-        candidate.solved = true;
     }
 
     // Now we iterate until the whole pattern is solved. The way this works is that "solving"
@@ -656,7 +656,7 @@ fn parse_pattern_node(pc: &mut PlanningContext, pattern_node: Pair<Rule>) -> Pat
 
     PatternNode {
         identifier: id,
-        labels: labels,
+        labels,
         props,
         solved: false,
     }
@@ -690,10 +690,7 @@ fn parse_pattern_rel(
     }
     // TODO don't use this empty identifier here
     let id = identifier.unwrap_or_else(|| pc.new_anon_rel());
-    let rt = rel_type.map_or_else(
-        || RelType::Anon(pc.new_anon_rel()),
-        |rt| RelType::Defined(rt),
-    );
+    let rt = rel_type.map_or_else(|| RelType::Anon(pc.new_anon_rel()), RelType::Defined);
     Ok(PatternRel {
         left_node,
         right_node: None,
@@ -705,10 +702,7 @@ fn parse_pattern_rel(
     })
 }
 
-fn parse_map_expression<'i, 'pc>(
-    pc: &'i mut PlanningContext<'pc>,
-    map_expr: Pair<Rule>,
-) -> Vec<MapEntryExpr> {
+fn parse_map_expression(pc: &mut PlanningContext, map_expr: Pair<Rule>) -> Vec<MapEntryExpr> {
     let mut out = Vec::new();
     for pair in map_expr.into_inner() {
         match pair.as_rule() {

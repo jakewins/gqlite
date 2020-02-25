@@ -49,10 +49,10 @@ impl BackendDesc {
                 aggregates.insert(f.name);
             }
         }
-        return BackendDesc {
+        BackendDesc {
             functions,
             aggregates,
-        };
+        }
     }
 }
 
