@@ -6,7 +6,7 @@
 use pest::Parser;
 
 use crate::backend::{BackendDesc, Token, Tokens};
-use crate::{Dir, Error, Slot, Val};
+use crate::{Dir, Slot, Val};
 use anyhow::Result;
 use pest::iterators::Pair;
 use std::cell::RefCell;
@@ -94,6 +94,11 @@ pub enum LogicalPlan {
         rel_type: RelType,
         dir: Option<Dir>,
     },
+    Selection {
+        src: Box<Self>,
+        slot: usize,
+        predicate: Predicate,
+    },
     Create {
         src: Box<Self>,
         nodes: Vec<NodeSpec>,
@@ -132,6 +137,13 @@ impl RelType {
             RelType::Anon(token) => *token,
         }
     }
+}
+
+#[derive(Debug, PartialEq)]
+pub enum Predicate {
+    And(Vec<Box<Predicate>>),
+    Or(Vec<Box<Predicate>>),
+    HasLabel(Token),
 }
 
 #[derive(Debug, PartialEq)]
@@ -448,7 +460,31 @@ fn plan_match<'i, 'pc>(
     pc: &'i mut PlanningContext<'pc>,
     src: LogicalPlan,
     match_stmt: Pair<Rule>,
-) -> Result<LogicalPlan, Error> {
+) -> Result<LogicalPlan> {
+    fn filter_expand(expand: LogicalPlan, slot: Token, labels: &[Token]) -> LogicalPlan {
+        let labels = labels
+            .iter()
+            .map(|&label| Box::new(Predicate::HasLabel(label)))
+            .collect::<Vec<_>>();
+        if labels.is_empty() {
+            expand
+        } else {
+            if labels.len() == 1 {
+                LogicalPlan::Selection {
+                    src: Box::new(expand),
+                    slot,
+                    predicate: *labels.into_iter().next().unwrap(),
+                }
+            } else {
+                LogicalPlan::Selection {
+                    src: Box::new(expand),
+                    slot,
+                    predicate: Predicate::And(labels),
+                }
+            }
+        }
+    }
+
     let mut plan = src;
     let mut pg = parse_pattern_graph(pc, match_stmt)?;
 
@@ -513,28 +549,32 @@ fn plan_match<'i, 'pc>(
                 right_node.solved = true;
                 rel.solved = true;
                 solved_any = true;
-                plan = LogicalPlan::Expand {
+                let dst = pc.get_or_alloc_slot(right_id);
+                let expand = LogicalPlan::Expand {
                     src: Box::new(plan),
                     src_slot: pc.get_or_alloc_slot(left_id),
                     rel_slot: pc.get_or_alloc_slot(rel.identifier),
-                    dst_slot: pc.get_or_alloc_slot(right_id),
+                    dst_slot: dst,
                     rel_type: rel.rel_type,
                     dir: rel.dir,
                 };
+                plan = filter_expand(expand, dst, &right_node.labels);
             } else if !left_solved && right_solved {
                 // Right is solved and left isn't, so we can expand to the left
                 let mut left_node = pg.e.get_mut(&left_id).unwrap();
                 left_node.solved = true;
                 rel.solved = true;
                 solved_any = true;
-                plan = LogicalPlan::Expand {
+                let dst = pc.get_or_alloc_slot(left_id);
+                let expand = LogicalPlan::Expand {
                     src: Box::new(plan),
                     src_slot: pc.get_or_alloc_slot(right_id),
                     rel_slot: pc.get_or_alloc_slot(rel.identifier),
-                    dst_slot: pc.get_or_alloc_slot(left_id),
+                    dst_slot: dst,
                     rel_type: rel.rel_type,
                     dir: rel.dir.map(Dir::reverse),
                 };
+                plan = filter_expand(expand, dst, &left_node.labels);
             }
         }
 
@@ -732,9 +772,10 @@ pub struct MapEntryExpr {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
     use crate::backend::{BackendDesc, FuncSignature, FuncType, Token, Tokens};
-    use crate::frontend::{Frontend, LogicalPlan, PlanningContext};
-    use crate::{Error, Type};
+    use crate::Type;
+    use anyhow::Result;
     use std::cell::RefCell;
     use std::collections::HashMap;
     use std::rc::Rc;
@@ -757,7 +798,7 @@ mod tests {
         }
     }
 
-    fn plan(q: &str) -> Result<PlanArtifacts, Error> {
+    fn plan(q: &str) -> Result<PlanArtifacts> {
         let tokens = Rc::new(RefCell::new(Tokens::new()));
         let tok_expr = tokens.borrow_mut().tokenize("expr");
         let fn_count = tokens.borrow_mut().tokenize("count");
@@ -934,7 +975,6 @@ mod tests {
     #[cfg(test)]
     mod match_ {
         use super::*;
-        use super::super::*;
 
         #[test]
         fn plan_match_with_anonymous_rel_type() -> Result<()> {
@@ -958,6 +998,37 @@ mod tests {
                     dst_slot: p.slot(id_o),
                     rel_type: RelType::Anon(tpe_anon),
                     dir: Some(Dir::Out),
+                }
+            );
+            Ok(())
+        }
+
+        #[test]
+        fn plan_match_with_selection() -> Result<()> {
+            let mut p = plan("MATCH (n:Person)-[r:KNOWS]->(o:Person)")?;
+            let lbl_person = p.tokenize("Person");
+            let tpe_knows = p.tokenize("KNOWS");
+            let id_n = p.tokenize("n");
+            let id_r = p.tokenize("r");
+            let id_o = p.tokenize("o");
+
+            assert_eq!(
+                p.plan,
+                LogicalPlan::Selection {
+                    src: Box::new(LogicalPlan::Expand {
+                        src: Box::new(LogicalPlan::NodeScan {
+                            src: Box::new(LogicalPlan::Argument),
+                            slot: p.slot(id_n),
+                            labels: Some(lbl_person),
+                        }),
+                        src_slot: p.slot(id_n),
+                        rel_slot: p.slot(id_r),
+                        dst_slot: p.slot(id_o),
+                        rel_type: RelType::Defined(tpe_knows),
+                        dir: Some(Dir::Out),
+                    }),
+                    slot: p.slot(id_o),
+                    predicate: Predicate::HasLabel(lbl_person)
                 }
             );
             Ok(())

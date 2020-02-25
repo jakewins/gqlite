@@ -87,6 +87,8 @@ impl GramBackend {
                 next_rel_index: 0,
                 state: ExpandState::NextNode,
             }))),
+            // TODO: unwrap selection for now, actually implement
+            LogicalPlan::Selection { src, .. } => self.convert(src),
             LogicalPlan::Return { src, projections } => {
                 let mut converted_projections = Vec::new();
                 for projection in projections {
