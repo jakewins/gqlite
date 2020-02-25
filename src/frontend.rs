@@ -6,7 +6,7 @@
 use pest::Parser;
 
 use crate::backend::{BackendDesc, Token, Tokens};
-use crate::{Dir, Error, Slot, Val};
+use crate::{Dir, Slot, Val};
 use anyhow::Result;
 use pest::iterators::Pair;
 use std::cell::RefCell;
@@ -91,7 +91,13 @@ pub enum LogicalPlan {
         src_slot: usize,
         rel_slot: usize,
         dst_slot: usize,
-        rel_type: Token,
+        rel_type: RelType,
+        dir: Option<Dir>,
+    },
+    Selection {
+        src: Box<Self>,
+        slot: usize,
+        predicate: Predicate,
     },
     Create {
         src: Box<Self>,
@@ -117,6 +123,27 @@ pub enum LogicalPlan {
         src: Box<Self>,
         projections: Vec<Projection>,
     },
+}
+
+#[derive(Debug, PartialEq, Copy, Clone)]
+pub enum RelType {
+    Defined(Token),
+    Anon(Token),
+}
+impl RelType {
+    pub fn token(&self) -> Token {
+        match self {
+            RelType::Defined(token) => *token,
+            RelType::Anon(token) => *token,
+        }
+    }
+}
+
+#[derive(Debug, PartialEq)]
+pub enum Predicate {
+    And(Vec<Predicate>),
+    Or(Vec<Predicate>),
+    HasLabel(Token),
 }
 
 #[derive(Debug, PartialEq)]
@@ -244,7 +271,7 @@ pub struct NodeSpec {
 #[derive(Debug, PartialEq)]
 pub struct RelSpec {
     slot: usize,
-    rel_type: Token,
+    rel_type: RelType,
     start_node_slot: usize,
     end_node_slot: usize,
     props: Vec<MapEntryExpr>,
@@ -255,7 +282,7 @@ fn plan_return(pc: &mut PlanningContext, src: LogicalPlan, return_stmt: Pair<Rul
 
     let (is_aggregate, projections) = parts
         .next()
-        .and_then(|p| Some(plan_return_projections(pc, p)))
+        .map(|p| plan_return_projections(pc, p))
         .expect("RETURN must start with projections");
     if !is_aggregate {
         return LogicalPlan::Return {
@@ -311,7 +338,7 @@ fn plan_return_projections(
         if let Rule::projection = projection.as_rule() {
             let default_alias = projection.as_str();
             let mut parts = projection.into_inner();
-            let expr = parts.next().and_then(|p| Some(plan_expr(pc, p))).unwrap();
+            let expr = parts.next().map(|p| plan_expr(pc, p)).unwrap();
             contains_aggregations =
                 contains_aggregations || expr.is_aggregating(&pc.backend_desc.aggregates);
             let alias = parts
@@ -394,7 +421,7 @@ impl PatternNode {
 #[derive(Debug, PartialEq)]
 pub struct PatternRel {
     identifier: Token,
-    rel_type: Token,
+    rel_type: RelType,
     left_node: Token,
     right_node: Option<Token>,
     // From the perspective of the left node, is this pattern inbound or outbound?
@@ -429,11 +456,33 @@ impl PatternGraph {
     }
 }
 
-fn plan_match<'i, 'pc>(
-    pc: &'i mut PlanningContext<'pc>,
+fn plan_match(
+    pc: &mut PlanningContext,
     src: LogicalPlan,
     match_stmt: Pair<Rule>,
-) -> Result<LogicalPlan, Error> {
+) -> Result<LogicalPlan> {
+    fn filter_expand(expand: LogicalPlan, slot: Token, labels: &[Token]) -> LogicalPlan {
+        let labels = labels
+            .iter()
+            .map(|&label| Predicate::HasLabel(label))
+            .collect::<Vec<_>>();
+        if labels.is_empty() {
+            expand
+        } else if labels.len() == 1 {
+            LogicalPlan::Selection {
+                src: Box::new(expand),
+                slot,
+                predicate: labels.into_iter().next().unwrap(),
+            }
+        } else {
+            LogicalPlan::Selection {
+                src: Box::new(expand),
+                slot,
+                predicate: Predicate::And(labels),
+            }
+        }
+    }
+
     let mut plan = src;
     let mut pg = parse_pattern_graph(pc, match_stmt)?;
 
@@ -460,17 +509,19 @@ fn plan_match<'i, 'pc>(
             break;
         }
     }
-    if !solved_for_labelled_node && candidate_id.is_some() {
-        let mut candidate = pg.e.get_mut(candidate_id.unwrap()).unwrap();
-        if candidate.labels.len() > 1 {
-            panic!("Multiple label match not yet implemented")
+    if !solved_for_labelled_node {
+        if let Some(candidate_id) = candidate_id {
+            let mut candidate = pg.e.get_mut(candidate_id).unwrap();
+            if candidate.labels.len() > 1 {
+                panic!("Multiple label match not yet implemented")
+            }
+            plan = LogicalPlan::NodeScan {
+                src: Box::new(plan),
+                slot: pc.get_or_alloc_slot(*candidate_id),
+                labels: candidate.labels.first().cloned(),
+            };
+            candidate.solved = true;
         }
-        plan = LogicalPlan::NodeScan {
-            src: Box::new(plan),
-            slot: pc.get_or_alloc_slot(*candidate_id.unwrap()),
-            labels: candidate.labels.first().cloned(),
-        };
-        candidate.solved = true;
     }
 
     // Now we iterate until the whole pattern is solved. The way this works is that "solving"
@@ -498,26 +549,32 @@ fn plan_match<'i, 'pc>(
                 right_node.solved = true;
                 rel.solved = true;
                 solved_any = true;
-                plan = LogicalPlan::Expand {
+                let dst = pc.get_or_alloc_slot(right_id);
+                let expand = LogicalPlan::Expand {
                     src: Box::new(plan),
                     src_slot: pc.get_or_alloc_slot(left_id),
                     rel_slot: pc.get_or_alloc_slot(rel.identifier),
-                    dst_slot: pc.get_or_alloc_slot(right_id),
+                    dst_slot: dst,
                     rel_type: rel.rel_type,
+                    dir: rel.dir,
                 };
+                plan = filter_expand(expand, dst, &right_node.labels);
             } else if !left_solved && right_solved {
                 // Right is solved and left isn't, so we can expand to the left
                 let mut left_node = pg.e.get_mut(&left_id).unwrap();
                 left_node.solved = true;
                 rel.solved = true;
                 solved_any = true;
-                plan = LogicalPlan::Expand {
+                let dst = pc.get_or_alloc_slot(left_id);
+                let expand = LogicalPlan::Expand {
                     src: Box::new(plan),
                     src_slot: pc.get_or_alloc_slot(right_id),
                     rel_slot: pc.get_or_alloc_slot(rel.identifier),
-                    dst_slot: pc.get_or_alloc_slot(left_id),
+                    dst_slot: dst,
                     rel_type: rel.rel_type,
+                    dir: rel.dir.map(Dir::reverse),
                 };
+                plan = filter_expand(expand, dst, &left_node.labels);
             }
         }
 
@@ -599,7 +656,7 @@ fn parse_pattern_node(pc: &mut PlanningContext, pattern_node: Pair<Rule>) -> Pat
 
     PatternNode {
         identifier: id,
-        labels: labels,
+        labels,
         props,
         solved: false,
     }
@@ -633,7 +690,7 @@ fn parse_pattern_rel(
     }
     // TODO don't use this empty identifier here
     let id = identifier.unwrap_or_else(|| pc.new_anon_rel());
-    let rt = rel_type.unwrap_or_else(|| pc.new_anon_rel());
+    let rt = rel_type.map_or_else(|| RelType::Anon(pc.new_anon_rel()), RelType::Defined);
     Ok(PatternRel {
         left_node,
         right_node: None,
@@ -645,10 +702,7 @@ fn parse_pattern_rel(
     })
 }
 
-fn parse_map_expression<'i, 'pc>(
-    pc: &'i mut PlanningContext<'pc>,
-    map_expr: Pair<Rule>,
-) -> Vec<MapEntryExpr> {
+fn parse_map_expression(pc: &mut PlanningContext, map_expr: Pair<Rule>) -> Vec<MapEntryExpr> {
     let mut out = Vec::new();
     for pair in map_expr.into_inner() {
         match pair.as_rule() {
@@ -712,9 +766,10 @@ pub struct MapEntryExpr {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
     use crate::backend::{BackendDesc, FuncSignature, FuncType, Token, Tokens};
-    use crate::frontend::{Frontend, LogicalPlan, PlanningContext};
-    use crate::{Error, Type};
+    use crate::Type;
+    use anyhow::Result;
     use std::cell::RefCell;
     use std::collections::HashMap;
     use std::rc::Rc;
@@ -737,7 +792,7 @@ mod tests {
         }
     }
 
-    fn plan(q: &str) -> Result<PlanArtifacts, Error> {
+    fn plan(q: &str) -> Result<PlanArtifacts> {
         let tokens = Rc::new(RefCell::new(Tokens::new()));
         let tok_expr = tokens.borrow_mut().tokenize("expr");
         let fn_count = tokens.borrow_mut().tokenize("count");
@@ -912,9 +967,72 @@ mod tests {
     }
 
     #[cfg(test)]
+    mod match_ {
+        use super::*;
+
+        #[test]
+        fn plan_match_with_anonymous_rel_type() -> Result<()> {
+            let mut p = plan("MATCH (n:Person)-->(o)")?;
+            let lbl_person = p.tokenize("Person");
+            let id_anon = p.tokenize("AnonRel#0");
+            let tpe_anon = p.tokenize("AnonRel#1");
+            let id_n = p.tokenize("n");
+            let id_o = p.tokenize("o");
+
+            assert_eq!(
+                p.plan,
+                LogicalPlan::Expand {
+                    src: Box::new(LogicalPlan::NodeScan {
+                        src: Box::new(LogicalPlan::Argument),
+                        slot: p.slot(id_n),
+                        labels: Some(lbl_person),
+                    }),
+                    src_slot: p.slot(id_n),
+                    rel_slot: p.slot(id_anon),
+                    dst_slot: p.slot(id_o),
+                    rel_type: RelType::Anon(tpe_anon),
+                    dir: Some(Dir::Out),
+                }
+            );
+            Ok(())
+        }
+
+        #[test]
+        fn plan_match_with_selection() -> Result<()> {
+            let mut p = plan("MATCH (n:Person)-[r:KNOWS]->(o:Person)")?;
+            let lbl_person = p.tokenize("Person");
+            let tpe_knows = p.tokenize("KNOWS");
+            let id_n = p.tokenize("n");
+            let id_r = p.tokenize("r");
+            let id_o = p.tokenize("o");
+
+            assert_eq!(
+                p.plan,
+                LogicalPlan::Selection {
+                    src: Box::new(LogicalPlan::Expand {
+                        src: Box::new(LogicalPlan::NodeScan {
+                            src: Box::new(LogicalPlan::Argument),
+                            slot: p.slot(id_n),
+                            labels: Some(lbl_person),
+                        }),
+                        src_slot: p.slot(id_n),
+                        rel_slot: p.slot(id_r),
+                        dst_slot: p.slot(id_o),
+                        rel_type: RelType::Defined(tpe_knows),
+                        dir: Some(Dir::Out),
+                    }),
+                    slot: p.slot(id_o),
+                    predicate: Predicate::HasLabel(lbl_person)
+                }
+            );
+            Ok(())
+        }
+    }
+
+    #[cfg(test)]
     mod create {
         use crate::frontend::tests::plan;
-        use crate::frontend::{Expr, LogicalPlan, MapEntryExpr, NodeSpec, RelSpec};
+        use crate::frontend::{Expr, LogicalPlan, MapEntryExpr, NodeSpec, RelSpec, RelType};
         use crate::{Error, Val};
 
         #[test]
@@ -1025,7 +1143,7 @@ mod tests {
                     }],
                     rels: vec![RelSpec {
                         slot: p.slot(id_r),
-                        rel_type: rt_knows,
+                        rel_type: RelType::Defined(rt_knows),
                         start_node_slot: p.slot(id_n),
                         end_node_slot: p.slot(id_n),
                         props: vec![]
@@ -1055,7 +1173,7 @@ mod tests {
                     }],
                     rels: vec![RelSpec {
                         slot: p.slot(id_r),
-                        rel_type: rt_knows,
+                        rel_type: RelType::Defined(rt_knows),
                         start_node_slot: p.slot(id_n),
                         end_node_slot: p.slot(id_n),
                         props: vec![MapEntryExpr {
@@ -1095,7 +1213,7 @@ mod tests {
                     ],
                     rels: vec![RelSpec {
                         slot: p.slot(id_r),
-                        rel_type: rt_knows,
+                        rel_type: RelType::Defined(rt_knows),
                         start_node_slot: p.slot(id_n),
                         end_node_slot: p.slot(id_o),
                         props: vec![]
@@ -1132,7 +1250,7 @@ mod tests {
                     ],
                     rels: vec![RelSpec {
                         slot: p.slot(id_r),
-                        rel_type: rt_knows,
+                        rel_type: RelType::Defined(rt_knows),
                         start_node_slot: p.slot(id_o),
                         end_node_slot: p.slot(id_n),
                         props: vec![]

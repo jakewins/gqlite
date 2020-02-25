@@ -3,7 +3,6 @@ extern crate pest;
 extern crate pest_derive;
 #[macro_use]
 extern crate anyhow;
-extern crate rand;
 
 pub mod backend;
 pub mod frontend;
@@ -26,7 +25,7 @@ impl Database {
     #[cfg(feature = "gram")]
     pub fn open(file: File) -> Result<Database> {
         let backend = backend::gram::GramBackend::open(file)?;
-        return Database::with_backend(Box::new(backend));
+        Database::with_backend(Box::new(backend))
     }
 
     pub fn with_backend(backend: Box<dyn Backend>) -> Result<Database, Error> {
@@ -34,7 +33,7 @@ impl Database {
             tokens: backend.tokens(),
             backend_desc: backend.describe()?,
         };
-        return Ok(Database { backend, frontend });
+        Ok(Database { backend, frontend })
     }
 
     pub fn run(&mut self, query_str: &str, cursor: &mut Cursor) -> Result<(), Error> {
@@ -73,10 +72,18 @@ impl Cursor {
     }
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Copy, Clone)]
 pub enum Dir {
     Out,
     In,
+}
+impl Dir {
+    fn reverse(self) -> Self {
+        match self {
+            Dir::Out => Dir::In,
+            Dir::In => Dir::Out,
+        }
+    }
 }
 
 #[derive(Debug, Default)]

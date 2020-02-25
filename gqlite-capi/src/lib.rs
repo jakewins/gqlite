@@ -27,7 +27,7 @@ pub unsafe extern "C" fn gqlite_open(raw_url: *const c_char) -> *const database 
     let url: &str = str::from_utf8(url_bytes).unwrap();
 
     match File::open(url) {
-        Ok(mut file) => Box::into_raw(Box::new(database {
+        Ok(file) => Box::into_raw(Box::new(database {
             db: Some(Database::open(file).unwrap()),
             last_error: None,
         })),

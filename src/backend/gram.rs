@@ -31,11 +31,11 @@ impl GramBackend {
         };
         let g = parser::load(&mut tokens, &mut file)?;
 
-        return Ok(GramBackend {
+        Ok(GramBackend {
             tokens: Rc::new(RefCell::new(tokens)),
             g: Rc::new(RefCell::new(g)),
             file: Rc::new(RefCell::new(file)),
-        });
+        })
     }
 
     fn convert(&self, plan: Box<LogicalPlan>) -> Result<Rc<RefCell<dyn Operator>>, Error> {
@@ -49,8 +49,7 @@ impl GramBackend {
             }))),
             LogicalPlan::Create { src, nodes, .. } => {
                 let mut out_nodes = Vec::with_capacity(nodes.len());
-                let mut i = 0;
-                for ns in nodes {
+                for (i, ns) in nodes.into_iter().enumerate() {
                     let mut props = HashMap::new();
                     for k in ns.props {
                         props.insert(k.key, self.convert_expr(k.val));
@@ -60,10 +59,9 @@ impl GramBackend {
                         NodeSpec {
                             slot: ns.slot,
                             labels: ns.labels.iter().copied().collect(),
-                            props: props,
+                            props,
                         },
                     );
-                    i += 1;
                 }
                 Ok(Rc::new(RefCell::new(Create {
                     src: self.convert(src)?,
@@ -77,15 +75,18 @@ impl GramBackend {
                 rel_slot,
                 dst_slot,
                 rel_type,
+                ..
             } => Ok(Rc::new(RefCell::new(Expand {
                 src: self.convert(src)?,
                 src_slot,
                 rel_slot,
                 dst_slot,
-                rel_type,
+                rel_type: rel_type.token(),
                 next_rel_index: 0,
                 state: ExpandState::NextNode,
             }))),
+            // TODO: unwrap selection for now, actually implement
+            LogicalPlan::Selection { src, .. } => self.convert(src),
             LogicalPlan::Return { src, projections } => {
                 let mut converted_projections = Vec::new();
                 for projection in projections {
@@ -125,13 +126,13 @@ impl super::Backend for GramBackend {
 
     fn prepare(&self, logical_plan: Box<LogicalPlan>) -> Result<Box<dyn PreparedStatement>> {
         let plan = self.convert(logical_plan)?;
-        return Ok(Box::new(Statement {
+        Ok(Box::new(Statement {
             file: Rc::clone(&self.file),
             g: Rc::clone(&self.g),
             plan,
-            // TODO: pipe this knowledge through from logial plan
+            // TODO: pipe this knowledge through from logical plan
             num_slots: 16,
-        }));
+        }))
     }
 
     fn describe(&self) -> Result<BackendDesc, Error> {
@@ -166,7 +167,7 @@ impl PreparedStatement for Statement {
         if cursor.row.slots.len() < self.num_slots {
             cursor.row.slots.resize(self.num_slots, Val::Null);
         }
-        return Ok(());
+        Ok(())
     }
 }
 
@@ -580,11 +581,11 @@ struct NodeSpec {
 
 impl Clone for NodeSpec {
     fn clone(&self) -> Self {
-        return NodeSpec {
+        NodeSpec {
             slot: self.slot,
             labels: self.labels.iter().cloned().collect(),
             props: self.props.clone(),
-        };
+        }
     }
 
     fn clone_from(&mut self, _source: &'_ Self) {
@@ -646,7 +647,7 @@ fn generate_uuid() -> Uuid {
         .duration_since(SystemTime::UNIX_EPOCH)
         .unwrap();
     let ts = Timestamp::from_unix(&context, now.as_secs(), now.subsec_nanos());
-    return Uuid::new_v1(ts, &node_id).expect("failed to generate UUID");
+    Uuid::new_v1(ts, &node_id).expect("failed to generate UUID")
 }
 
 fn append_node(
@@ -661,26 +662,25 @@ fn append_node(
         .map(|kvp| (tokens.lookup(*kvp.0).unwrap(), (*kvp.1).as_string_literal()))
         .collect();
     let gram_identifier = generate_uuid().to_hyphenated().to_string();
-    let gram_string: String;
-    if !labels.is_empty() {
+    let gram_string = if !labels.is_empty() {
         let labels_gram_ready: Vec<&str> =
             labels.iter().map(|l| tokens.lookup(*l).unwrap()).collect();
-        gram_string = format!(
+        format!(
             "(`{}`:{} {})\n",
             gram_identifier,
             labels_gram_ready.join(":"),
             json::stringify(properties_gram_ready)
-        );
+        )
     } else {
-        gram_string = format!(
+        format!(
             "(`{}` {})\n",
             gram_identifier,
             json::stringify(properties_gram_ready)
-        );
-    }
+        )
+    };
 
     let out_node = Node {
-        labels: labels,
+        labels,
         properties: node_properties,
         rels: vec![],
     };
@@ -698,8 +698,8 @@ fn append_node(
         .seek(SeekFrom::End(0))
         .expect("seek error");
 
-    return match ctx.file.borrow_mut().write_all(gram_string.as_bytes()) {
+    match ctx.file.borrow_mut().write_all(gram_string.as_bytes()) {
         Ok(_) => Ok(Val::Node(node_id)),
         Err(e) => Err(Error::new(e)),
-    };
+    }
 }
