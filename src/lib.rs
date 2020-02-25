@@ -47,6 +47,7 @@ impl Database {
 
 // Backends provide this
 pub trait CursorState: Debug {
+    fn slot_names(&self) -> Vec<&str>;
     fn next(&mut self, row: &mut Row) -> Result<bool>;
 }
 
@@ -61,6 +62,11 @@ pub struct Cursor {
 impl Cursor {
     pub fn new() -> Cursor {
         Cursor::default()
+    }
+
+    // Number of slots in the rows this cursor yields
+    pub fn slot_names(&self) -> Option<Vec<&str>> {
+        self.state.map(|state| state.slot_names())
     }
 
     #[allow(clippy::should_implement_trait)]
@@ -124,6 +130,7 @@ pub enum Type {
 pub enum Val {
     Null,
     String(String),
+    List(Vec<Val>),
     Int(i64),
     Float(f64),
     Node(usize),
@@ -165,6 +172,7 @@ impl Display for Val {
         match self {
             Val::Null => f.write_str("NULL"),
             Val::String(s) => f.write_str(&s),
+            Val::List(vs) => f.write_str(&format!("{:?}", vs)),
             Val::Node(id) => f.write_str(&format!("Node({})", id)),
             Val::Rel { node, rel_index } => f.write_str(&format!("Rel({}/{})", node, rel_index)),
             Val::Int(v) => f.write_str(&format!("{}", v)),

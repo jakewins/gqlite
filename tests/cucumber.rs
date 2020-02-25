@@ -106,6 +106,12 @@ mod example_steps {
             assert_eq!(0, count_rows(&mut world.result).unwrap());
         };
 
+        then "the result should be, in any order:" |world, step| {
+            // Check that the outcomes to be observed have occurred
+            let table = step.table().unwrap().clone();
+            world.result
+        };
+
         then "the side effects should be:" |world, step| {
             // Check that the outcomes to be observed have occurred
             let table = step.table().unwrap().clone();

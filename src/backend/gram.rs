@@ -16,7 +16,8 @@ use std::rc::Rc;
 use std::time::SystemTime;
 use uuid::v1::{Context as UuidContext, Timestamp};
 use uuid::Uuid;
-use crate::backend::gram::functions::AggregatingFuncSpec;
+use crate::backend::gram::functions::{AggregatingFuncSpec};
+use std::slice::Iter;
 
 #[derive(Debug)]
 pub struct GramBackend {
@@ -48,7 +49,7 @@ impl GramBackend {
 
     fn convert(&self, plan: Box<LogicalPlan>) -> Result<Rc<RefCell<dyn Operator>>, Error> {
         match *plan {
-            LogicalPlan::Argument => Ok(Rc::new(RefCell::new(Argument {}))),
+            LogicalPlan::Argument => Ok(Rc::new(RefCell::new(Argument { consumed: false }))),
             LogicalPlan::NodeScan { src, slot, labels } => Ok(Rc::new(RefCell::new(NodeScan {
                 src: self.convert(src)?,
                 next_node: 0,
@@ -95,6 +96,26 @@ impl GramBackend {
             }))),
             // TODO: unwrap selection for now, actually implement
             LogicalPlan::Selection { src, .. } => self.convert(src),
+            LogicalPlan::Aggregate { src, grouping: _, aggregations } => {
+                let mut agg_exprs = Vec::new();
+                for (expr, slot) in aggregations {
+                    agg_exprs.push(AggregateEntry{ func: self.convert_aggregating_expr(expr), slot })
+                }
+                Ok(Rc::new(RefCell::new(Aggregate{
+                    src: self.convert(src)?,
+                    aggregations: agg_exprs,
+                    consumed: false,
+                })))
+            }
+            LogicalPlan::Unwind { src, list_expr, alias } => {
+                Ok(Rc::new(RefCell::new(Unwind{
+                    src: self.convert(src)?,
+                    list_expr: self.convert_expr(list_expr),
+                    current_list: None,
+                    next_index: 0,
+                    dst: alias,
+                })))
+            }
             LogicalPlan::Return { src, projections } => {
                 let mut converted_projections = Vec::new();
                 for projection in projections {
@@ -114,11 +135,41 @@ impl GramBackend {
         }
     }
 
+    fn convert_aggregating_expr(&self, expr: frontend::Expr) -> Box<dyn functions::AggregatingFunc> {
+        match expr {
+            frontend::Expr::FuncCall { name, args } => {
+                if let Some(f) = self.aggregators.get(&name) {
+                    let mut arguments = Vec::new();
+                    for a in args {
+                        arguments.push(self.convert_expr(a));
+                    }
+                    return f.init(arguments)
+                } else {
+                    panic!(
+                        "The gram backend doesn't support nesting regular functions with aggregates yet: {:?}",
+                        name
+                    )
+                }
+            },
+            _ => panic!(
+                "The gram backend does not support this expression type yet: {:?}",
+                expr
+            ),
+        }
+    }
+
     fn convert_expr(&self, expr: frontend::Expr) -> Expr {
         match expr {
             frontend::Expr::Lit(v) => Expr::Lit(v),
             frontend::Expr::Prop(e, props) => Expr::Prop(Box::new(self.convert_expr(*e)), props),
             frontend::Expr::Slot(s) => Expr::Slot(s),
+            frontend::Expr::List(es) => {
+                let mut items = Vec::new();
+                for e in es {
+                    items.push(self.convert_expr(e));
+                }
+                Expr::List(items)
+            },
             _ => panic!(
                 "The gram backend does not support this expression type yet: {:?}",
                 expr
@@ -184,6 +235,10 @@ struct GramCursorState {
 }
 
 impl CursorState for GramCursorState {
+    fn slot_names(&self) -> Vec<&str> {
+        unimplemented!()
+    }
+
     fn next(&mut self, row: &mut Row) -> Result<bool> {
         self.plan.borrow_mut().next(&mut self.ctx, row)
     }
@@ -201,6 +256,7 @@ enum Expr {
     // Lookup a property by id
     Prop(Box<Expr>, Vec<Token>),
     Slot(Slot),
+    List(Vec<Expr>),
 }
 
 impl Expr {
@@ -227,6 +283,13 @@ impl Expr {
             Expr::Prop(expr, props) => Expr::eval_prop(ctx, row, expr, props),
             Expr::Slot(slot) => Ok(row.slots[*slot].clone()), // TODO not this
             Expr::Lit(v) => Ok(v.clone()),                    // TODO not this,
+            Expr::List(vs) => {
+                let mut out = Vec::new();
+                for v in vs {
+                    out.push(v.eval(ctx, row)?);
+                }
+                Ok(Val::List(out))
+            }
         }
     }
 }
@@ -337,11 +400,21 @@ impl Operator for NodeScan {
 }
 
 #[derive(Debug, Clone)]
-struct Argument;
+struct Argument {
+    // Eventually this operator would yield one row with user-provided parameters; for now
+    // it's simply used as a leaf that yields one "seed" row to set things in motion.
+    // This is because other operators perform their action "once per input row", so you
+    // need one initial row to start the machinery.
+    consumed: bool,
+}
 
 impl Operator for Argument {
     fn next(&mut self, _ctx: &mut Context, _out: &mut Row) -> Result<bool> {
-        unimplemented!()
+        if self.consumed {
+            return Ok(false)
+        }
+        self.consumed = true;
+        return Ok(true);
     }
 }
 
@@ -417,6 +490,83 @@ impl Operator for Return {
             return Ok(true);
         }
         Ok(false)
+    }
+}
+
+
+#[derive(Debug)]
+struct Aggregate {
+    src: Rc<RefCell<dyn Operator>>,
+
+    aggregations: Vec<AggregateEntry>,
+
+    consumed: bool,
+}
+
+#[derive(Debug)]
+struct AggregateEntry {
+    func: Box<dyn functions::AggregatingFunc>,
+    slot: Slot,
+}
+
+impl Operator for Aggregate {
+    fn next(&mut self, ctx: &mut Context, row: &mut Row) -> Result<bool> {
+        if self.consumed {
+            return Ok(false)
+        }
+        let mut src = self.src.borrow_mut();
+        while src.next(ctx, row)? {
+            for agge in &mut self.aggregations {
+                agge.func.apply(ctx, row);
+            }
+        }
+
+        for agge in &mut self.aggregations {
+            row.slots[agge.slot] = agge.func.complete()?.clone();
+        }
+
+        self.consumed = true;
+        return Ok(true)
+    }
+}
+
+#[derive(Debug)]
+struct Unwind {
+    src: Rc<RefCell<dyn Operator>>,
+    list_expr: Expr,
+    dst: Slot,
+    // TODO this should use an iterator
+    current_list: Option<Vec<Val>>,
+    next_index: usize,
+}
+
+impl Operator for Unwind {
+    fn next(&mut self, ctx: &mut Context, row: &mut Row) -> Result<bool> {
+        loop {
+            if self.current_list.is_none() {
+                let mut src = self.src.borrow_mut();
+                if !src.next(ctx, row)? {
+                    return Ok(false);
+                }
+
+                match self.list_expr.eval(ctx, row)? {
+                    Val::List(items) => self.current_list = Some(items),
+                    _ => return Err(anyhow!("UNWIND expression must yield a list"))
+                }
+                self.next_index = 0;
+            }
+
+            if let Some(it) = &mut self.current_list {
+                if self.next_index >= it.len() {
+                    self.current_list = None;
+                    continue;
+                }
+
+                row.slots[self.dst] = it[self.next_index].clone();
+                self.next_index += 1;
+                return Ok(true);
+            }
+        }
     }
 }
 
@@ -726,12 +876,12 @@ mod functions {
 
     pub(super) trait AggregatingFuncSpec: Debug {
         fn signature(&self) -> &FuncSignature;
-        fn init(&mut self) -> Box<dyn AggregatingFunc>;
+        fn init(&self, args: Vec<Expr>) -> Box<dyn AggregatingFunc>;
     }
 
     // A running aggregation in an executing query
     pub(super) trait AggregatingFunc : Debug {
-        fn apply(&mut self, ctx: &mut Context, row: &mut Row, args: &Vec<Expr>) -> Result<()>;
+        fn apply(&mut self, ctx: &mut Context, row: &mut Row) -> Result<()>;
         fn complete(&mut self) -> Result<&Val>;
     }
 
@@ -759,19 +909,20 @@ mod functions {
             return &self.sig;
         }
 
-        fn init(&mut self) -> Box<dyn AggregatingFunc> {
-            Box::new(Min{ min: None })
+        fn init(&self, mut args: Vec<Expr>) -> Box<dyn AggregatingFunc> {
+            Box::new(Min{ arg: args.pop().expect("min takes 1 arg"), min: None })
         }
     }
 
     #[derive(Debug)]
     struct Min {
+        arg: Expr,
         min: Option<Val>
     }
 
     impl AggregatingFunc for Min {
-        fn apply(&mut self, ctx: &mut Context, row: &mut Row, args: &Vec<Expr>) -> Result<()> {
-            let v = args[0].eval(ctx, row)?;
+        fn apply(&mut self, ctx: &mut Context, row: &mut Row) -> Result<()> {
+            let v = self.arg.eval(ctx, row)?;
             if let Some(m) = &self.min {
                 if v.less(m)? {
                     self.min = Some(v);
@@ -797,12 +948,12 @@ mod functions {
     }
 
     impl MaxSpec {
-        pub fn new(tokens: &mut Tokens) -> MinSpec {
-            let tok_min = tokens.tokenize("max");
-            MinSpec{
+        pub fn new(tokens: &mut Tokens) -> MaxSpec {
+            let tok_max = tokens.tokenize("max");
+            MaxSpec{
                 sig: FuncSignature {
                     func_type: FuncType::Aggregating,
-                    name: tok_min,
+                    name: tok_max,
                     returns: Type::Any,
                     args: vec![(tokens.tokenize("v"), Type::Any)],
                 }
@@ -815,19 +966,21 @@ mod functions {
             return &self.sig;
         }
 
-        fn init(&mut self) -> Box<dyn AggregatingFunc> {
-            Box::new(Max{ max: None })
+        fn init(&self, mut args: Vec<Expr>) -> Box<dyn AggregatingFunc> {
+            println!("Init max({:?})", args);
+            Box::new(Max{ arg: args.pop().expect("max takes 1 argument"), max: None })
         }
     }
 
     #[derive(Debug)]
     struct Max {
+        arg: Expr,
         max: Option<Val>
     }
 
     impl AggregatingFunc for Max {
-        fn apply(&mut self, ctx: &mut Context, row: &mut Row, args: &Vec<Expr>) -> Result<()> {
-            let v = args[0].eval(ctx, row)?;
+        fn apply(&mut self, ctx: &mut Context, row: &mut Row) -> Result<()> {
+            let v = self.arg.eval(ctx, row)?;
             if let Some(m) = &self.max {
                 if m.less(&v)? {
                     self.max = Some(v);
