@@ -91,7 +91,7 @@ pub enum LogicalPlan {
         src_slot: usize,
         rel_slot: usize,
         dst_slot: usize,
-        rel_type: Token,
+        rel_type: RelType,
         dir: Option<Dir>,
     },
     Create {
@@ -118,6 +118,20 @@ pub enum LogicalPlan {
         src: Box<Self>,
         projections: Vec<Projection>,
     },
+}
+
+#[derive(Debug, PartialEq, Copy, Clone)]
+pub enum RelType {
+    Defined(Token),
+    Anon(Token),
+}
+impl RelType {
+    pub fn token(&self) -> Token {
+        match self {
+            RelType::Defined(token) => *token,
+            RelType::Anon(token) => *token,
+        }
+    }
 }
 
 #[derive(Debug, PartialEq)]
@@ -245,7 +259,7 @@ pub struct NodeSpec {
 #[derive(Debug, PartialEq)]
 pub struct RelSpec {
     slot: usize,
-    rel_type: Token,
+    rel_type: RelType,
     start_node_slot: usize,
     end_node_slot: usize,
     props: Vec<MapEntryExpr>,
@@ -395,7 +409,7 @@ impl PatternNode {
 #[derive(Debug, PartialEq)]
 pub struct PatternRel {
     identifier: Token,
-    rel_type: Token,
+    rel_type: RelType,
     left_node: Token,
     right_node: Option<Token>,
     // From the perspective of the left node, is this pattern inbound or outbound?
@@ -636,7 +650,10 @@ fn parse_pattern_rel(
     }
     // TODO don't use this empty identifier here
     let id = identifier.unwrap_or_else(|| pc.new_anon_rel());
-    let rt = rel_type.unwrap_or_else(|| pc.new_anon_rel());
+    let rt = rel_type.map_or_else(
+        || RelType::Anon(pc.new_anon_rel()),
+        |rt| RelType::Defined(rt),
+    );
     Ok(PatternRel {
         left_node,
         right_node: None,
@@ -915,9 +932,42 @@ mod tests {
     }
 
     #[cfg(test)]
+    mod match_ {
+        use super::*;
+        use super::super::*;
+
+        #[test]
+        fn plan_match_with_anonymous_rel_type() -> Result<()> {
+            let mut p = plan("MATCH (n:Person)-->(o)")?;
+            let lbl_person = p.tokenize("Person");
+            let id_anon = p.tokenize("AnonRel#0");
+            let tpe_anon = p.tokenize("AnonRel#1");
+            let id_n = p.tokenize("n");
+            let id_o = p.tokenize("o");
+
+            assert_eq!(
+                p.plan,
+                LogicalPlan::Expand {
+                    src: Box::new(LogicalPlan::NodeScan {
+                        src: Box::new(LogicalPlan::Argument),
+                        slot: p.slot(id_n),
+                        labels: Some(lbl_person),
+                    }),
+                    src_slot: p.slot(id_n),
+                    rel_slot: p.slot(id_anon),
+                    dst_slot: p.slot(id_o),
+                    rel_type: RelType::Anon(tpe_anon),
+                    dir: Some(Dir::Out),
+                }
+            );
+            Ok(())
+        }
+    }
+
+    #[cfg(test)]
     mod create {
         use crate::frontend::tests::plan;
-        use crate::frontend::{Expr, LogicalPlan, MapEntryExpr, NodeSpec, RelSpec};
+        use crate::frontend::{Expr, LogicalPlan, MapEntryExpr, NodeSpec, RelSpec, RelType};
         use crate::{Error, Val};
 
         #[test]
@@ -1028,7 +1078,7 @@ mod tests {
                     }],
                     rels: vec![RelSpec {
                         slot: p.slot(id_r),
-                        rel_type: rt_knows,
+                        rel_type: RelType::Defined(rt_knows),
                         start_node_slot: p.slot(id_n),
                         end_node_slot: p.slot(id_n),
                         props: vec![]
@@ -1058,7 +1108,7 @@ mod tests {
                     }],
                     rels: vec![RelSpec {
                         slot: p.slot(id_r),
-                        rel_type: rt_knows,
+                        rel_type: RelType::Defined(rt_knows),
                         start_node_slot: p.slot(id_n),
                         end_node_slot: p.slot(id_n),
                         props: vec![MapEntryExpr {
@@ -1098,7 +1148,7 @@ mod tests {
                     ],
                     rels: vec![RelSpec {
                         slot: p.slot(id_r),
-                        rel_type: rt_knows,
+                        rel_type: RelType::Defined(rt_knows),
                         start_node_slot: p.slot(id_n),
                         end_node_slot: p.slot(id_o),
                         props: vec![]
@@ -1135,7 +1185,7 @@ mod tests {
                     ],
                     rels: vec![RelSpec {
                         slot: p.slot(id_r),
-                        rel_type: rt_knows,
+                        rel_type: RelType::Defined(rt_knows),
                         start_node_slot: p.slot(id_o),
                         end_node_slot: p.slot(id_n),
                         props: vec![]

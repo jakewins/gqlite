@@ -83,7 +83,7 @@ impl GramBackend {
                 src_slot,
                 rel_slot,
                 dst_slot,
-                rel_type,
+                rel_type: rel_type.token(),
                 next_rel_index: 0,
                 state: ExpandState::NextNode,
             }))),
