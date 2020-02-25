@@ -1,10 +1,10 @@
-use cucumber::{after, before, cucumber, steps, Step};
+use cucumber::{after, before, cucumber};
 use gqlite::{Cursor, Database};
 use tempfile::tempfile;
 
 pub struct GraphProperties {
     node_count: i32,
-    relationship_count: i32,
+    _relationship_count: i32,
 }
 
 fn empty_db() -> Database {
@@ -28,7 +28,7 @@ impl std::default::Default for MyWorld {
             result: Cursor::new(),
             starting_graph_properties: GraphProperties {
                 node_count: 0,
-                relationship_count: 0,
+                _relationship_count: 0,
             },
         }
     }
@@ -37,7 +37,7 @@ impl std::default::Default for MyWorld {
 mod example_steps {
     use super::{empty_db, MyWorld};
     use cucumber::{steps, Step};
-    use gqlite::{Cursor, Database, Error};
+    use gqlite::{Cursor, Error};
 
     fn run_preparatory_query(world: &mut MyWorld, step: &Step) -> Result<(), Error> {
         let mut cursor = Cursor::new();
@@ -84,16 +84,16 @@ mod example_steps {
 
     // Any type that implements cucumber::World + Default can be the world
     steps!(crate::MyWorld => {
-        given "any graph" |world, step| {
+        given "any graph" |_world, _step| {
             // Don't need to do anything
         };
 
-        given "an empty graph" |world, step| {
+        given "an empty graph" |world, _step| {
             world.graph = empty_db();
         };
 
         given "having executed:" |world, step| {
-            run_preparatory_query(world, step);
+            run_preparatory_query(world, step).unwrap();
         };
 
         when "executing query:" |world, step| {
@@ -101,7 +101,7 @@ mod example_steps {
             start_query(world, step)
         };
 
-        then "the result should be empty" |world, step| {
+        then "the result should be empty" |world, _step| {
             // Check that the outcomes to be observed have occurred
             assert_eq!(0, count_rows(&mut world.result).unwrap());
         };
@@ -115,12 +115,12 @@ mod example_steps {
 }
 
 // Declares a before handler function named `a_before_fn`
-before!(a_before_fn => |scenario| {
+before!(a_before_fn => |_scenario| {
 
 });
 
 // Declares an after handler function named `an_after_fn`
-after!(an_after_fn => |scenario| {
+after!(an_after_fn => |_scenario| {
 
 });
 
