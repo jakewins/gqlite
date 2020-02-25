@@ -73,10 +73,18 @@ impl Cursor {
     }
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Copy, Clone)]
 pub enum Dir {
     Out,
     In,
+}
+impl Dir {
+    fn reverse(self) -> Self {
+        match self {
+            Dir::Out => Dir::In,
+            Dir::In => Dir::Out,
+        }
+    }
 }
 
 #[derive(Debug, Default)]

@@ -77,6 +77,7 @@ impl GramBackend {
                 rel_slot,
                 dst_slot,
                 rel_type,
+                ..
             } => Ok(Rc::new(RefCell::new(Expand {
                 src: self.convert(src)?,
                 src_slot,

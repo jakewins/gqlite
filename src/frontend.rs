@@ -92,6 +92,7 @@ pub enum LogicalPlan {
         rel_slot: usize,
         dst_slot: usize,
         rel_type: Token,
+        dir: Option<Dir>,
     },
     Create {
         src: Box<Self>,
@@ -504,6 +505,7 @@ fn plan_match<'i, 'pc>(
                     rel_slot: pc.get_or_alloc_slot(rel.identifier),
                     dst_slot: pc.get_or_alloc_slot(right_id),
                     rel_type: rel.rel_type,
+                    dir: rel.dir,
                 };
             } else if !left_solved && right_solved {
                 // Right is solved and left isn't, so we can expand to the left
@@ -517,6 +519,7 @@ fn plan_match<'i, 'pc>(
                     rel_slot: pc.get_or_alloc_slot(rel.identifier),
                     dst_slot: pc.get_or_alloc_slot(left_id),
                     rel_type: rel.rel_type,
+                    dir: rel.dir.map(Dir::reverse),
                 };
             }
         }
