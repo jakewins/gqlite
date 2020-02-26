@@ -15,7 +15,6 @@ use std::fs::File;
 use crate::frontend::Frontend;
 use backend::Backend;
 use std::cmp::Ordering;
-use std::cmp::Ordering::Less;
 
 #[derive(Debug)]
 pub struct Database {
@@ -175,7 +174,7 @@ impl PartialOrd for Val {
                 Val::String(_) => Some(Ordering::Greater),
                 Val::Int(other_v) => self_v.partial_cmp(other_v),
                 Val::Float(other_v) => self_v.partial_cmp(&&(*other_v as i64)),
-                Val::List(other_v) => Some(Ordering::Greater),
+                Val::List(_) => Some(Ordering::Greater),
                 Val::Null => None,
                 _ => panic!("Don't know how to compare {:?} to {:?}", self, other),
             },
@@ -183,7 +182,7 @@ impl PartialOrd for Val {
                 Val::String(_) => Some(Ordering::Greater),
                 Val::Int(other_v) => (*self_v).partial_cmp(&(*other_v as f64)),
                 Val::Float(other_v) => (*self_v).partial_cmp(other_v),
-                Val::List(other_v) => Some(Ordering::Greater),
+                Val::List(_) => Some(Ordering::Greater),
                 Val::Null => None,
                 _ => panic!("Don't know how to compare {:?} to {:?}", self, other),
             },
@@ -191,7 +190,7 @@ impl PartialOrd for Val {
                 Val::Int(_) => Some(Ordering::Less),
                 Val::Float(_) => Some(Ordering::Less),
                 Val::String(other_v) => self_v.partial_cmp(other_v),
-                Val::List(other_v) => Some(Ordering::Greater),
+                Val::List(_) => Some(Ordering::Greater),
                 Val::Null => None,
                 _ => panic!("Don't know how to compare {:?} to {:?}", self, other),
             },

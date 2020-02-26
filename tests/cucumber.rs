@@ -37,7 +37,7 @@ impl std::default::Default for MyWorld {
 mod example_steps {
     use super::{empty_db, MyWorld};
     use cucumber::{steps, Step};
-    use gqlite::{Cursor, Database, Error, Val};
+    use gqlite::{Cursor, Error, Val};
     use std::iter::Peekable;
     use std::str::Chars;
 
@@ -85,7 +85,7 @@ mod example_steps {
     }
 
     fn assert_result(world: &mut MyWorld, step: &Step) {
-        let mut table = step.table().unwrap().clone();
+        let table = step.table().unwrap().clone();
         for mut row in table.rows {
             assert_eq!(true, world.result.next().unwrap());
             for slot in 0..row.len() {
@@ -98,7 +98,7 @@ mod example_steps {
     }
 
     fn str_to_val(mut chars: &mut Peekable<Chars>) -> Val {
-        fn str_to_number(mut chars: &mut Peekable<Chars>) -> Val {
+        fn str_to_number(chars: &mut Peekable<Chars>) -> Val {
             let mut val = String::new();
             let mut is_float = false;
             val.push(chars.next().unwrap());

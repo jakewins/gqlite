@@ -319,8 +319,8 @@ fn plan_return(
 
     let (is_aggregate, projections) = parts
         .next()
-        .map(|p| plan_return_projections(pc, p)?)
-        .expect("RETURN must start with projections");
+        .map(|p| plan_return_projections(pc, p))
+        .expect("RETURN must start with projections")?;
     if !is_aggregate {
         return Ok(LogicalPlan::Return {
             src: Box::new(src),
@@ -377,7 +377,7 @@ fn plan_return_projections(
         if let Rule::projection = projection.as_rule() {
             let default_alias = projection.as_str();
             let mut parts = projection.into_inner();
-            let expr = parts.next().map(|p| plan_expr(pc, p)?).unwrap();
+            let expr = parts.next().map(|p| plan_expr(pc, p)).unwrap()?;
             contains_aggregations =
                 contains_aggregations || expr.is_aggregating(&pc.backend_desc.aggregates);
             let alias = parts

@@ -194,8 +194,8 @@ impl super::Backend for GramBackend {
     }
 
     fn prepare(&self, logical_plan: Box<LogicalPlan>) -> Result<Box<dyn PreparedStatement>> {
-        let mut slots = match &*logical_plan {
-            LogicalPlan::Return { src, projections } => {
+        let slots = match &*logical_plan {
+            LogicalPlan::Return { src: _, projections } => {
                 projections.iter().map(|p| (p.alias, p.dst)).collect()
             }
             _ => Vec::new(),
@@ -883,9 +883,7 @@ mod functions {
     use crate::backend::gram::{Context, Expr};
     use crate::backend::{FuncSignature, FuncType, Tokens};
     use crate::{Result, Row, Type, Val};
-    use core::fmt::Alignment::Left;
     use std::cmp::Ordering;
-    use std::cmp::Ordering::Less;
     use std::fmt::Debug;
 
     pub(super) fn aggregating(tokens: &mut Tokens) -> Vec<Box<dyn AggregatingFuncSpec>> {
