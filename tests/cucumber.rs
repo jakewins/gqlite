@@ -84,6 +84,13 @@ mod example_steps {
         }
     }
 
+    fn assert_no_side_effects(world: &mut MyWorld) {
+        assert_eq!(
+            0,
+            count_nodes(world) - world.starting_graph_properties.node_count
+        )
+    }
+
     fn assert_result(world: &mut MyWorld, step: &Step) {
         let table = step.table().unwrap().clone();
         for mut row in table.rows {
@@ -192,6 +199,10 @@ mod example_steps {
             // Check that the outcomes to be observed have occurred
             let table = step.table().unwrap().clone();
             table.rows.iter().for_each(|row| assert_side_effect(world, &row[0], &row[1]));
+        };
+
+        then "no side effects" |world, _step| {
+            assert_no_side_effects(world);
         };
     });
 }

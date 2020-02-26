@@ -195,9 +195,10 @@ impl super::Backend for GramBackend {
 
     fn prepare(&self, logical_plan: Box<LogicalPlan>) -> Result<Box<dyn PreparedStatement>> {
         let slots = match &*logical_plan {
-            LogicalPlan::Return { src: _, projections } => {
-                projections.iter().map(|p| (p.alias, p.dst)).collect()
-            }
+            LogicalPlan::Return {
+                src: _,
+                projections,
+            } => projections.iter().map(|p| (p.alias, p.dst)).collect(),
             _ => Vec::new(),
         };
         let plan = self.convert(logical_plan)?;
