@@ -38,8 +38,8 @@ mod example_steps {
     use super::{empty_db, MyWorld};
     use cucumber::{steps, Step};
     use gqlite::{Cursor, Database, Error, Val};
-    use std::str::Chars;
     use std::iter::Peekable;
+    use std::str::Chars;
 
     fn run_preparatory_query(world: &mut MyWorld, step: &Step) -> Result<(), Error> {
         let mut cursor = Cursor::new();
@@ -89,7 +89,10 @@ mod example_steps {
         for mut row in table.rows {
             assert_eq!(true, world.result.next().unwrap());
             for slot in 0..row.len() {
-                assert_eq!(str_to_val(&mut row[slot].chars().peekable()), world.result.get(slot).clone());
+                assert_eq!(
+                    str_to_val(&mut row[slot].chars().peekable()),
+                    world.result.get(slot).clone()
+                );
             }
         }
     }
@@ -109,15 +112,15 @@ mod example_steps {
                     Some('.') => {
                         is_float = true;
                         val.push(chars.next().unwrap());
-                    },
+                    }
                     None => break,
                     _ => panic!(format!("unknown integer portion: '{:?}'", chars.peek())),
                 }
             }
             if is_float {
-                return Val::Float(val.parse().unwrap())
+                return Val::Float(val.parse().unwrap());
             }
-            return Val::Int(val.parse().unwrap())
+            return Val::Int(val.parse().unwrap());
         }
 
         match chars.peek().unwrap() {
@@ -141,8 +144,14 @@ mod example_steps {
                     match chars.peek() {
                         Some(']') => return Val::List(items),
                         None => return Val::List(items),
-                        Some(',') => { chars.next().unwrap(); ()}
-                        Some(' ') => { chars.next().unwrap(); ()}
+                        Some(',') => {
+                            chars.next().unwrap();
+                            ()
+                        }
+                        Some(' ') => {
+                            chars.next().unwrap();
+                            ()
+                        }
                         _ => items.push(str_to_val(&mut chars)),
                     }
                 }

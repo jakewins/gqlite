@@ -286,22 +286,35 @@ pub struct RelSpec {
     props: Vec<MapEntryExpr>,
 }
 
-fn plan_unwind(pc: &mut PlanningContext, src: LogicalPlan, unwind_stmt: Pair<Rule>) -> Result<LogicalPlan> {
+fn plan_unwind(
+    pc: &mut PlanningContext,
+    src: LogicalPlan,
+    unwind_stmt: Pair<Rule>,
+) -> Result<LogicalPlan> {
     let mut parts = unwind_stmt.into_inner();
 
     let list_item = parts.next().expect("UNWIND must contain a list expression");
     let list_expr = plan_expr(pc, list_item)?;
-    let alias_token = pc.tokenize(parts.next().expect("UNWIND must contain an AS alias").as_str());
+    let alias_token = pc.tokenize(
+        parts
+            .next()
+            .expect("UNWIND must contain an AS alias")
+            .as_str(),
+    );
     let alias = pc.get_or_alloc_slot(alias_token);
 
     return Ok(LogicalPlan::Unwind {
         src: Box::new(src),
         list_expr,
         alias,
-    })
+    });
 }
 
-fn plan_return(pc: &mut PlanningContext, src: LogicalPlan, return_stmt: Pair<Rule>) -> Result<LogicalPlan> {
+fn plan_return(
+    pc: &mut PlanningContext,
+    src: LogicalPlan,
+    return_stmt: Pair<Rule>,
+) -> Result<LogicalPlan> {
     let mut parts = return_stmt.into_inner();
 
     let (is_aggregate, projections) = parts
@@ -374,13 +387,15 @@ fn plan_return_projections(
                     _ => None,
                 })
                 .unwrap_or_else(|| pc.tokenize(default_alias));
-            out.push(Projection { expr,
+            out.push(Projection {
+                expr,
                 alias,
                 // TODO note that this adds a bunch of unecessary copying in cases where we use
                 //      projections that just rename stuff (eg. WITH blah as x); we should
                 //      consider making expr in Projection Optional, so it can be used for pure
                 //      renaming, is benchmarking shows that's helpful.
-                dst: pc.get_or_alloc_slot(alias) });
+                dst: pc.get_or_alloc_slot(alias),
+            });
         }
     }
     Ok((contains_aggregations, out))
@@ -442,11 +457,11 @@ fn plan_expr(pc: &mut PlanningContext, expression: Pair<Rule>) -> Result<Expr> {
             }
             Rule::int => {
                 let v = inner.as_str().parse::<i64>()?;
-                return Ok(Expr::Lit(Val::Int(v)))
+                return Ok(Expr::Lit(Val::Int(v)));
             }
             Rule::float => {
                 let v = inner.as_str().parse::<f64>()?;
-                return Ok(Expr::Lit(Val::Float(v)))
+                return Ok(Expr::Lit(Val::Float(v)));
             }
             _ => panic!(String::from(inner.as_str())),
         }
@@ -750,7 +765,10 @@ fn parse_pattern_rel(
     })
 }
 
-fn parse_map_expression(pc: &mut PlanningContext, map_expr: Pair<Rule>) -> Result<Vec<MapEntryExpr>> {
+fn parse_map_expression(
+    pc: &mut PlanningContext,
+    map_expr: Pair<Rule>,
+) -> Result<Vec<MapEntryExpr>> {
     let mut out = Vec::new();
     for pair in map_expr.into_inner() {
         match pair.as_rule() {
@@ -800,9 +818,7 @@ impl Expr {
             Expr::Map(children) => children
                 .iter()
                 .any(|c| c.val.is_aggregating(aggregating_funcs)),
-            Expr::List(children) => children
-                .iter()
-                .any(|v| v.is_aggregating(aggregating_funcs)),
+            Expr::List(children) => children.iter().any(|v| v.is_aggregating(aggregating_funcs)),
             Expr::FuncCall { name, args } => {
                 aggregating_funcs.contains(name)
                     || args.iter().any(|c| c.is_aggregating(aggregating_funcs))

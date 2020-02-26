@@ -14,8 +14,8 @@ use std::fs::File;
 
 use crate::frontend::Frontend;
 use backend::Backend;
-use std::cmp::Ordering::Less;
 use std::cmp::Ordering;
+use std::cmp::Ordering::Less;
 
 #[derive(Debug)]
 pub struct Database {
@@ -177,36 +177,36 @@ impl PartialOrd for Val {
                 Val::Float(other_v) => self_v.partial_cmp(&&(*other_v as i64)),
                 Val::List(other_v) => Some(Ordering::Greater),
                 Val::Null => None,
-                _ => panic!("Don't know how to compare {:?} to {:?}", self, other)
-            }
+                _ => panic!("Don't know how to compare {:?} to {:?}", self, other),
+            },
             Val::Float(self_v) => match other {
                 Val::String(_) => Some(Ordering::Greater),
                 Val::Int(other_v) => (*self_v).partial_cmp(&(*other_v as f64)),
                 Val::Float(other_v) => (*self_v).partial_cmp(other_v),
                 Val::List(other_v) => Some(Ordering::Greater),
                 Val::Null => None,
-                _ => panic!("Don't know how to compare {:?} to {:?}", self, other)
-            }
+                _ => panic!("Don't know how to compare {:?} to {:?}", self, other),
+            },
             Val::String(self_v) => match other {
                 Val::Int(_) => Some(Ordering::Less),
                 Val::Float(_) => Some(Ordering::Less),
                 Val::String(other_v) => self_v.partial_cmp(other_v),
                 Val::List(other_v) => Some(Ordering::Greater),
                 Val::Null => None,
-                _ => panic!("Don't know how to compare {:?} to {:?}", self, other)
-            }
+                _ => panic!("Don't know how to compare {:?} to {:?}", self, other),
+            },
             Val::List(self_v) => match other {
                 Val::String(_) => Some(Ordering::Less),
                 Val::Int(_) => Some(Ordering::Less),
                 Val::Float(_) => Some(Ordering::Less),
                 Val::List(other_v) => self_v.partial_cmp(other_v),
                 Val::Null => None,
-                _ => panic!("Don't know how to compare {:?} to {:?}", self, other)
-            }
+                _ => panic!("Don't know how to compare {:?} to {:?}", self, other),
+            },
             Val::Null => match other {
                 _ => None,
-            }
-            _ => panic!("Don't know how to compare {:?} to {:?}", self, other)
+            },
+            _ => panic!("Don't know how to compare {:?} to {:?}", self, other),
         }
     }
 }
@@ -220,7 +220,7 @@ impl Display for Val {
             Val::Node(id) => f.write_str(&format!("Node({})", id)),
             Val::Rel { node, rel_index } => f.write_str(&format!("Rel({}/{})", node, rel_index)),
             Val::Int(v) => f.write_str(&format!("{}", v)),
-            Val::Float(v) => f.write_str(&format!("{}", v))
+            Val::Float(v) => f.write_str(&format!("{}", v)),
         }
     }
 }

@@ -2,6 +2,7 @@
 // It is currently single threaded, and provides no data durability guarantees.
 
 use super::PreparedStatement;
+use crate::backend::gram::functions::AggregatingFuncSpec;
 use crate::backend::{BackendDesc, Token, Tokens};
 use crate::frontend::LogicalPlan;
 use crate::{frontend, Cursor, CursorState, Dir, Error, Row, Slot, Val};
@@ -16,7 +17,6 @@ use std::rc::Rc;
 use std::time::SystemTime;
 use uuid::v1::{Context as UuidContext, Timestamp};
 use uuid::Uuid;
-use crate::backend::gram::functions::{AggregatingFuncSpec};
 
 #[derive(Debug)]
 pub struct GramBackend {
@@ -95,26 +95,35 @@ impl GramBackend {
             }))),
             // TODO: unwrap selection for now, actually implement
             LogicalPlan::Selection { src, .. } => self.convert(src),
-            LogicalPlan::Aggregate { src, grouping: _, aggregations } => {
+            LogicalPlan::Aggregate {
+                src,
+                grouping: _,
+                aggregations,
+            } => {
                 let mut agg_exprs = Vec::new();
                 for (expr, slot) in aggregations {
-                    agg_exprs.push(AggregateEntry{ func: self.convert_aggregating_expr(expr), slot })
+                    agg_exprs.push(AggregateEntry {
+                        func: self.convert_aggregating_expr(expr),
+                        slot,
+                    })
                 }
-                Ok(Rc::new(RefCell::new(Aggregate{
+                Ok(Rc::new(RefCell::new(Aggregate {
                     src: self.convert(src)?,
                     aggregations: agg_exprs,
                     consumed: false,
                 })))
             }
-            LogicalPlan::Unwind { src, list_expr, alias } => {
-                Ok(Rc::new(RefCell::new(Unwind{
-                    src: self.convert(src)?,
-                    list_expr: self.convert_expr(list_expr),
-                    current_list: None,
-                    next_index: 0,
-                    dst: alias,
-                })))
-            }
+            LogicalPlan::Unwind {
+                src,
+                list_expr,
+                alias,
+            } => Ok(Rc::new(RefCell::new(Unwind {
+                src: self.convert(src)?,
+                list_expr: self.convert_expr(list_expr),
+                current_list: None,
+                next_index: 0,
+                dst: alias,
+            }))),
             LogicalPlan::Return { src, projections } => {
                 let mut converted_projections = Vec::new();
                 for projection in projections {
@@ -133,7 +142,10 @@ impl GramBackend {
         }
     }
 
-    fn convert_aggregating_expr(&self, expr: frontend::Expr) -> Box<dyn functions::AggregatingFunc> {
+    fn convert_aggregating_expr(
+        &self,
+        expr: frontend::Expr,
+    ) -> Box<dyn functions::AggregatingFunc> {
         match expr {
             frontend::Expr::FuncCall { name, args } => {
                 if let Some(f) = self.aggregators.get(&name) {
@@ -141,14 +153,14 @@ impl GramBackend {
                     for a in args {
                         arguments.push(self.convert_expr(a));
                     }
-                    return f.init(arguments)
+                    return f.init(arguments);
                 } else {
                     panic!(
                         "The gram backend doesn't support nesting regular functions with aggregates yet: {:?}",
                         name
                     )
                 }
-            },
+            }
             _ => panic!(
                 "The gram backend does not support this expression type yet: {:?}",
                 expr
@@ -167,7 +179,7 @@ impl GramBackend {
                     items.push(self.convert_expr(e));
                 }
                 Expr::List(items)
-            },
+            }
             _ => panic!(
                 "The gram backend does not support this expression type yet: {:?}",
                 expr
@@ -184,9 +196,9 @@ impl super::Backend for GramBackend {
     fn prepare(&self, logical_plan: Box<LogicalPlan>) -> Result<Box<dyn PreparedStatement>> {
         let mut slots = match &*logical_plan {
             LogicalPlan::Return { src, projections } => {
-                projections.iter().map(|p| (p.alias, p.dst) ).collect()
+                projections.iter().map(|p| (p.alias, p.dst)).collect()
             }
-            _ => Vec::new()
+            _ => Vec::new(),
         };
         let plan = self.convert(logical_plan)?;
         Ok(Box::new(Statement {
@@ -226,7 +238,8 @@ impl PreparedStatement for Statement {
             plan: self.plan.clone(),
             slots: self.slots.clone(),
         }));
-        if cursor.row.slots.len() < 16 { // TODO derive this from the logical plan
+        if cursor.row.slots.len() < 16 {
+            // TODO derive this from the logical plan
             cursor.row.slots.resize(16, Val::Null);
         }
         Ok(())
@@ -237,7 +250,7 @@ impl PreparedStatement for Statement {
 struct GramCursorState {
     ctx: Context,
     plan: Rc<RefCell<dyn Operator>>,
-    slots: Vec<(Token, Slot)>
+    slots: Vec<(Token, Slot)>,
 }
 
 impl CursorState for GramCursorState {
@@ -278,7 +291,7 @@ impl Expr {
                     .borrow()
                     .get_rel_prop(node, rel_index, *prop)
                     .unwrap_or(Val::Null),
-                v => panic!("Gram backend does not yet support {:?}", v)
+                v => panic!("Gram backend does not yet support {:?}", v),
             };
         }
         Ok(v)
@@ -417,7 +430,7 @@ struct Argument {
 impl Operator for Argument {
     fn next(&mut self, _ctx: &mut Context, _out: &mut Row) -> Result<bool> {
         if self.consumed {
-            return Ok(false)
+            return Ok(false);
         }
         self.consumed = true;
         return Ok(true);
@@ -499,7 +512,6 @@ impl Operator for Return {
     }
 }
 
-
 #[derive(Debug)]
 struct Aggregate {
     src: Rc<RefCell<dyn Operator>>,
@@ -518,7 +530,7 @@ struct AggregateEntry {
 impl Operator for Aggregate {
     fn next(&mut self, ctx: &mut Context, row: &mut Row) -> Result<bool> {
         if self.consumed {
-            return Ok(false)
+            return Ok(false);
         }
         let mut src = self.src.borrow_mut();
         while src.next(ctx, row)? {
@@ -532,7 +544,7 @@ impl Operator for Aggregate {
         }
 
         self.consumed = true;
-        return Ok(true)
+        return Ok(true);
     }
 }
 
@@ -557,7 +569,7 @@ impl Operator for Unwind {
 
                 match self.list_expr.eval(ctx, row)? {
                     Val::List(items) => self.current_list = Some(items),
-                    _ => return Err(anyhow!("UNWIND expression must yield a list"))
+                    _ => return Err(anyhow!("UNWIND expression must yield a list")),
                 }
                 self.next_index = 0;
             }
@@ -868,13 +880,13 @@ fn append_node(
 }
 
 mod functions {
-    use crate::backend::{FuncSignature, Tokens, FuncType};
-    use crate::backend::gram::{Expr, Context};
-    use crate::{Val, Row, Result, Type};
-    use std::fmt::Debug;
+    use crate::backend::gram::{Context, Expr};
+    use crate::backend::{FuncSignature, FuncType, Tokens};
+    use crate::{Result, Row, Type, Val};
     use core::fmt::Alignment::Left;
-    use std::cmp::Ordering::Less;
     use std::cmp::Ordering;
+    use std::cmp::Ordering::Less;
+    use std::fmt::Debug;
 
     pub(super) fn aggregating(tokens: &mut Tokens) -> Vec<Box<dyn AggregatingFuncSpec>> {
         let mut out: Vec<Box<dyn AggregatingFuncSpec>> = Default::default();
@@ -889,26 +901,26 @@ mod functions {
     }
 
     // A running aggregation in an executing query
-    pub(super) trait AggregatingFunc : Debug {
+    pub(super) trait AggregatingFunc: Debug {
         fn apply(&mut self, ctx: &mut Context, row: &mut Row) -> Result<()>;
         fn complete(&mut self) -> Result<&Val>;
     }
 
     #[derive(Debug)]
     struct MinSpec {
-        sig: FuncSignature
+        sig: FuncSignature,
     }
 
     impl MinSpec {
         pub fn new(tokens: &mut Tokens) -> MinSpec {
             let tok_min = tokens.tokenize("min");
-            MinSpec{
+            MinSpec {
                 sig: FuncSignature {
                     func_type: FuncType::Aggregating,
                     name: tok_min,
                     returns: Type::Any,
                     args: vec![(tokens.tokenize("v"), Type::Any)],
-                }
+                },
             }
         }
     }
@@ -919,14 +931,17 @@ mod functions {
         }
 
         fn init(&self, mut args: Vec<Expr>) -> Box<dyn AggregatingFunc> {
-            Box::new(Min{ arg: args.pop().expect("min takes 1 arg"), min: None })
+            Box::new(Min {
+                arg: args.pop().expect("min takes 1 arg"),
+                min: None,
+            })
         }
     }
 
     #[derive(Debug)]
     struct Min {
         arg: Expr,
-        min: Option<Val>
+        min: Option<Val>,
     }
 
     impl AggregatingFunc for Min {
@@ -934,7 +949,7 @@ mod functions {
             let v = self.arg.eval(ctx, row)?;
             if let Some(current_min) = &self.min {
                 if v == Val::Null {
-                    return Ok(())
+                    return Ok(());
                 }
                 if let Some(Ordering::Less) = v.partial_cmp(&current_min) {
                     self.min = Some(v);
@@ -947,28 +962,30 @@ mod functions {
 
         fn complete(&mut self) -> Result<&Val> {
             if let Some(v) = &self.min {
-                return Ok(v)
+                return Ok(v);
             } else {
-                Err(anyhow!("There were no input rows to the aggregation, cannot calculate min(..)"))
+                Err(anyhow!(
+                    "There were no input rows to the aggregation, cannot calculate min(..)"
+                ))
             }
         }
     }
 
     #[derive(Debug)]
     struct MaxSpec {
-        sig: FuncSignature
+        sig: FuncSignature,
     }
 
     impl MaxSpec {
         pub fn new(tokens: &mut Tokens) -> MaxSpec {
             let tok_max = tokens.tokenize("max");
-            MaxSpec{
+            MaxSpec {
                 sig: FuncSignature {
                     func_type: FuncType::Aggregating,
                     name: tok_max,
                     returns: Type::Any,
                     args: vec![(tokens.tokenize("v"), Type::Any)],
-                }
+                },
             }
         }
     }
@@ -980,14 +997,17 @@ mod functions {
 
         fn init(&self, mut args: Vec<Expr>) -> Box<dyn AggregatingFunc> {
             println!("Init max({:?})", args);
-            Box::new(Max{ arg: args.pop().expect("max takes 1 argument"), max: None })
+            Box::new(Max {
+                arg: args.pop().expect("max takes 1 argument"),
+                max: None,
+            })
         }
     }
 
     #[derive(Debug)]
     struct Max {
         arg: Expr,
-        max: Option<Val>
+        max: Option<Val>,
     }
 
     impl AggregatingFunc for Max {
@@ -995,7 +1015,7 @@ mod functions {
             let v = self.arg.eval(ctx, row)?;
             if let Some(current_max) = &self.max {
                 if v == Val::Null {
-                    return Ok(())
+                    return Ok(());
                 }
                 if let Some(Ordering::Greater) = v.partial_cmp(&current_max) {
                     self.max = Some(v);
@@ -1008,11 +1028,12 @@ mod functions {
 
         fn complete(&mut self) -> Result<&Val> {
             if let Some(v) = &self.max {
-                return Ok(v)
+                return Ok(v);
             } else {
-                Err(anyhow!("There were no input rows to the aggregation, cannot calculate min(..)"))
+                Err(anyhow!(
+                    "There were no input rows to the aggregation, cannot calculate min(..)"
+                ))
             }
         }
     }
-
 }
