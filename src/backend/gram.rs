@@ -17,7 +17,6 @@ use std::time::SystemTime;
 use uuid::v1::{Context as UuidContext, Timestamp};
 use uuid::Uuid;
 use crate::backend::gram::functions::{AggregatingFuncSpec};
-use std::slice::Iter;
 
 #[derive(Debug)]
 pub struct GramBackend {
@@ -131,7 +130,6 @@ impl GramBackend {
                     print_header: true,
                 })))
             }
-            _ => panic!("The gram backend does not yet handle {:?}", plan),
         }
     }
 
@@ -184,13 +182,18 @@ impl super::Backend for GramBackend {
     }
 
     fn prepare(&self, logical_plan: Box<LogicalPlan>) -> Result<Box<dyn PreparedStatement>> {
+        let mut slots = match &*logical_plan {
+            LogicalPlan::Return { src, projections } => {
+                projections.iter().map(|p| (p.alias, p.dst) ).collect()
+            }
+            _ => Vec::new()
+        };
         let plan = self.convert(logical_plan)?;
         Ok(Box::new(Statement {
             file: Rc::clone(&self.file),
             g: Rc::clone(&self.g),
             plan,
-            // TODO: pipe this knowledge through from logical plan
-            num_slots: 16,
+            slots,
         }))
     }
 
@@ -209,7 +212,8 @@ struct Statement {
     g: Rc<RefCell<Graph>>,
     file: Rc<RefCell<File>>,
     plan: Rc<RefCell<dyn Operator>>,
-    num_slots: usize,
+    // Order and name and slot of each entry returned (note that currently the output row contains internal values as well..)
+    slots: Vec<(Token, Slot)>,
 }
 
 impl PreparedStatement for Statement {
@@ -220,9 +224,10 @@ impl PreparedStatement for Statement {
                 file: Rc::clone(&self.file),
             },
             plan: self.plan.clone(),
+            slots: self.slots.clone(),
         }));
-        if cursor.row.slots.len() < self.num_slots {
-            cursor.row.slots.resize(self.num_slots, Val::Null);
+        if cursor.row.slots.len() < 16 { // TODO derive this from the logical plan
+            cursor.row.slots.resize(16, Val::Null);
         }
         Ok(())
     }
@@ -232,15 +237,16 @@ impl PreparedStatement for Statement {
 struct GramCursorState {
     ctx: Context,
     plan: Rc<RefCell<dyn Operator>>,
+    slots: Vec<(Token, Slot)>
 }
 
 impl CursorState for GramCursorState {
-    fn slot_names(&self) -> Vec<&str> {
-        unimplemented!()
-    }
-
     fn next(&mut self, row: &mut Row) -> Result<bool> {
         self.plan.borrow_mut().next(&mut self.ctx, row)
+    }
+
+    fn slot_index(&self, index: usize) -> usize {
+        self.slots[index].1
     }
 }
 
@@ -517,7 +523,7 @@ impl Operator for Aggregate {
         let mut src = self.src.borrow_mut();
         while src.next(ctx, row)? {
             for agge in &mut self.aggregations {
-                agge.func.apply(ctx, row);
+                agge.func.apply(ctx, row)?;
             }
         }
 
@@ -866,6 +872,9 @@ mod functions {
     use crate::backend::gram::{Expr, Context};
     use crate::{Val, Row, Result, Type};
     use std::fmt::Debug;
+    use core::fmt::Alignment::Left;
+    use std::cmp::Ordering::Less;
+    use std::cmp::Ordering;
 
     pub(super) fn aggregating(tokens: &mut Tokens) -> Vec<Box<dyn AggregatingFuncSpec>> {
         let mut out: Vec<Box<dyn AggregatingFuncSpec>> = Default::default();
@@ -923,8 +932,11 @@ mod functions {
     impl AggregatingFunc for Min {
         fn apply(&mut self, ctx: &mut Context, row: &mut Row) -> Result<()> {
             let v = self.arg.eval(ctx, row)?;
-            if let Some(m) = &self.min {
-                if v.less(m)? {
+            if let Some(current_min) = &self.min {
+                if v == Val::Null {
+                    return Ok(())
+                }
+                if let Some(Ordering::Less) = v.partial_cmp(&current_min) {
                     self.min = Some(v);
                 }
             } else {
@@ -981,8 +993,11 @@ mod functions {
     impl AggregatingFunc for Max {
         fn apply(&mut self, ctx: &mut Context, row: &mut Row) -> Result<()> {
             let v = self.arg.eval(ctx, row)?;
-            if let Some(m) = &self.max {
-                if m.less(&v)? {
+            if let Some(current_max) = &self.max {
+                if v == Val::Null {
+                    return Ok(())
+                }
+                if let Some(Ordering::Greater) = v.partial_cmp(&current_max) {
                     self.max = Some(v);
                 }
             } else {

@@ -14,6 +14,8 @@ use std::fs::File;
 
 use crate::frontend::Frontend;
 use backend::Backend;
+use std::cmp::Ordering::Less;
+use std::cmp::Ordering;
 
 #[derive(Debug)]
 pub struct Database {
@@ -47,8 +49,17 @@ impl Database {
 
 // Backends provide this
 pub trait CursorState: Debug {
-    fn slot_names(&self) -> Vec<&str>;
     fn next(&mut self, row: &mut Row) -> Result<bool>;
+    // Convert a column index (as specified by the ordering in RETURN ..) to a slot in row;
+    // this is a side-effect of us also keeping temporary values in the row struct, so the
+    // mapping is not (currently) 1-1. You could make an argument that we should fix this
+    // by reorganizing slot assignments in the planner once it plans RETURN, so those outputs
+    // go in the right places. That also ties into the planner being smart enough to reuse
+    // slots that are no longer needed in different parts of the pipeline..
+    //
+    // Another alternative is to have each operator own it's own Row instance, copying values out
+    // to an output row?
+    fn slot_index(&self, index: usize) -> usize;
 }
 
 // Cursors are like iterators, except they don't require malloc for each row; the row you read is
@@ -64,17 +75,18 @@ impl Cursor {
         Cursor::default()
     }
 
-    // Number of slots in the rows this cursor yields
-    pub fn slot_names(&self) -> Option<Vec<&str>> {
-        self.state.map(|state| state.slot_names())
-    }
-
     #[allow(clippy::should_implement_trait)]
     pub fn next(&mut self) -> Result<bool> {
         match &mut self.state {
             Some(state) => state.next(&mut self.row),
             None => panic!("Use of uninitialized cursor"),
         }
+    }
+
+    pub fn get(&self, index: usize) -> &Val {
+        // Sorry this is a giant mess lol
+        let slot = self.state.as_ref().unwrap().slot_index(index);
+        &self.row.slots[slot]
     }
 }
 
@@ -154,15 +166,47 @@ impl Val {
             ),
         }
     }
+}
 
-    // Is this val less than other? May fail if we don't know how to compare values.
-    pub fn less(&self, other: &Val) -> Result<bool> {
+impl PartialOrd for Val {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
         match self {
             Val::Int(self_v) => match other {
-                Val::Int(other_v) => Ok(self_v < other_v),
-                _ => Err(anyhow!("Don't know how to compare {:?} to {:?}", self, other))
+                Val::String(_) => Some(Ordering::Greater),
+                Val::Int(other_v) => self_v.partial_cmp(other_v),
+                Val::Float(other_v) => self_v.partial_cmp(&&(*other_v as i64)),
+                Val::List(other_v) => Some(Ordering::Greater),
+                Val::Null => None,
+                _ => panic!("Don't know how to compare {:?} to {:?}", self, other)
             }
-            _ => Err(anyhow!("Don't know how to compare {:?} to {:?}", self, other))
+            Val::Float(self_v) => match other {
+                Val::String(_) => Some(Ordering::Greater),
+                Val::Int(other_v) => (*self_v).partial_cmp(&(*other_v as f64)),
+                Val::Float(other_v) => (*self_v).partial_cmp(other_v),
+                Val::List(other_v) => Some(Ordering::Greater),
+                Val::Null => None,
+                _ => panic!("Don't know how to compare {:?} to {:?}", self, other)
+            }
+            Val::String(self_v) => match other {
+                Val::Int(_) => Some(Ordering::Less),
+                Val::Float(_) => Some(Ordering::Less),
+                Val::String(other_v) => self_v.partial_cmp(other_v),
+                Val::List(other_v) => Some(Ordering::Greater),
+                Val::Null => None,
+                _ => panic!("Don't know how to compare {:?} to {:?}", self, other)
+            }
+            Val::List(self_v) => match other {
+                Val::String(_) => Some(Ordering::Less),
+                Val::Int(_) => Some(Ordering::Less),
+                Val::Float(_) => Some(Ordering::Less),
+                Val::List(other_v) => self_v.partial_cmp(other_v),
+                Val::Null => None,
+                _ => panic!("Don't know how to compare {:?} to {:?}", self, other)
+            }
+            Val::Null => match other {
+                _ => None,
+            }
+            _ => panic!("Don't know how to compare {:?} to {:?}", self, other)
         }
     }
 }

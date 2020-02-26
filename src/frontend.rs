@@ -158,6 +158,7 @@ pub enum Predicate {
 pub struct Projection {
     pub expr: Expr,
     pub alias: Token,
+    pub dst: Slot,
 }
 
 #[derive(Debug)]
@@ -329,9 +330,11 @@ fn plan_return(pc: &mut PlanningContext, src: LogicalPlan, return_stmt: Pair<Rul
     // the user asked values to be returned in
     let mut aggregation_projections = Vec::new();
     for projection in projections {
+        let agg_projection_slot = pc.get_or_alloc_slot(projection.alias);
         aggregation_projections.push(Projection {
-            expr: Expr::Slot(pc.get_or_alloc_slot(projection.alias)),
+            expr: Expr::Slot(agg_projection_slot),
             alias: projection.alias,
+            dst: agg_projection_slot,
         });
         if projection.expr.is_aggregating(&pc.backend_desc.aggregates) {
             aggregations.push((projection.expr, pc.get_or_alloc_slot(projection.alias)));
@@ -371,7 +374,13 @@ fn plan_return_projections(
                     _ => None,
                 })
                 .unwrap_or_else(|| pc.tokenize(default_alias));
-            out.push(Projection { expr, alias });
+            out.push(Projection { expr,
+                alias,
+                // TODO note that this adds a bunch of unecessary copying in cases where we use
+                //      projections that just rename stuff (eg. WITH blah as x); we should
+                //      consider making expr in Projection Optional, so it can be used for pure
+                //      renaming, is benchmarking shows that's helpful.
+                dst: pc.get_or_alloc_slot(alias) });
         }
     }
     Ok((contains_aggregations, out))
@@ -907,7 +916,8 @@ mod tests {
                     }),
                     projections: vec![Projection {
                         expr: Expr::Slot(p.slot(col_count_n)),
-                        alias: col_count_n
+                        alias: col_count_n,
+                        dst: p.slot(col_count_n),
                     }]
                 }
             );
@@ -941,7 +951,8 @@ mod tests {
                     }),
                     projections: vec![Projection {
                         expr: Expr::Slot(p.slot(col_count_n)),
-                        alias: col_count_n
+                        alias: col_count_n,
+                        dst: p.slot(col_count_n),
                     }]
                 }
             );
@@ -993,15 +1004,18 @@ mod tests {
                     projections: vec![
                         Projection {
                             expr: Expr::Slot(p.slot(col_n_age)),
-                            alias: col_n_age
+                            alias: col_n_age,
+                            dst: p.slot(col_n_age),
                         },
                         Projection {
                             expr: Expr::Slot(p.slot(col_n_occupation)),
-                            alias: col_n_occupation
+                            alias: col_n_occupation,
+                            dst: p.slot(col_n_occupation),
                         },
                         Projection {
                             expr: Expr::Slot(p.slot(col_count_n)),
-                            alias: col_count_n
+                            alias: col_count_n,
+                            dst: p.slot(col_count_n),
                         },
                     ]
                 }
