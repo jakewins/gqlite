@@ -14,6 +14,7 @@ use std::fs::File;
 
 use crate::frontend::Frontend;
 use backend::Backend;
+use std::cmp::Ordering;
 
 #[derive(Debug)]
 pub struct Database {
@@ -48,6 +49,16 @@ impl Database {
 // Backends provide this
 pub trait CursorState: Debug {
     fn next(&mut self, row: &mut Row) -> Result<bool>;
+    // Convert a column index (as specified by the ordering in RETURN ..) to a slot in row;
+    // this is a side-effect of us also keeping temporary values in the row struct, so the
+    // mapping is not (currently) 1-1. You could make an argument that we should fix this
+    // by reorganizing slot assignments in the planner once it plans RETURN, so those outputs
+    // go in the right places. That also ties into the planner being smart enough to reuse
+    // slots that are no longer needed in different parts of the pipeline..
+    //
+    // Another alternative is to have each operator own it's own Row instance, copying values out
+    // to an output row?
+    fn slot_index(&self, index: usize) -> usize;
 }
 
 // Cursors are like iterators, except they don't require malloc for each row; the row you read is
@@ -69,6 +80,12 @@ impl Cursor {
             Some(state) => state.next(&mut self.row),
             None => panic!("Use of uninitialized cursor"),
         }
+    }
+
+    pub fn get(&self, index: usize) -> &Val {
+        // Sorry this is a giant mess lol
+        let slot = self.state.as_ref().unwrap().slot_index(index);
+        &self.row.slots[slot]
     }
 }
 
@@ -95,7 +112,7 @@ pub struct Row {
 pub type Slot = usize;
 
 // openCypher 9 enumeration of types
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum Type {
     // This is not a documented part of the openCypher type system, but.. well I'm not sure how
     // else we represent the arguments to a function like count(..).
@@ -124,6 +141,9 @@ pub enum Type {
 pub enum Val {
     Null,
     String(String),
+    List(Vec<Val>),
+    Int(i64),
+    Float(f64),
     Node(usize),
     Rel { node: usize, rel_index: usize },
 }
@@ -147,13 +167,59 @@ impl Val {
     }
 }
 
+impl PartialOrd for Val {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        match self {
+            Val::Int(self_v) => match other {
+                Val::String(_) => Some(Ordering::Greater),
+                Val::Int(other_v) => self_v.partial_cmp(other_v),
+                Val::Float(other_v) => self_v.partial_cmp(&&(*other_v as i64)),
+                Val::List(_) => Some(Ordering::Greater),
+                Val::Null => None,
+                _ => panic!("Don't know how to compare {:?} to {:?}", self, other),
+            },
+            Val::Float(self_v) => match other {
+                Val::String(_) => Some(Ordering::Greater),
+                Val::Int(other_v) => (*self_v).partial_cmp(&(*other_v as f64)),
+                Val::Float(other_v) => (*self_v).partial_cmp(other_v),
+                Val::List(_) => Some(Ordering::Greater),
+                Val::Null => None,
+                _ => panic!("Don't know how to compare {:?} to {:?}", self, other),
+            },
+            Val::String(self_v) => match other {
+                Val::Int(_) => Some(Ordering::Less),
+                Val::Float(_) => Some(Ordering::Less),
+                Val::String(other_v) => self_v.partial_cmp(other_v),
+                Val::List(_) => Some(Ordering::Greater),
+                Val::Null => None,
+                _ => panic!("Don't know how to compare {:?} to {:?}", self, other),
+            },
+            Val::List(self_v) => match other {
+                Val::String(_) => Some(Ordering::Less),
+                Val::Int(_) => Some(Ordering::Less),
+                Val::Float(_) => Some(Ordering::Less),
+                Val::List(other_v) => self_v.partial_cmp(other_v),
+                Val::Null => None,
+                _ => panic!("Don't know how to compare {:?} to {:?}", self, other),
+            },
+            Val::Null => match other {
+                _ => None,
+            },
+            _ => panic!("Don't know how to compare {:?} to {:?}", self, other),
+        }
+    }
+}
+
 impl Display for Val {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         match self {
             Val::Null => f.write_str("NULL"),
             Val::String(s) => f.write_str(&s),
+            Val::List(vs) => f.write_str(&format!("{:?}", vs)),
             Val::Node(id) => f.write_str(&format!("Node({})", id)),
             Val::Rel { node, rel_index } => f.write_str(&format!("Rel({}/{})", node, rel_index)),
+            Val::Int(v) => f.write_str(&format!("{}", v)),
+            Val::Float(v) => f.write_str(&format!("{}", v)),
         }
     }
 }

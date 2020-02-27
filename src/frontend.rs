@@ -55,11 +55,14 @@ impl Frontend {
                 Rule::match_stmt => {
                     plan = plan_match(pc, plan, stmt)?;
                 }
+                Rule::unwind_stmt => {
+                    plan = plan_unwind(pc, plan, stmt)?;
+                }
                 Rule::create_stmt => {
                     plan = plan_create(pc, plan, stmt)?;
                 }
                 Rule::return_stmt => {
-                    plan = plan_return(pc, plan, stmt);
+                    plan = plan_return(pc, plan, stmt)?;
                 }
                 Rule::EOI => (),
                 _ => unreachable!(),
@@ -119,6 +122,11 @@ pub enum LogicalPlan {
         // "Please evaluate the aggregating expr and output the final accumulation in Slot"
         aggregations: Vec<(Expr, Slot)>,
     },
+    Unwind {
+        src: Box<Self>,
+        list_expr: Expr,
+        alias: Slot,
+    },
     Return {
         src: Box<Self>,
         projections: Vec<Projection>,
@@ -150,6 +158,7 @@ pub enum Predicate {
 pub struct Projection {
     pub expr: Expr,
     pub alias: Token,
+    pub dst: Slot,
 }
 
 #[derive(Debug)]
@@ -277,18 +286,46 @@ pub struct RelSpec {
     props: Vec<MapEntryExpr>,
 }
 
-fn plan_return(pc: &mut PlanningContext, src: LogicalPlan, return_stmt: Pair<Rule>) -> LogicalPlan {
+fn plan_unwind(
+    pc: &mut PlanningContext,
+    src: LogicalPlan,
+    unwind_stmt: Pair<Rule>,
+) -> Result<LogicalPlan> {
+    let mut parts = unwind_stmt.into_inner();
+
+    let list_item = parts.next().expect("UNWIND must contain a list expression");
+    let list_expr = plan_expr(pc, list_item)?;
+    let alias_token = pc.tokenize(
+        parts
+            .next()
+            .expect("UNWIND must contain an AS alias")
+            .as_str(),
+    );
+    let alias = pc.get_or_alloc_slot(alias_token);
+
+    return Ok(LogicalPlan::Unwind {
+        src: Box::new(src),
+        list_expr,
+        alias,
+    });
+}
+
+fn plan_return(
+    pc: &mut PlanningContext,
+    src: LogicalPlan,
+    return_stmt: Pair<Rule>,
+) -> Result<LogicalPlan> {
     let mut parts = return_stmt.into_inner();
 
     let (is_aggregate, projections) = parts
         .next()
         .map(|p| plan_return_projections(pc, p))
-        .expect("RETURN must start with projections");
+        .expect("RETURN must start with projections")?;
     if !is_aggregate {
-        return LogicalPlan::Return {
+        return Ok(LogicalPlan::Return {
             src: Box::new(src),
             projections,
-        };
+        });
     }
 
     // Split the projections into groupings and aggregating projections, so in a statement like
@@ -306,9 +343,11 @@ fn plan_return(pc: &mut PlanningContext, src: LogicalPlan, return_stmt: Pair<Rul
     // the user asked values to be returned in
     let mut aggregation_projections = Vec::new();
     for projection in projections {
+        let agg_projection_slot = pc.get_or_alloc_slot(projection.alias);
         aggregation_projections.push(Projection {
-            expr: Expr::Slot(pc.get_or_alloc_slot(projection.alias)),
+            expr: Expr::Slot(agg_projection_slot),
             alias: projection.alias,
+            dst: agg_projection_slot,
         });
         if projection.expr.is_aggregating(&pc.backend_desc.aggregates) {
             aggregations.push((projection.expr, pc.get_or_alloc_slot(projection.alias)));
@@ -317,28 +356,28 @@ fn plan_return(pc: &mut PlanningContext, src: LogicalPlan, return_stmt: Pair<Rul
         }
     }
 
-    LogicalPlan::Return {
+    Ok(LogicalPlan::Return {
         src: Box::new(LogicalPlan::Aggregate {
             src: Box::new(src),
             grouping,
             aggregations,
         }),
         projections: aggregation_projections,
-    }
+    })
 }
 
 // The bool return here is nasty, refactor, maybe make into a struct?
 fn plan_return_projections(
     pc: &mut PlanningContext,
     projections: Pair<Rule>,
-) -> (bool, Vec<Projection>) {
+) -> Result<(bool, Vec<Projection>)> {
     let mut out = Vec::new();
     let mut contains_aggregations = false;
     for projection in projections.into_inner() {
         if let Rule::projection = projection.as_rule() {
             let default_alias = projection.as_str();
             let mut parts = projection.into_inner();
-            let expr = parts.next().map(|p| plan_expr(pc, p)).unwrap();
+            let expr = parts.next().map(|p| plan_expr(pc, p)).unwrap()?;
             contains_aggregations =
                 contains_aggregations || expr.is_aggregating(&pc.backend_desc.aggregates);
             let alias = parts
@@ -348,13 +387,21 @@ fn plan_return_projections(
                     _ => None,
                 })
                 .unwrap_or_else(|| pc.tokenize(default_alias));
-            out.push(Projection { expr, alias });
+            out.push(Projection {
+                expr,
+                alias,
+                // TODO note that this adds a bunch of unecessary copying in cases where we use
+                //      projections that just rename stuff (eg. WITH blah as x); we should
+                //      consider making expr in Projection Optional, so it can be used for pure
+                //      renaming, is benchmarking shows that's helpful.
+                dst: pc.get_or_alloc_slot(alias),
+            });
         }
     }
-    (contains_aggregations, out)
+    Ok((contains_aggregations, out))
 }
 
-fn plan_expr(pc: &mut PlanningContext, expression: Pair<Rule>) -> Expr {
+fn plan_expr(pc: &mut PlanningContext, expression: Pair<Rule>) -> Result<Expr> {
     for inner in expression.into_inner() {
         match inner.as_rule() {
             Rule::string => {
@@ -363,11 +410,11 @@ fn plan_expr(pc: &mut PlanningContext, expression: Pair<Rule>) -> Expr {
                     .next()
                     .expect("Strings should always have an inner value")
                     .as_str();
-                return Expr::Lit(Val::String(String::from(content)));
+                return Ok(Expr::Lit(Val::String(String::from(content))));
             }
             Rule::id => {
                 let tok = pc.tokenize(inner.as_str());
-                return Expr::Slot(pc.get_or_alloc_slot(tok));
+                return Ok(Expr::Slot(pc.get_or_alloc_slot(tok)));
             }
             Rule::prop_lookup => {
                 let mut prop_lookup = inner.into_inner();
@@ -385,7 +432,7 @@ fn plan_expr(pc: &mut PlanningContext, expression: Pair<Rule>) -> Expr {
                         props.push(pc.tokenize(p_inner.as_str()));
                     }
                 }
-                return Expr::Prop(Box::new(base), props);
+                return Ok(Expr::Prop(Box::new(base), props));
             }
             Rule::func_call => {
                 let mut func_call = inner.into_inner();
@@ -396,9 +443,25 @@ fn plan_expr(pc: &mut PlanningContext, expression: Pair<Rule>) -> Expr {
                 // Parse args
                 let mut args = Vec::new();
                 for arg in func_call {
-                    args.push(plan_expr(pc, arg));
+                    args.push(plan_expr(pc, arg)?);
                 }
-                return Expr::FuncCall { name, args };
+                return Ok(Expr::FuncCall { name, args });
+            }
+            Rule::list => {
+                let mut items = Vec::new();
+                let exprs = inner.into_inner();
+                for exp in exprs {
+                    items.push(plan_expr(pc, exp)?);
+                }
+                return Ok(Expr::List(items));
+            }
+            Rule::int => {
+                let v = inner.as_str().parse::<i64>()?;
+                return Ok(Expr::Lit(Val::Int(v)));
+            }
+            Rule::float => {
+                let v = inner.as_str().parse::<f64>()?;
+                return Ok(Expr::Lit(Val::Float(v)));
             }
             _ => panic!(String::from(inner.as_str())),
         }
@@ -602,7 +665,7 @@ fn parse_pattern_graph(pc: &mut PlanningContext, patterns: Pair<Rule>) -> Result
                 for segment in part.into_inner() {
                     match segment.as_rule() {
                         Rule::node => {
-                            let prior_node = parse_pattern_node(pc, segment);
+                            let prior_node = parse_pattern_node(pc, segment)?;
                             prior_node_id = Some(prior_node.identifier);
                             pg.merge_node(prior_node);
                             if let Some(mut rel) = prior_rel {
@@ -631,7 +694,7 @@ fn parse_pattern_graph(pc: &mut PlanningContext, patterns: Pair<Rule>) -> Result
 }
 
 // Figures out what step we need to find the specified node
-fn parse_pattern_node(pc: &mut PlanningContext, pattern_node: Pair<Rule>) -> PatternNode {
+fn parse_pattern_node(pc: &mut PlanningContext, pattern_node: Pair<Rule>) -> Result<PatternNode> {
     let mut identifier = None;
     let mut labels = Vec::new();
     let mut props = Vec::new();
@@ -644,7 +707,7 @@ fn parse_pattern_node(pc: &mut PlanningContext, pattern_node: Pair<Rule>) -> Pat
                 }
             }
             Rule::map => {
-                props = parse_map_expression(pc, part);
+                props = parse_map_expression(pc, part)?;
             }
             _ => panic!("don't know how to handle: {}", part),
         }
@@ -654,12 +717,12 @@ fn parse_pattern_node(pc: &mut PlanningContext, pattern_node: Pair<Rule>) -> Pat
     labels.sort_unstable();
     labels.dedup();
 
-    PatternNode {
+    Ok(PatternNode {
         identifier: id,
         labels,
         props,
         solved: false,
-    }
+    })
 }
 
 fn parse_pattern_rel(
@@ -683,7 +746,7 @@ fn parse_pattern_rel(
                 dir = Some(Dir::Out)
             }
             Rule::map => {
-                props = parse_map_expression(pc, part);
+                props = parse_map_expression(pc, part)?;
             }
             _ => unreachable!(),
         }
@@ -702,7 +765,10 @@ fn parse_pattern_rel(
     })
 }
 
-fn parse_map_expression(pc: &mut PlanningContext, map_expr: Pair<Rule>) -> Vec<MapEntryExpr> {
+fn parse_map_expression(
+    pc: &mut PlanningContext,
+    map_expr: Pair<Rule>,
+) -> Result<Vec<MapEntryExpr>> {
     let mut out = Vec::new();
     for pair in map_expr.into_inner() {
         match pair.as_rule() {
@@ -716,7 +782,7 @@ fn parse_map_expression(pc: &mut PlanningContext, map_expr: Pair<Rule>) -> Vec<M
                 let expr_token = pair_iter
                     .next()
                     .expect("Map pair must contain an expression");
-                let expr = plan_expr(pc, expr_token);
+                let expr = plan_expr(pc, expr_token)?;
                 out.push(MapEntryExpr {
                     key: identifier,
                     val: expr,
@@ -725,7 +791,7 @@ fn parse_map_expression(pc: &mut PlanningContext, map_expr: Pair<Rule>) -> Vec<M
             _ => unreachable!(),
         }
     }
-    out
+    Ok(out)
 }
 
 #[derive(Debug, PartialEq)]
@@ -737,6 +803,8 @@ pub enum Expr {
     // Map expressions differ from eg. Lit(Val::Map) in that they can have expressions as
     // values, like `{ name: trim_spaces(n.name) }`, and evaluate to Val maps.
     Map(Vec<MapEntryExpr>),
+    // Same as map expressions in that they differ from List(Val::List) in having nested exprs
+    List(Vec<Expr>),
     FuncCall { name: Token, args: Vec<Expr> },
 }
 
@@ -750,6 +818,7 @@ impl Expr {
             Expr::Map(children) => children
                 .iter()
                 .any(|c| c.val.is_aggregating(aggregating_funcs)),
+            Expr::List(children) => children.iter().any(|v| v.is_aggregating(aggregating_funcs)),
             Expr::FuncCall { name, args } => {
                 aggregating_funcs.contains(name)
                     || args.iter().any(|c| c.is_aggregating(aggregating_funcs))
@@ -863,7 +932,8 @@ mod tests {
                     }),
                     projections: vec![Projection {
                         expr: Expr::Slot(p.slot(col_count_n)),
-                        alias: col_count_n
+                        alias: col_count_n,
+                        dst: p.slot(col_count_n),
                     }]
                 }
             );
@@ -897,7 +967,8 @@ mod tests {
                     }),
                     projections: vec![Projection {
                         expr: Expr::Slot(p.slot(col_count_n)),
-                        alias: col_count_n
+                        alias: col_count_n,
+                        dst: p.slot(col_count_n),
                     }]
                 }
             );
@@ -949,15 +1020,18 @@ mod tests {
                     projections: vec![
                         Projection {
                             expr: Expr::Slot(p.slot(col_n_age)),
-                            alias: col_n_age
+                            alias: col_n_age,
+                            dst: p.slot(col_n_age),
                         },
                         Projection {
                             expr: Expr::Slot(p.slot(col_n_occupation)),
-                            alias: col_n_occupation
+                            alias: col_n_occupation,
+                            dst: p.slot(col_n_occupation),
                         },
                         Projection {
                             expr: Expr::Slot(p.slot(col_count_n)),
-                            alias: col_count_n
+                            alias: col_count_n,
+                            dst: p.slot(col_count_n),
                         },
                     ]
                 }
@@ -1023,6 +1097,31 @@ mod tests {
                     }),
                     slot: p.slot(id_o),
                     predicate: Predicate::HasLabel(lbl_person)
+                }
+            );
+            Ok(())
+        }
+    }
+
+    mod unwind {
+        use crate::frontend::tests::plan;
+        use crate::frontend::{Expr, LogicalPlan};
+        use crate::{Error, Val};
+
+        #[test]
+        fn plan_unwind() -> Result<(), Error> {
+            let mut p = plan("UNWIND [[1], [2, 1.0]] AS x")?;
+
+            let id_x = p.tokenize("x");
+            assert_eq!(
+                p.plan,
+                LogicalPlan::Unwind {
+                    src: Box::new(LogicalPlan::Argument),
+                    list_expr: Expr::List(vec![
+                        Expr::List(vec![Expr::Lit(Val::Int(1))]),
+                        Expr::List(vec![Expr::Lit(Val::Int(2)), Expr::Lit(Val::Float(1.0))]),
+                    ]),
+                    alias: p.slot(id_x),
                 }
             );
             Ok(())

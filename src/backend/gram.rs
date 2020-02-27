@@ -2,9 +2,10 @@
 // It is currently single threaded, and provides no data durability guarantees.
 
 use super::PreparedStatement;
-use crate::backend::{BackendDesc, FuncSignature, FuncType, Token, Tokens};
+use crate::backend::gram::functions::AggregatingFuncSpec;
+use crate::backend::{BackendDesc, Token, Tokens};
 use crate::frontend::LogicalPlan;
-use crate::{frontend, Cursor, CursorState, Dir, Error, Row, Slot, Type, Val};
+use crate::{frontend, Cursor, CursorState, Dir, Error, Row, Slot, Val};
 use anyhow::Result;
 use rand::Rng;
 use std::cell::RefCell;
@@ -22,6 +23,7 @@ pub struct GramBackend {
     tokens: Rc<RefCell<Tokens>>,
     g: Rc<RefCell<Graph>>,
     file: Rc<RefCell<File>>,
+    aggregators: HashMap<Token, Box<dyn AggregatingFuncSpec>>,
 }
 
 impl GramBackend {
@@ -31,16 +33,22 @@ impl GramBackend {
         };
         let g = parser::load(&mut tokens, &mut file)?;
 
+        let mut aggregators = HashMap::new();
+        for agg in functions::aggregating(&mut tokens) {
+            aggregators.insert(agg.signature().name, agg);
+        }
+
         Ok(GramBackend {
             tokens: Rc::new(RefCell::new(tokens)),
             g: Rc::new(RefCell::new(g)),
             file: Rc::new(RefCell::new(file)),
+            aggregators,
         })
     }
 
     fn convert(&self, plan: Box<LogicalPlan>) -> Result<Rc<RefCell<dyn Operator>>, Error> {
         match *plan {
-            LogicalPlan::Argument => Ok(Rc::new(RefCell::new(Argument {}))),
+            LogicalPlan::Argument => Ok(Rc::new(RefCell::new(Argument { consumed: false }))),
             LogicalPlan::NodeScan { src, slot, labels } => Ok(Rc::new(RefCell::new(NodeScan {
                 src: self.convert(src)?,
                 next_node: 0,
@@ -87,6 +95,35 @@ impl GramBackend {
             }))),
             // TODO: unwrap selection for now, actually implement
             LogicalPlan::Selection { src, .. } => self.convert(src),
+            LogicalPlan::Aggregate {
+                src,
+                grouping: _,
+                aggregations,
+            } => {
+                let mut agg_exprs = Vec::new();
+                for (expr, slot) in aggregations {
+                    agg_exprs.push(AggregateEntry {
+                        func: self.convert_aggregating_expr(expr),
+                        slot,
+                    })
+                }
+                Ok(Rc::new(RefCell::new(Aggregate {
+                    src: self.convert(src)?,
+                    aggregations: agg_exprs,
+                    consumed: false,
+                })))
+            }
+            LogicalPlan::Unwind {
+                src,
+                list_expr,
+                alias,
+            } => Ok(Rc::new(RefCell::new(Unwind {
+                src: self.convert(src)?,
+                list_expr: self.convert_expr(list_expr),
+                current_list: None,
+                next_index: 0,
+                dst: alias,
+            }))),
             LogicalPlan::Return { src, projections } => {
                 let mut converted_projections = Vec::new();
                 for projection in projections {
@@ -102,7 +139,32 @@ impl GramBackend {
                     print_header: true,
                 })))
             }
-            _ => panic!("The gram backend does not yet handle {:?}", plan),
+        }
+    }
+
+    fn convert_aggregating_expr(
+        &self,
+        expr: frontend::Expr,
+    ) -> Box<dyn functions::AggregatingFunc> {
+        match expr {
+            frontend::Expr::FuncCall { name, args } => {
+                if let Some(f) = self.aggregators.get(&name) {
+                    let mut arguments = Vec::new();
+                    for a in args {
+                        arguments.push(self.convert_expr(a));
+                    }
+                    return f.init(arguments);
+                } else {
+                    panic!(
+                        "The gram backend doesn't support nesting regular functions with aggregates yet: {:?}",
+                        name
+                    )
+                }
+            }
+            _ => panic!(
+                "The gram backend does not support this expression type yet: {:?}",
+                expr
+            ),
         }
     }
 
@@ -111,6 +173,13 @@ impl GramBackend {
             frontend::Expr::Lit(v) => Expr::Lit(v),
             frontend::Expr::Prop(e, props) => Expr::Prop(Box::new(self.convert_expr(*e)), props),
             frontend::Expr::Slot(s) => Expr::Slot(s),
+            frontend::Expr::List(es) => {
+                let mut items = Vec::with_capacity(es.len());
+                for e in es {
+                    items.push(self.convert_expr(e));
+                }
+                Expr::List(items)
+            }
             _ => panic!(
                 "The gram backend does not support this expression type yet: {:?}",
                 expr
@@ -125,25 +194,29 @@ impl super::Backend for GramBackend {
     }
 
     fn prepare(&self, logical_plan: Box<LogicalPlan>) -> Result<Box<dyn PreparedStatement>> {
+        let slots = match &*logical_plan {
+            LogicalPlan::Return {
+                src: _,
+                projections,
+            } => projections.iter().map(|p| (p.alias, p.dst)).collect(),
+            _ => Vec::new(),
+        };
         let plan = self.convert(logical_plan)?;
         Ok(Box::new(Statement {
             file: Rc::clone(&self.file),
             g: Rc::clone(&self.g),
             plan,
-            // TODO: pipe this knowledge through from logical plan
-            num_slots: 16,
+            slots,
         }))
     }
 
     fn describe(&self) -> Result<BackendDesc, Error> {
-        let tok_count = self.tokens.borrow_mut().tokenize("count");
-        let tok_expr = self.tokens.borrow_mut().tokenize("expr");
-        Ok(BackendDesc::new(vec![FuncSignature {
-            func_type: FuncType::Scalar,
-            name: tok_count,
-            returns: Type::Number,
-            args: vec![(tok_expr, Type::Any)],
-        }]))
+        let mut functions = Vec::new();
+        for agg in self.aggregators.values() {
+            functions.push(agg.signature().clone())
+        }
+
+        Ok(BackendDesc::new(functions))
     }
 }
 
@@ -152,7 +225,8 @@ struct Statement {
     g: Rc<RefCell<Graph>>,
     file: Rc<RefCell<File>>,
     plan: Rc<RefCell<dyn Operator>>,
-    num_slots: usize,
+    // Order and name and slot of each entry returned (note that currently the output row contains internal values as well..)
+    slots: Vec<(Token, Slot)>,
 }
 
 impl PreparedStatement for Statement {
@@ -163,9 +237,11 @@ impl PreparedStatement for Statement {
                 file: Rc::clone(&self.file),
             },
             plan: self.plan.clone(),
+            slots: self.slots.clone(),
         }));
-        if cursor.row.slots.len() < self.num_slots {
-            cursor.row.slots.resize(self.num_slots, Val::Null);
+        if cursor.row.slots.len() < 16 {
+            // TODO derive this from the logical plan
+            cursor.row.slots.resize(16, Val::Null);
         }
         Ok(())
     }
@@ -175,11 +251,16 @@ impl PreparedStatement for Statement {
 struct GramCursorState {
     ctx: Context,
     plan: Rc<RefCell<dyn Operator>>,
+    slots: Vec<(Token, Slot)>,
 }
 
 impl CursorState for GramCursorState {
     fn next(&mut self, row: &mut Row) -> Result<bool> {
         self.plan.borrow_mut().next(&mut self.ctx, row)
+    }
+
+    fn slot_index(&self, index: usize) -> usize {
+        self.slots[index].1
     }
 }
 
@@ -195,6 +276,7 @@ enum Expr {
     // Lookup a property by id
     Prop(Box<Expr>, Vec<Token>),
     Slot(Slot),
+    List(Vec<Expr>),
 }
 
 impl Expr {
@@ -210,6 +292,7 @@ impl Expr {
                     .borrow()
                     .get_rel_prop(node, rel_index, *prop)
                     .unwrap_or(Val::Null),
+                v => panic!("Gram backend does not yet support {:?}", v),
             };
         }
         Ok(v)
@@ -219,7 +302,14 @@ impl Expr {
         match self {
             Expr::Prop(expr, props) => Expr::eval_prop(ctx, row, expr, props),
             Expr::Slot(slot) => Ok(row.slots[*slot].clone()), // TODO not this
-            Expr::Lit(v) => Ok(v.clone()),                    // TODO not this
+            Expr::Lit(v) => Ok(v.clone()),                    // TODO not this,
+            Expr::List(vs) => {
+                let mut out = Vec::new();
+                for v in vs {
+                    out.push(v.eval(ctx, row)?);
+                }
+                Ok(Val::List(out))
+            }
         }
     }
 }
@@ -330,11 +420,21 @@ impl Operator for NodeScan {
 }
 
 #[derive(Debug, Clone)]
-struct Argument;
+struct Argument {
+    // Eventually this operator would yield one row with user-provided parameters; for now
+    // it's simply used as a leaf that yields one "seed" row to set things in motion.
+    // This is because other operators perform their action "once per input row", so you
+    // need one initial row to start the machinery.
+    consumed: bool,
+}
 
 impl Operator for Argument {
     fn next(&mut self, _ctx: &mut Context, _out: &mut Row) -> Result<bool> {
-        unimplemented!()
+        if self.consumed {
+            return Ok(false);
+        }
+        self.consumed = true;
+        return Ok(true);
     }
 }
 
@@ -410,6 +510,82 @@ impl Operator for Return {
             return Ok(true);
         }
         Ok(false)
+    }
+}
+
+#[derive(Debug)]
+struct Aggregate {
+    src: Rc<RefCell<dyn Operator>>,
+
+    aggregations: Vec<AggregateEntry>,
+
+    consumed: bool,
+}
+
+#[derive(Debug)]
+struct AggregateEntry {
+    func: Box<dyn functions::AggregatingFunc>,
+    slot: Slot,
+}
+
+impl Operator for Aggregate {
+    fn next(&mut self, ctx: &mut Context, row: &mut Row) -> Result<bool> {
+        if self.consumed {
+            return Ok(false);
+        }
+        let mut src = self.src.borrow_mut();
+        while src.next(ctx, row)? {
+            for agge in &mut self.aggregations {
+                agge.func.apply(ctx, row)?;
+            }
+        }
+
+        for agge in &mut self.aggregations {
+            row.slots[agge.slot] = agge.func.complete()?.clone();
+        }
+
+        self.consumed = true;
+        return Ok(true);
+    }
+}
+
+#[derive(Debug)]
+struct Unwind {
+    src: Rc<RefCell<dyn Operator>>,
+    list_expr: Expr,
+    dst: Slot,
+    // TODO this should use an iterator
+    current_list: Option<Vec<Val>>,
+    next_index: usize,
+}
+
+impl Operator for Unwind {
+    fn next(&mut self, ctx: &mut Context, row: &mut Row) -> Result<bool> {
+        loop {
+            if self.current_list.is_none() {
+                let mut src = self.src.borrow_mut();
+                if !src.next(ctx, row)? {
+                    return Ok(false);
+                }
+
+                match self.list_expr.eval(ctx, row)? {
+                    Val::List(items) => self.current_list = Some(items),
+                    _ => return Err(anyhow!("UNWIND expression must yield a list")),
+                }
+                self.next_index = 0;
+            }
+
+            if let Some(it) = &mut self.current_list {
+                if self.next_index >= it.len() {
+                    self.current_list = None;
+                    continue;
+                }
+
+                row.slots[self.dst] = it[self.next_index].clone();
+                self.next_index += 1;
+                return Ok(true);
+            }
+        }
     }
 }
 
@@ -701,5 +877,162 @@ fn append_node(
     match ctx.file.borrow_mut().write_all(gram_string.as_bytes()) {
         Ok(_) => Ok(Val::Node(node_id)),
         Err(e) => Err(Error::new(e)),
+    }
+}
+
+mod functions {
+    use crate::backend::gram::{Context, Expr};
+    use crate::backend::{FuncSignature, FuncType, Tokens};
+    use crate::{Result, Row, Type, Val};
+    use std::cmp::Ordering;
+    use std::fmt::Debug;
+
+    pub(super) fn aggregating(tokens: &mut Tokens) -> Vec<Box<dyn AggregatingFuncSpec>> {
+        let mut out: Vec<Box<dyn AggregatingFuncSpec>> = Default::default();
+        out.push(Box::new(MinSpec::new(tokens)));
+        out.push(Box::new(MaxSpec::new(tokens)));
+        return out;
+    }
+
+    pub(super) trait AggregatingFuncSpec: Debug {
+        fn signature(&self) -> &FuncSignature;
+        fn init(&self, args: Vec<Expr>) -> Box<dyn AggregatingFunc>;
+    }
+
+    // A running aggregation in an executing query
+    pub(super) trait AggregatingFunc: Debug {
+        fn apply(&mut self, ctx: &mut Context, row: &mut Row) -> Result<()>;
+        fn complete(&mut self) -> Result<&Val>;
+    }
+
+    #[derive(Debug)]
+    struct MinSpec {
+        sig: FuncSignature,
+    }
+
+    impl MinSpec {
+        pub fn new(tokens: &mut Tokens) -> MinSpec {
+            let tok_min = tokens.tokenize("min");
+            MinSpec {
+                sig: FuncSignature {
+                    func_type: FuncType::Aggregating,
+                    name: tok_min,
+                    returns: Type::Any,
+                    args: vec![(tokens.tokenize("v"), Type::Any)],
+                },
+            }
+        }
+    }
+
+    impl AggregatingFuncSpec for MinSpec {
+        fn signature(&self) -> &FuncSignature {
+            return &self.sig;
+        }
+
+        fn init(&self, mut args: Vec<Expr>) -> Box<dyn AggregatingFunc> {
+            Box::new(Min {
+                arg: args.pop().expect("min takes 1 arg"),
+                min: None,
+            })
+        }
+    }
+
+    #[derive(Debug)]
+    struct Min {
+        arg: Expr,
+        min: Option<Val>,
+    }
+
+    impl AggregatingFunc for Min {
+        fn apply(&mut self, ctx: &mut Context, row: &mut Row) -> Result<()> {
+            let v = self.arg.eval(ctx, row)?;
+            if let Some(current_min) = &self.min {
+                if v == Val::Null {
+                    return Ok(());
+                }
+                if let Some(Ordering::Less) = v.partial_cmp(&current_min) {
+                    self.min = Some(v);
+                }
+            } else {
+                self.min = Some(v);
+            }
+            Ok(())
+        }
+
+        fn complete(&mut self) -> Result<&Val> {
+            if let Some(v) = &self.min {
+                return Ok(v);
+            } else {
+                Err(anyhow!(
+                    "There were no input rows to the aggregation, cannot calculate min(..)"
+                ))
+            }
+        }
+    }
+
+    #[derive(Debug)]
+    struct MaxSpec {
+        sig: FuncSignature,
+    }
+
+    impl MaxSpec {
+        pub fn new(tokens: &mut Tokens) -> MaxSpec {
+            let tok_max = tokens.tokenize("max");
+            MaxSpec {
+                sig: FuncSignature {
+                    func_type: FuncType::Aggregating,
+                    name: tok_max,
+                    returns: Type::Any,
+                    args: vec![(tokens.tokenize("v"), Type::Any)],
+                },
+            }
+        }
+    }
+
+    impl AggregatingFuncSpec for MaxSpec {
+        fn signature(&self) -> &FuncSignature {
+            return &self.sig;
+        }
+
+        fn init(&self, mut args: Vec<Expr>) -> Box<dyn AggregatingFunc> {
+            println!("Init max({:?})", args);
+            Box::new(Max {
+                arg: args.pop().expect("max takes 1 argument"),
+                max: None,
+            })
+        }
+    }
+
+    #[derive(Debug)]
+    struct Max {
+        arg: Expr,
+        max: Option<Val>,
+    }
+
+    impl AggregatingFunc for Max {
+        fn apply(&mut self, ctx: &mut Context, row: &mut Row) -> Result<()> {
+            let v = self.arg.eval(ctx, row)?;
+            if let Some(current_max) = &self.max {
+                if v == Val::Null {
+                    return Ok(());
+                }
+                if let Some(Ordering::Greater) = v.partial_cmp(&current_max) {
+                    self.max = Some(v);
+                }
+            } else {
+                self.max = Some(v);
+            }
+            Ok(())
+        }
+
+        fn complete(&mut self) -> Result<&Val> {
+            if let Some(v) = &self.max {
+                return Ok(v);
+            } else {
+                Err(anyhow!(
+                    "There were no input rows to the aggregation, cannot calculate min(..)"
+                ))
+            }
+        }
     }
 }

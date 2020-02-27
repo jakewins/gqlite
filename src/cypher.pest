@@ -1,7 +1,7 @@
 
 WHITESPACE = _{ " " | "\t" | "\r" | "\n" }
 
-expr = { prop_lookup | func_call | string | id }
+expr = { float | int | prop_lookup | func_call | string | id | list }
 
 id = ${ ( ASCII_ALPHA | "_" | "-" ) + }
 
@@ -9,11 +9,26 @@ prop_lookup = { id ~ ("." ~ id)+ }
 
 func_call = { id ~ "(" ~ (expr ~ ("," ~ expr)*)? ~ ")" }
 
-string = ${ "\"" ~ str_inner ~ "\"" }
-str_inner = @{ char* }
-char = {
+string = ${
+  "\"" ~ dblq_str_inner ~ "\"" |
+  "'" ~ singleq_str_inner ~ "'" }
+dblq_str_inner = @{ dbldq_char* }
+dbldq_char = {
     !("\"" | "\\") ~ ANY
     | "\\" ~ ("\"" | "\\" | "/" | "b" | "f" | "n" | "r" | "t")
+}
+singleq_str_inner = @{ singleq_char* }
+singleq_char = {
+    !("'" | "\\") ~ ANY
+    | "\\" ~ ("'" | "\\" | "/" | "b" | "f" | "n" | "r" | "t")
+}
+
+int = {
+    "-"? ~ ( "0" | ASCII_NONZERO_DIGIT ~ ASCII_DIGIT* )
+}
+
+float = {
+   "-"? ~ ( "0" | ASCII_NONZERO_DIGIT ~ ASCII_DIGIT* ) ~ "." ~ ASCII_DIGIT*
 }
 
 map = {
@@ -21,6 +36,11 @@ map = {
   "{" ~ map_pair ~ ("," ~ map_pair)* ~ "}"
 }
 map_pair = { id ~ ":" ~ expr }
+
+list = {
+  "[" ~ "]" |
+  "[" ~ expr ~ ("," ~ expr)* ~ "]"
+}
 
 // Multiple labels are supported for CREATE but not yet for MATCH
 node = { "(" ~ id? ~ ( ":" ~ label )* ~ map? ~ ")" }
@@ -38,7 +58,8 @@ projections = { projection ~ ( "," ~ projection )* }
 
 create_stmt = { "CREATE" ~ pattern }
 match_stmt = { "MATCH" ~ pattern }
+unwind_stmt = { "UNWIND" ~ expr ~ "AS" ~ id }
 return_stmt = { "RETURN" ~ projections }
 
-statement = _{ create_stmt | match_stmt }
+statement = _{ create_stmt | match_stmt | unwind_stmt }
 query = { SOI ~ ( statement )* ~ return_stmt? ~ EOI }

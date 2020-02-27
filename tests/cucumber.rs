@@ -37,7 +37,9 @@ impl std::default::Default for MyWorld {
 mod example_steps {
     use super::{empty_db, MyWorld};
     use cucumber::{steps, Step};
-    use gqlite::{Cursor, Error};
+    use gqlite::{Cursor, Error, Val};
+    use std::iter::Peekable;
+    use std::str::Chars;
 
     fn run_preparatory_query(world: &mut MyWorld, step: &Step) -> Result<(), Error> {
         let mut cursor = Cursor::new();
@@ -82,6 +84,89 @@ mod example_steps {
         }
     }
 
+    fn assert_no_side_effects(world: &mut MyWorld) {
+        assert_eq!(
+            0,
+            count_nodes(world) - world.starting_graph_properties.node_count
+        )
+    }
+
+    fn assert_result(world: &mut MyWorld, step: &Step) {
+        let table = step.table().unwrap().clone();
+        for mut row in table.rows {
+            assert_eq!(true, world.result.next().unwrap());
+            for slot in 0..row.len() {
+                assert_eq!(
+                    str_to_val(&mut row[slot].chars().peekable()),
+                    world.result.get(slot).clone()
+                );
+            }
+        }
+    }
+
+    fn str_to_val(mut chars: &mut Peekable<Chars>) -> Val {
+        fn str_to_number(chars: &mut Peekable<Chars>) -> Val {
+            let mut val = String::new();
+            let mut is_float = false;
+            val.push(chars.next().unwrap());
+            loop {
+                match chars.peek() {
+                    Some('0'..='9') => val.push(chars.next().unwrap()),
+                    Some('-') => val.push(chars.next().unwrap()),
+                    Some(' ') => break,
+                    Some(']') => break,
+                    Some(',') => break,
+                    Some('.') => {
+                        is_float = true;
+                        val.push(chars.next().unwrap());
+                    }
+                    None => break,
+                    _ => panic!(format!("unknown integer portion: '{:?}'", chars.peek())),
+                }
+            }
+            if is_float {
+                return Val::Float(val.parse().unwrap());
+            }
+            return Val::Int(val.parse().unwrap());
+        }
+
+        match chars.peek().unwrap() {
+            '0'..='9' => str_to_number(chars),
+            '-' => str_to_number(chars),
+            '\'' => {
+                let mut val = String::new();
+                chars.next().unwrap();
+                loop {
+                    match chars.next() {
+                        Some('\'') => return Val::String(val),
+                        None => return Val::String(val),
+                        Some(v) => val.push(v),
+                    }
+                }
+            }
+            '[' => {
+                let mut items = Vec::new();
+                chars.next().unwrap();
+                loop {
+                    match chars.peek() {
+                        Some(']') => return Val::List(items),
+                        None => return Val::List(items),
+                        Some(',') => {
+                            chars.next().unwrap();
+                            ()
+                        }
+                        Some(' ') => {
+                            chars.next().unwrap();
+                            ()
+                        }
+                        _ => items.push(str_to_val(&mut chars)),
+                    }
+                }
+            }
+            _ => panic!(format!("unknown value: '{:?}'", chars)),
+        }
+    }
+
     // Any type that implements cucumber::World + Default can be the world
     steps!(crate::MyWorld => {
         given "any graph" |_world, _step| {
@@ -106,10 +191,18 @@ mod example_steps {
             assert_eq!(0, count_rows(&mut world.result).unwrap());
         };
 
+        then "the result should be, in any order:" |mut world, step| {
+            assert_result(&mut world, &step)
+        };
+
         then "the side effects should be:" |world, step| {
             // Check that the outcomes to be observed have occurred
             let table = step.table().unwrap().clone();
             table.rows.iter().for_each(|row| assert_side_effect(world, &row[0], &row[1]));
+        };
+
+        then "no side effects" |world, _step| {
+            assert_no_side_effects(world);
         };
     });
 }

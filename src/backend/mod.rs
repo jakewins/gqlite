@@ -56,7 +56,7 @@ impl BackendDesc {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum FuncType {
     // If you imagine cypher as a stream processing system, each operator consumes one or more
     // input streams and yields an output stream. In expressions with scalar functions, each
@@ -86,7 +86,7 @@ pub enum FuncType {
 }
 
 // See the "functions" section in the openCypher spec https://s3.amazonaws.com/artifacts.opencypher.org/openCypher9.pdf
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct FuncSignature {
     // Aggregate or scalar?
     pub func_type: FuncType,
