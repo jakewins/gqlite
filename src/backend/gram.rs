@@ -23,7 +23,7 @@ pub struct GramBackend {
     tokens: Rc<RefCell<Tokens>>,
     g: Rc<RefCell<Graph>>,
     file: Rc<RefCell<File>>,
-    aggregators: Box<HashMap<Token, Box<dyn AggregatingFuncSpec>>>,
+    aggregators: HashMap<Token, Box<dyn AggregatingFuncSpec>>,
 }
 
 impl GramBackend {
@@ -42,7 +42,7 @@ impl GramBackend {
             tokens: Rc::new(RefCell::new(tokens)),
             g: Rc::new(RefCell::new(g)),
             file: Rc::new(RefCell::new(file)),
-            aggregators: Box::new(aggregators),
+            aggregators,
         })
     }
 
@@ -174,7 +174,7 @@ impl GramBackend {
             frontend::Expr::Prop(e, props) => Expr::Prop(Box::new(self.convert_expr(*e)), props),
             frontend::Expr::Slot(s) => Expr::Slot(s),
             frontend::Expr::List(es) => {
-                let mut items = Vec::new();
+                let mut items = Vec::with_capacity(es.len());
                 for e in es {
                     items.push(self.convert_expr(e));
                 }
