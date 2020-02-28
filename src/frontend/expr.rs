@@ -1,12 +1,10 @@
-
 // This module contains our definition of expressions, including code to convert parse streams
 // to expressions.
 
-
-use crate::frontend::{PlanningContext, Result, Rule};
-use pest::iterators::Pair;
 use crate::backend::Token;
-use crate::{Val, Slot};
+use crate::frontend::{PlanningContext, Result, Rule};
+use crate::{Slot, Val};
+use pest::iterators::Pair;
 use std::collections::HashSet;
 
 #[derive(Debug, PartialEq)]

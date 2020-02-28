@@ -5,22 +5,20 @@
 
 use pest::Parser;
 
-
 use crate::backend::{BackendDesc, Token, Tokens};
 use crate::{Dir, Slot};
 use anyhow::Result;
 use pest::iterators::Pair;
 use std::cell::RefCell;
 use std::collections::hash_map::Entry;
-use std::collections::{HashMap};
+use std::collections::HashMap;
 use std::fmt::Debug;
 use std::rc::Rc;
 
-
 mod expr;
 
+use expr::plan_expr;
 pub use expr::{Expr, MapEntryExpr};
-use expr::{plan_expr};
 
 #[derive(Parser)]
 #[grammar = "cypher.pest"]
