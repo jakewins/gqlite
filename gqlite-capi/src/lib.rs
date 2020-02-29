@@ -1,7 +1,7 @@
 // If the documentation is available, we should warn on this (remove the next line and this comment)
 #![allow(clippy::missing_safety_doc)]
 
-use gqlite::{Cursor, Database, Error};
+use gqlite::{Cursor, Database, Error, GramCursor, GramDatabase};
 use std::ffi::CStr;
 use std::fs::File;
 use std::os::raw::{c_char, c_int};
@@ -10,14 +10,14 @@ use std::str;
 #[repr(C)]
 #[derive(Debug)]
 pub struct database {
-    pub db: Option<Database>,
+    pub db: Option<GramDatabase>,
     pub last_error: Option<Error>,
 }
 
 #[repr(C)]
 #[derive(Debug)]
 pub struct cursor {
-    cursor: Cursor,
+    cursor: GramCursor,
 }
 
 // Open a database file
