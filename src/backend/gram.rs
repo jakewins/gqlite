@@ -46,15 +46,15 @@ impl GramBackend {
         })
     }
 
-    fn convert(&self, plan: Box<LogicalPlan>) -> Result<Rc<RefCell<dyn Operator>>, Error> {
+    fn convert(&self, plan: Box<LogicalPlan>) -> Result<Box<dyn Operator>> {
         match *plan {
-            LogicalPlan::Argument => Ok(Rc::new(RefCell::new(Argument { consumed: false }))),
-            LogicalPlan::NodeScan { src, slot, labels } => Ok(Rc::new(RefCell::new(NodeScan {
+            LogicalPlan::Argument => Ok(Box::new(Argument { consumed: false })),
+            LogicalPlan::NodeScan { src, slot, labels } => Ok(Box::new(NodeScan {
                 src: self.convert(src)?,
                 next_node: 0,
                 slot,
                 labels,
-            }))),
+            })),
             LogicalPlan::Create { src, nodes, .. } => {
                 let mut out_nodes = Vec::with_capacity(nodes.len());
                 for (i, ns) in nodes.into_iter().enumerate() {
@@ -71,11 +71,11 @@ impl GramBackend {
                         },
                     );
                 }
-                Ok(Rc::new(RefCell::new(Create {
+                Ok(Box::new(Create {
                     src: self.convert(src)?,
                     nodes: out_nodes,
                     tokens: self.tokens.clone(),
-                })))
+                }))
             }
             LogicalPlan::Expand {
                 src,
@@ -84,7 +84,7 @@ impl GramBackend {
                 dst_slot,
                 rel_type,
                 ..
-            } => Ok(Rc::new(RefCell::new(Expand {
+            } => Ok(Box::new(Expand {
                 src: self.convert(src)?,
                 src_slot,
                 rel_slot,
@@ -92,7 +92,7 @@ impl GramBackend {
                 rel_type: rel_type.token(),
                 next_rel_index: 0,
                 state: ExpandState::NextNode,
-            }))),
+            })),
             // TODO: unwrap selection for now, actually implement
             LogicalPlan::Selection { src, .. } => self.convert(src),
             LogicalPlan::Aggregate {
@@ -107,23 +107,23 @@ impl GramBackend {
                         slot,
                     })
                 }
-                Ok(Rc::new(RefCell::new(Aggregate {
+                Ok(Box::new(Aggregate {
                     src: self.convert(src)?,
                     aggregations: agg_exprs,
                     consumed: false,
-                })))
+                }))
             }
             LogicalPlan::Unwind {
                 src,
                 list_expr,
                 alias,
-            } => Ok(Rc::new(RefCell::new(Unwind {
+            } => Ok(Box::new(Unwind {
                 src: self.convert(src)?,
                 list_expr: self.convert_expr(list_expr),
                 current_list: None,
                 next_index: 0,
                 dst: alias,
-            }))),
+            })),
             LogicalPlan::Return { src, projections } => {
                 let mut converted_projections = Vec::new();
                 for projection in projections {
@@ -133,11 +133,11 @@ impl GramBackend {
                     })
                 }
 
-                Ok(Rc::new(RefCell::new(Return {
+                Ok(Box::new(Return {
                     src: self.convert(src)?,
                     projections: converted_projections,
                     print_header: true,
-                })))
+                }))
             }
         }
     }
@@ -189,11 +189,13 @@ impl GramBackend {
 }
 
 impl super::Backend for GramBackend {
+    type Statement = Statement;
+
     fn tokens(&self) -> Rc<RefCell<Tokens>> {
         Rc::clone(&self.tokens)
     }
 
-    fn prepare(&self, logical_plan: Box<LogicalPlan>) -> Result<Box<dyn PreparedStatement>> {
+    fn prepare(&self, logical_plan: Box<LogicalPlan>) -> Result<Statement> {
         let slots = match &*logical_plan {
             LogicalPlan::Return {
                 src: _,
@@ -202,12 +204,12 @@ impl super::Backend for GramBackend {
             _ => Vec::new(),
         };
         let plan = self.convert(logical_plan)?;
-        Ok(Box::new(Statement {
+        Ok(Statement {
             file: Rc::clone(&self.file),
             g: Rc::clone(&self.g),
             plan,
             slots,
-        }))
+        })
     }
 
     fn describe(&self) -> Result<BackendDesc, Error> {
@@ -221,24 +223,26 @@ impl super::Backend for GramBackend {
 }
 
 #[derive(Debug)]
-struct Statement {
+pub struct Statement {
     g: Rc<RefCell<Graph>>,
     file: Rc<RefCell<File>>,
-    plan: Rc<RefCell<dyn Operator>>,
+    plan: Box<dyn Operator>,
     // Order and name and slot of each entry returned (note that currently the output row contains internal values as well..)
     slots: Vec<(Token, Slot)>,
 }
 
 impl PreparedStatement for Statement {
-    fn run(&mut self, cursor: &mut Cursor) -> Result<(), Error> {
-        cursor.state = Some(Box::new(GramCursorState {
+    type State = GramCursorState;
+
+    fn run(self, cursor: &mut Cursor<Self::State>) -> Result<(), Error> {
+        cursor.state = Some(GramCursorState {
             ctx: Context {
                 g: Rc::clone(&self.g),
                 file: Rc::clone(&self.file),
             },
-            plan: self.plan.clone(),
             slots: self.slots.clone(),
-        }));
+            plan: self.plan,
+        });
         if cursor.row.slots.len() < 16 {
             // TODO derive this from the logical plan
             cursor.row.slots.resize(16, Val::Null);
@@ -248,15 +252,15 @@ impl PreparedStatement for Statement {
 }
 
 #[derive(Debug)]
-struct GramCursorState {
+pub struct GramCursorState {
     ctx: Context,
-    plan: Rc<RefCell<dyn Operator>>,
+    plan: Box<dyn Operator>,
     slots: Vec<(Token, Slot)>,
 }
 
 impl CursorState for GramCursorState {
     fn next(&mut self, row: &mut Row) -> Result<bool> {
-        self.plan.borrow_mut().next(&mut self.ctx, row)
+        self.plan.next(&mut self.ctx, row)
     }
 
     fn slot_index(&self, index: usize) -> usize {
@@ -327,7 +331,7 @@ pub enum ExpandState {
 
 #[derive(Debug)]
 struct Expand {
-    pub src: Rc<RefCell<dyn Operator>>,
+    pub src: Box<dyn Operator>,
 
     pub src_slot: usize,
 
@@ -349,7 +353,7 @@ impl Operator for Expand {
             match &self.state {
                 ExpandState::NextNode => {
                     // Pull in the next node
-                    if !self.src.borrow_mut().next(ctx, out)? {
+                    if !self.src.next(ctx, out)? {
                         return Ok(false);
                     }
                     self.state = ExpandState::InNode;
@@ -385,7 +389,7 @@ impl Operator for Expand {
 // For each src row, perform a full no de scan with the specified filters
 #[derive(Debug)]
 struct NodeScan {
-    pub src: Rc<RefCell<dyn Operator>>,
+    pub src: Box<dyn Operator>,
 
     // Next node id in g to return
     pub next_node: usize,
@@ -446,7 +450,7 @@ struct Projection {
 
 #[derive(Debug)]
 struct Create {
-    pub src: Rc<RefCell<dyn Operator>>,
+    pub src: Box<dyn Operator>,
     nodes: Vec<NodeSpec>,
     tokens: Rc<RefCell<Tokens>>,
 }
@@ -472,7 +476,7 @@ impl Operator for Create {
 
 #[derive(Debug)]
 struct Return {
-    pub src: Rc<RefCell<dyn Operator>>,
+    pub src: Box<dyn Operator>,
     pub projections: Vec<Projection>,
     print_header: bool,
 }
@@ -494,7 +498,7 @@ impl Operator for Return {
             println!("----");
             self.print_header = false;
         }
-        if self.src.borrow_mut().next(ctx, out)? {
+        if self.src.next(ctx, out)? {
             let mut first = true;
             for cell in &self.projections {
                 let v = cell.expr.eval(ctx, out)?;
@@ -515,7 +519,7 @@ impl Operator for Return {
 
 #[derive(Debug)]
 struct Aggregate {
-    src: Rc<RefCell<dyn Operator>>,
+    src: Box<dyn Operator>,
 
     aggregations: Vec<AggregateEntry>,
 
@@ -533,7 +537,7 @@ impl Operator for Aggregate {
         if self.consumed {
             return Ok(false);
         }
-        let mut src = self.src.borrow_mut();
+        let src = &mut *self.src;
         while src.next(ctx, row)? {
             for agge in &mut self.aggregations {
                 agge.func.apply(ctx, row)?;
@@ -551,7 +555,7 @@ impl Operator for Aggregate {
 
 #[derive(Debug)]
 struct Unwind {
-    src: Rc<RefCell<dyn Operator>>,
+    src: Box<dyn Operator>,
     list_expr: Expr,
     dst: Slot,
     // TODO this should use an iterator
@@ -563,7 +567,7 @@ impl Operator for Unwind {
     fn next(&mut self, ctx: &mut Context, row: &mut Row) -> Result<bool> {
         loop {
             if self.current_list.is_none() {
-                let mut src = self.src.borrow_mut();
+                let src = &mut *self.src;
                 if !src.next(ctx, row)? {
                     return Ok(false);
                 }
