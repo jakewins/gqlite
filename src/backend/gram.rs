@@ -1,7 +1,6 @@
 // The Gram backend is a backend implementation that acts on a Gram file.
 // It is currently single threaded, and provides no data durability guarantees.
 
-use super::PreparedStatement;
 use crate::backend::gram::functions::AggregatingFuncSpec;
 use crate::backend::{BackendDesc, Token, Tokens};
 use crate::frontend::LogicalPlan;
@@ -189,27 +188,33 @@ impl GramBackend {
 }
 
 impl super::Backend for GramBackend {
-    type Statement = Statement;
+    type State = GramCursorState;
 
     fn tokens(&self) -> Rc<RefCell<Tokens>> {
         Rc::clone(&self.tokens)
     }
 
-    fn prepare(&self, logical_plan: LogicalPlan) -> Result<Statement> {
-        let slots = match &logical_plan {
-            LogicalPlan::Return {
-                src: _,
-                projections,
-            } => projections.iter().map(|p| (p.alias, p.dst)).collect(),
+    fn eval(&mut self, plan: LogicalPlan, cursor: &mut Cursor<Self::State>) -> Result<(), Error> {
+        let slots = match &plan {
+            LogicalPlan::Return { projections, .. } => {
+                projections.iter().map(|p| (p.alias, p.dst)).collect()
+            }
             _ => Vec::new(),
         };
-        let plan = self.convert(logical_plan)?;
-        Ok(Statement {
-            file: Rc::clone(&self.file),
-            g: Rc::clone(&self.g),
-            plan,
+        let plan = self.convert(plan)?;
+        cursor.state = Some(GramCursorState {
+            ctx: Context {
+                g: Rc::clone(&self.g),
+                file: Rc::clone(&self.file),
+            },
             slots,
-        })
+            plan,
+        });
+        if cursor.row.slots.len() < 16 {
+            // TODO derive this from the logical plan
+            cursor.row.slots.resize(16, Val::Null);
+        }
+        Ok(())
     }
 
     fn describe(&self) -> Result<BackendDesc, Error> {
@@ -219,35 +224,6 @@ impl super::Backend for GramBackend {
         }
 
         Ok(BackendDesc::new(functions))
-    }
-}
-
-#[derive(Debug)]
-pub struct Statement {
-    g: Rc<RefCell<Graph>>,
-    file: Rc<RefCell<File>>,
-    plan: Box<dyn Operator>,
-    // Order and name and slot of each entry returned (note that currently the output row contains internal values as well..)
-    slots: Vec<(Token, Slot)>,
-}
-
-impl PreparedStatement for Statement {
-    type State = GramCursorState;
-
-    fn run(self, cursor: &mut Cursor<Self::State>) -> Result<(), Error> {
-        cursor.state = Some(GramCursorState {
-            ctx: Context {
-                g: Rc::clone(&self.g),
-                file: Rc::clone(&self.file),
-            },
-            slots: self.slots.clone(),
-            plan: self.plan,
-        });
-        if cursor.row.slots.len() < 16 {
-            // TODO derive this from the logical plan
-            cursor.row.slots.resize(16, Val::Null);
-        }
-        Ok(())
     }
 }
 
