@@ -28,7 +28,7 @@ pub trait Backend: Debug {
     fn tokens(&self) -> Rc<RefCell<Tokens>>;
 
     // Convert a logical plan into something executable
-    fn prepare(&self, plan: Box<LogicalPlan>) -> Result<Self::Statement, Error>;
+    fn prepare(&self, plan: LogicalPlan) -> Result<Self::Statement, Error>;
 
     // Describe this backend for the frontends benefit
     fn describe(&self) -> Result<BackendDesc, Error>;

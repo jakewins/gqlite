@@ -39,7 +39,7 @@ impl<T: Backend> Database<T> {
         cursor: &mut Cursor<BackendState<T>>,
     ) -> Result<(), Error> {
         let plan = self.frontend.plan(query_str)?;
-        let prepped = self.backend.prepare(Box::new(plan))?;
+        let prepped = self.backend.prepare(plan)?;
 
         // The API then allows us to modify this to reuse existing CursorState if we like
         PreparedStatement::run(prepped, cursor)

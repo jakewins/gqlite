@@ -46,11 +46,11 @@ impl GramBackend {
         })
     }
 
-    fn convert(&self, plan: Box<LogicalPlan>) -> Result<Box<dyn Operator>> {
-        match *plan {
+    fn convert(&self, plan: LogicalPlan) -> Result<Box<dyn Operator>> {
+        match plan {
             LogicalPlan::Argument => Ok(Box::new(Argument { consumed: false })),
             LogicalPlan::NodeScan { src, slot, labels } => Ok(Box::new(NodeScan {
-                src: self.convert(src)?,
+                src: self.convert(*src)?,
                 next_node: 0,
                 slot,
                 labels,
@@ -72,7 +72,7 @@ impl GramBackend {
                     );
                 }
                 Ok(Box::new(Create {
-                    src: self.convert(src)?,
+                    src: self.convert(*src)?,
                     nodes: out_nodes,
                     tokens: self.tokens.clone(),
                 }))
@@ -85,7 +85,7 @@ impl GramBackend {
                 rel_type,
                 ..
             } => Ok(Box::new(Expand {
-                src: self.convert(src)?,
+                src: self.convert(*src)?,
                 src_slot,
                 rel_slot,
                 dst_slot,
@@ -94,7 +94,7 @@ impl GramBackend {
                 state: ExpandState::NextNode,
             })),
             // TODO: unwrap selection for now, actually implement
-            LogicalPlan::Selection { src, .. } => self.convert(src),
+            LogicalPlan::Selection { src, .. } => self.convert(*src),
             LogicalPlan::Aggregate {
                 src,
                 grouping: _,
@@ -108,7 +108,7 @@ impl GramBackend {
                     })
                 }
                 Ok(Box::new(Aggregate {
-                    src: self.convert(src)?,
+                    src: self.convert(*src)?,
                     aggregations: agg_exprs,
                     consumed: false,
                 }))
@@ -118,7 +118,7 @@ impl GramBackend {
                 list_expr,
                 alias,
             } => Ok(Box::new(Unwind {
-                src: self.convert(src)?,
+                src: self.convert(*src)?,
                 list_expr: self.convert_expr(list_expr),
                 current_list: None,
                 next_index: 0,
@@ -134,7 +134,7 @@ impl GramBackend {
                 }
 
                 Ok(Box::new(Return {
-                    src: self.convert(src)?,
+                    src: self.convert(*src)?,
                     projections: converted_projections,
                     print_header: true,
                 }))
@@ -195,8 +195,8 @@ impl super::Backend for GramBackend {
         Rc::clone(&self.tokens)
     }
 
-    fn prepare(&self, logical_plan: Box<LogicalPlan>) -> Result<Statement> {
-        let slots = match &*logical_plan {
+    fn prepare(&self, logical_plan: LogicalPlan) -> Result<Statement> {
+        let slots = match &logical_plan {
             LogicalPlan::Return {
                 src: _,
                 projections,
