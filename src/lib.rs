@@ -13,7 +13,7 @@ use std::fmt::{self, Debug, Display, Formatter};
 use std::fs::File;
 
 use crate::frontend::Frontend;
-use backend::{Backend, PreparedStatement};
+use backend::Backend;
 use std::cmp::Ordering;
 
 #[derive(Debug)]
@@ -21,8 +21,6 @@ pub struct Database<T: Backend> {
     backend: T,
     frontend: Frontend,
 }
-
-type BackendState<T> = <<T as Backend>::Statement as PreparedStatement>::State;
 
 impl<T: Backend> Database<T> {
     pub fn with_backend(backend: T) -> Result<Database<T>> {
@@ -33,16 +31,9 @@ impl<T: Backend> Database<T> {
         Ok(Database { backend, frontend })
     }
 
-    pub fn run(
-        &mut self,
-        query_str: &str,
-        cursor: &mut Cursor<BackendState<T>>,
-    ) -> Result<(), Error> {
+    pub fn run(&mut self, query_str: &str, cursor: &mut Cursor<T::State>) -> Result<()> {
         let plan = self.frontend.plan(query_str)?;
-        let prepped = self.backend.prepare(plan)?;
-
-        // The API then allows us to modify this to reuse existing CursorState if we like
-        PreparedStatement::run(prepped, cursor)
+        self.backend.eval(plan, cursor)
     }
 }
 
@@ -53,8 +44,8 @@ pub type GramDatabase = Database<backend::gram::GramBackend>;
 pub type GramCursor = Cursor<backend::gram::GramCursorState>;
 
 #[cfg(feature = "gram")]
-impl Database<backend::gram::GramBackend> {
-    pub fn open(file: File) -> Result<Database<backend::gram::GramBackend>> {
+impl GramDatabase {
+    pub fn open(file: File) -> Result<GramDatabase> {
         let backend = backend::gram::GramBackend::open(file)?;
         Database::with_backend(backend)
     }

@@ -10,12 +10,6 @@ use std::collections::{HashMap, HashSet};
 use std::fmt::Debug;
 use std::rc::Rc;
 
-pub trait PreparedStatement: Debug {
-    type State: CursorState;
-
-    fn run(self, cursor: &mut Cursor<Self::State>) -> Result<()>;
-}
-
 // I don't know if any of this makes any sense, but the thoughts here is like.. lets make it
 // easy to build experimental backends, that can convert a logical plan tree into something that
 // can be executed. I've tried really hard to avoid making this trait have generics on it,
@@ -23,12 +17,12 @@ pub trait PreparedStatement: Debug {
 // in the planning side and in the API to not have to deal with different backends having different
 // generics. Much of that difficulty is likely my poor Rust skills tho.
 pub trait Backend: Debug {
-    type Statement: PreparedStatement;
+    type State: CursorState;
 
     fn tokens(&self) -> Rc<RefCell<Tokens>>;
 
-    // Convert a logical plan into something executable
-    fn prepare(&self, plan: LogicalPlan) -> Result<Self::Statement, Error>;
+    // Evaluate a logical plan and run it on the cursor
+    fn eval(&mut self, plan: LogicalPlan, cursor: &mut Cursor<Self::State>) -> Result<()>;
 
     // Describe this backend for the frontends benefit
     fn describe(&self) -> Result<BackendDesc, Error>;
