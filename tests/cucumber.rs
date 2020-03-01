@@ -1,5 +1,5 @@
 use cucumber::{after, before, cucumber};
-use gqlite::{Cursor, Database};
+use gqlite::{Cursor, Database, GramCursor, GramDatabase};
 use tempfile::tempfile;
 
 pub struct GraphProperties {
@@ -7,15 +7,15 @@ pub struct GraphProperties {
     _relationship_count: i32,
 }
 
-fn empty_db() -> Database {
+fn empty_db() -> GramDatabase {
     Database::open(tempfile().unwrap()).unwrap()
 }
 
 pub struct MyWorld {
     // You can use this struct for mutable context in scenarios.
-    graph: Database,
+    graph: GramDatabase,
     starting_graph_properties: GraphProperties,
-    result: Cursor,
+    result: GramCursor,
 }
 
 impl cucumber::World for MyWorld {}
@@ -37,7 +37,7 @@ impl std::default::Default for MyWorld {
 mod example_steps {
     use super::{empty_db, MyWorld};
     use cucumber::{steps, Step};
-    use gqlite::{Cursor, Error, Val};
+    use gqlite::{Cursor, Error, GramCursor, Val};
     use std::iter::Peekable;
     use std::str::Chars;
 
@@ -57,7 +57,7 @@ mod example_steps {
             .expect("Should not fail")
     }
 
-    fn count_rows(result: &mut Cursor) -> Result<i32, Error> {
+    fn count_rows(result: &mut GramCursor) -> Result<i32, Error> {
         let mut ct = 0;
         while result.next()? {
             ct += 1

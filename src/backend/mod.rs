@@ -3,7 +3,7 @@
 // logical operators the frontend emits that can act on that storage.
 //
 use crate::frontend::LogicalPlan;
-use crate::{Cursor, Error, Type};
+use crate::{Cursor, CursorState, Error, Type};
 use anyhow::Result;
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
@@ -11,7 +11,9 @@ use std::fmt::Debug;
 use std::rc::Rc;
 
 pub trait PreparedStatement: Debug {
-    fn run(&mut self, cursor: &mut Cursor) -> Result<()>;
+    type State: CursorState;
+
+    fn run(self, cursor: &mut Cursor<Self::State>) -> Result<()>;
 }
 
 // I don't know if any of this makes any sense, but the thoughts here is like.. lets make it
@@ -21,10 +23,12 @@ pub trait PreparedStatement: Debug {
 // in the planning side and in the API to not have to deal with different backends having different
 // generics. Much of that difficulty is likely my poor Rust skills tho.
 pub trait Backend: Debug {
+    type Statement: PreparedStatement;
+
     fn tokens(&self) -> Rc<RefCell<Tokens>>;
 
     // Convert a logical plan into something executable
-    fn prepare(&self, plan: Box<LogicalPlan>) -> Result<Box<dyn PreparedStatement>, Error>;
+    fn prepare(&self, plan: LogicalPlan) -> Result<Self::Statement, Error>;
 
     // Describe this backend for the frontends benefit
     fn describe(&self) -> Result<BackendDesc, Error>;

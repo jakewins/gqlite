@@ -13,23 +13,19 @@ use std::fmt::{self, Debug, Display, Formatter};
 use std::fs::File;
 
 use crate::frontend::Frontend;
-use backend::Backend;
+use backend::{Backend, PreparedStatement};
 use std::cmp::Ordering;
 
 #[derive(Debug)]
-pub struct Database {
-    backend: Box<dyn Backend>,
+pub struct Database<T: Backend> {
+    backend: T,
     frontend: Frontend,
 }
 
-impl Database {
-    #[cfg(feature = "gram")]
-    pub fn open(file: File) -> Result<Database> {
-        let backend = backend::gram::GramBackend::open(file)?;
-        Database::with_backend(Box::new(backend))
-    }
+type BackendState<T> = <<T as Backend>::Statement as PreparedStatement>::State;
 
-    pub fn with_backend(backend: Box<dyn Backend>) -> Result<Database, Error> {
+impl<T: Backend> Database<T> {
+    pub fn with_backend(backend: T) -> Result<Database<T>> {
         let frontend = Frontend {
             tokens: backend.tokens(),
             backend_desc: backend.describe()?,
@@ -37,12 +33,30 @@ impl Database {
         Ok(Database { backend, frontend })
     }
 
-    pub fn run(&mut self, query_str: &str, cursor: &mut Cursor) -> Result<(), Error> {
+    pub fn run(
+        &mut self,
+        query_str: &str,
+        cursor: &mut Cursor<BackendState<T>>,
+    ) -> Result<(), Error> {
         let plan = self.frontend.plan(query_str)?;
-        let mut prepped = self.backend.prepare(Box::new(plan))?;
+        let prepped = self.backend.prepare(plan)?;
 
         // The API then allows us to modify this to reuse existing CursorState if we like
-        prepped.run(cursor)
+        PreparedStatement::run(prepped, cursor)
+    }
+}
+
+#[cfg(feature = "gram")]
+pub type GramDatabase = Database<backend::gram::GramBackend>;
+
+#[cfg(feature = "gram")]
+pub type GramCursor = Cursor<backend::gram::GramCursorState>;
+
+#[cfg(feature = "gram")]
+impl Database<backend::gram::GramBackend> {
+    pub fn open(file: File) -> Result<Database<backend::gram::GramBackend>> {
+        let backend = backend::gram::GramBackend::open(file)?;
+        Database::with_backend(backend)
     }
 }
 
@@ -63,15 +77,18 @@ pub trait CursorState: Debug {
 
 // Cursors are like iterators, except they don't require malloc for each row; the row you read is
 // valid until next time you call "next", or until the transaction you are in is closed.
-#[derive(Debug, Default)]
-pub struct Cursor {
-    pub state: Option<Box<dyn CursorState>>,
+#[derive(Debug)]
+pub struct Cursor<S: CursorState> {
+    pub state: Option<S>,
     pub row: Row,
 }
 
-impl Cursor {
-    pub fn new() -> Cursor {
-        Cursor::default()
+impl<S: CursorState> Cursor<S> {
+    pub fn new() -> Cursor<S> {
+        Cursor {
+            state: None,
+            row: Row::default(),
+        }
     }
 
     #[allow(clippy::should_implement_trait)]
@@ -198,7 +215,7 @@ impl PartialOrd for Val {
                 Val::String(_) => Some(Ordering::Less),
                 Val::Int(_) => Some(Ordering::Less),
                 Val::Float(_) => Some(Ordering::Less),
-                Val::List(other_v) => self_v.partial_cmp(other_v),
+                Val::List(other_v) => self_v.partial_cmp(&other_v),
                 Val::Null => None,
                 _ => panic!("Don't know how to compare {:?} to {:?}", self, other),
             },
