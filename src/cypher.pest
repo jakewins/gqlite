@@ -1,7 +1,14 @@
 
 WHITESPACE = _{ " " | "\t" | "\r" | "\n" }
 
-expr = { float | int | prop_lookup | func_call | string | id | list }
+expr = { and_expr ~ (^"OR" ~ and_expr)* }
+and_expr = { term ~ (^"AND" ~ term)* }
+term = _{ binary_op | atom }
+
+binary_op = { atom ~ op ~ atom }
+op = { "=" }
+
+atom = _{ bool | float | int | prop_lookup | func_call | string | id | list | "(" ~ expr ~ ")" }
 
 id = ${ ( ASCII_ALPHA | "_" | "-" ) + }
 
@@ -22,6 +29,10 @@ singleq_char = {
     !("'" | "\\") ~ ANY
     | "\\" ~ ("'" | "\\" | "/" | "b" | "f" | "n" | "r" | "t")
 }
+
+bool = _{ lit_true | lit_false }
+lit_true = { ^"TRUE" }
+lit_false = { ^"FALSE" }
 
 int = {
     "-"? ~ ( "0" | ASCII_NONZERO_DIGIT ~ ASCII_DIGIT* )
@@ -56,8 +67,10 @@ pattern = { node  ~ ( rel ~ node )* }
 projection = { expr ~ ("AS" ~ id)? }
 projections = { projection ~ ( "," ~ projection )* }
 
+where_clause = { "WHERE" ~ expr }
+
 create_stmt = { "CREATE" ~ pattern }
-match_stmt = { "MATCH" ~ pattern }
+match_stmt = { "MATCH" ~ pattern ~ where_clause? }
 unwind_stmt = { "UNWIND" ~ expr ~ "AS" ~ id }
 return_stmt = { "RETURN" ~ projections }
 
