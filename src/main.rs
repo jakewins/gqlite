@@ -19,7 +19,7 @@ fn main() -> anyhow::Result<()> {
         let query_str = matches.value_of("QUERY").unwrap();
         let path = matches.value_of("file").unwrap_or("graph.gram");
         let file = OpenOptions::new()
-            .create(false)
+            .create(true)
             .write(true)
             .read(true)
             .open(path)?;
