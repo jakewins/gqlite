@@ -12,8 +12,10 @@ pub enum Op {
     Eq,
 }
 
-impl Op {
-    pub fn from_str(s: &str) -> Result<Op> {
+impl FromStr for Op {
+    type Err = anyhow::Error;
+
+    fn from_str(s: &str) -> Result<Self> {
         match s {
             "=" => Ok(Op::Eq),
             _ => Err(anyhow!("Unknown operator: {}", s)),
