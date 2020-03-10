@@ -18,7 +18,7 @@ impl FromStr for Op {
     fn from_str(s: &str) -> Result<Self> {
         match s {
             "=" => Ok(Op::Eq),
-            _ => Err(anyhow!("Unknown operator: {}", s)),
+            _ => bail!("Unknown operator: {}", s),
         }
     }
 }
