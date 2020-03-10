@@ -112,9 +112,9 @@ pub(super) fn plan_expr(pc: &mut PlanningContext, expression: Pair<Rule>) -> Res
         }
     }
     if or_expressions.len() == 1 {
-        return Ok(or_expressions.remove(0));
+        Ok(or_expressions.remove(0))
     } else {
-        return Ok(Expr::Or(or_expressions));
+        Ok(Expr::Or(or_expressions))
     }
 }
 
