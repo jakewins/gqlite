@@ -6,6 +6,7 @@ use crate::frontend::{PlanningContext, Result, Rule};
 use crate::{Slot, Val};
 use pest::iterators::Pair;
 use std::collections::HashSet;
+use std::str::FromStr;
 
 #[derive(Debug, PartialEq, Clone)]
 pub enum Op {
