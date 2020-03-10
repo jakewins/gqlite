@@ -104,8 +104,7 @@ pub enum LogicalPlan {
     },
     Selection {
         src: Box<Self>,
-        slot: usize,
-        predicate: Predicate,
+        predicate: Expr,
     },
     Create {
         src: Box<Self>,
@@ -435,6 +434,31 @@ pub struct PatternGraph {
     e: HashMap<Token, PatternNode>,
     e_order: Vec<Token>,
     v: Vec<PatternRel>,
+
+    // The following expression must be true for the pattern to match; this can be a
+    // deeply nested combination of Expr::And / Expr::Or. The pattern parser does not guarantee
+    // it is a boolean expression.
+    //
+    // TODO: Currently this contains the entire WHERE clause, forcing evaluation of the WHERE
+    //       predicates once all the expands and scans have been done. This can cause catastrophic
+    //       cases, compared to if predicates where evaluated earlier in the plan.
+    //
+    // Imagine a cartesian join like:
+    //
+    //   MATCH (a:User {id: "a"}), (b:User {id: "b"})
+    //
+    // vs the same thing expressed as
+    //
+    //   MATCH (a:User), (b:User)
+    //   WHERE a.id = "a" AND b.id = "b"
+    //
+    // The first will filter `a` down to 1 row before doing the cartesian product over `b`,
+    // while the latter will first do the cartesian product of *all nodes in the database* and
+    // then filter. The difference is something like 6 orders of magnitude of comparisons made.
+    //
+    // Long story short: We want a way to "lift" predicates out of this filter when we plan MATCH,
+    // so that we filter stuff down as early as possible.
+    predicate: Option<Expr>,
 }
 
 impl PatternGraph {
@@ -464,21 +488,19 @@ fn plan_match(
     fn filter_expand(expand: LogicalPlan, slot: Token, labels: &[Token]) -> LogicalPlan {
         let labels = labels
             .iter()
-            .map(|&label| Predicate::HasLabel(label))
+            .map(|&label| Expr::HasLabel(slot, label))
             .collect::<Vec<_>>();
         if labels.is_empty() {
             expand
         } else if labels.len() == 1 {
             LogicalPlan::Selection {
                 src: Box::new(expand),
-                slot,
                 predicate: labels.into_iter().next().unwrap(),
             }
         } else {
             LogicalPlan::Selection {
                 src: Box::new(expand),
-                slot,
-                predicate: Predicate::And(labels),
+                predicate: Expr::And(labels),
             }
         }
     }
@@ -582,9 +604,20 @@ fn plan_match(
             break;
         }
 
+        // Eg. we currently don't handle circular patterns (requiring JOINs) or patterns
+        // with multiple disjoint subgraphs.
         if !solved_any {
             panic!("Failed to solve pattern: {:?}", pg)
         }
+    }
+
+    // Finally, add the pattern-wide predicate to filter the result of the pattern match
+    // see the note on PatternGraph about issues with this "late filter" approach
+    if let Some(pred) = pg.predicate {
+        return Ok(LogicalPlan::Selection {
+            src: Box::new(plan),
+            predicate: pred,
+        });
     }
 
     Ok(plan)
@@ -622,6 +655,14 @@ fn parse_pattern_graph(pc: &mut PlanningContext, patterns: Pair<Rule>) -> Result
                         _ => unreachable!(),
                     }
                 }
+            }
+            Rule::where_clause => {
+                pg.predicate = Some(plan_expr(
+                    pc,
+                    part.into_inner()
+                        .next()
+                        .expect("where clause must contain a predicate"),
+                )?)
             }
             _ => unreachable!(),
         }
@@ -730,6 +771,7 @@ fn parse_map_expression(
     }
     Ok(out)
 }
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -940,6 +982,7 @@ mod tests {
     #[cfg(test)]
     mod match_ {
         use super::*;
+        use crate::frontend::expr::Op;
 
         #[test]
         fn plan_match_with_anonymous_rel_type() -> Result<()> {
@@ -992,8 +1035,36 @@ mod tests {
                         rel_type: RelType::Defined(tpe_knows),
                         dir: Some(Dir::Out),
                     }),
-                    slot: p.slot(id_o),
-                    predicate: Predicate::HasLabel(lbl_person)
+                    predicate: Expr::HasLabel(p.slot(id_o), lbl_person)
+                }
+            );
+            Ok(())
+        }
+
+        #[test]
+        fn plan_match_with_unhoistable_where() -> Result<()> {
+            let mut p = plan("MATCH (n) WHERE true = opaque()")?;
+            let lbl_person = p.tokenize("Person");
+            let tpe_knows = p.tokenize("KNOWS");
+            let id_n = p.tokenize("n");
+            let id_opaque = p.tokenize("opaque");
+
+            assert_eq!(
+                p.plan,
+                LogicalPlan::Selection {
+                    src: Box::new(LogicalPlan::NodeScan {
+                        src: Box::new(LogicalPlan::Argument),
+                        slot: p.slot(id_n),
+                        labels: None,
+                    }),
+                    predicate: Expr::BinaryOp {
+                        left: Box::new(Expr::Bool(true)),
+                        right: Box::new(Expr::FuncCall {
+                            name: id_opaque,
+                            args: vec![]
+                        }),
+                        op: Op::Eq
+                    }
                 }
             );
             Ok(())
