@@ -449,7 +449,7 @@ pub struct PatternGraph {
     //
     // vs the same thing expressed as
     //
-    //   MATCH (a:User), (b:User})
+    //   MATCH (a:User), (b:User)
     //   WHERE a.id = "a" AND b.id = "b"
     //
     // The first will filter `a` down to 1 row before doing the cartesian product over `b`,
