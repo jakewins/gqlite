@@ -101,11 +101,12 @@ pub(super) fn plan_expr(pc: &mut PlanningContext, expression: Pair<Rule>) -> Res
                 for term in inner.into_inner() {
                     and_expressions.push(plan_term(pc, term)?)
                 }
-                if and_expressions.len() == 1 {
-                    or_expressions.push(and_expressions.remove(0))
+                let and_expr = if and_expressions.len() == 1 {
+                    and_expressions.remove(0)
                 } else {
-                    or_expressions.push(Expr::And(and_expressions))
-                }
+                    Expr::And(and_expressions)
+                };
+                or_expressions.push(and_expr);
             }
             _ => panic!("({:?}): {}", inner.as_rule(), inner.as_str()),
         }
