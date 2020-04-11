@@ -1086,8 +1086,8 @@ mod tests {
                 LogicalPlan::Unwind {
                     src: Box::new(LogicalPlan::Argument),
                     list_expr: Expr::List(vec![
-                        Expr::List(vec![Expr::Lit(Val::Int(1))]),
-                        Expr::List(vec![Expr::Lit(Val::Int(2)), Expr::Lit(Val::Float(1.0))]),
+                        Expr::List(vec![Expr::Int(1)]),
+                        Expr::List(vec![Expr::Int(2), Expr::Float(1.0)]),
                     ]),
                     alias: p.slot(id_x),
                 }
@@ -1182,7 +1182,7 @@ mod tests {
                         labels: vec![lbl_person],
                         props: vec![MapEntryExpr {
                             key: key_name,
-                            val: Expr::Lit(Val::String("Bob".to_string())),
+                            val: Expr::String("Bob".to_string()),
                         }]
                     }],
                     rels: vec![]
@@ -1245,7 +1245,7 @@ mod tests {
                         end_node_slot: p.slot(id_n),
                         props: vec![MapEntryExpr {
                             key: k_since,
-                            val: Expr::Lit(Val::String("2012".to_string()))
+                            val: Expr::String("2012".to_string())
                         },]
                     },]
                 }

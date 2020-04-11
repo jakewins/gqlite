@@ -169,7 +169,10 @@ impl GramBackend {
 
     fn convert_expr(&self, expr: frontend::Expr) -> Expr {
         match expr {
-            frontend::Expr::Lit(v) => Expr::Lit(v),
+            frontend::Expr::String(v) => Expr::Lit(Val::String(v)),
+            frontend::Expr::Int(v) => Expr::Lit(Val::Int(v)),
+            frontend::Expr::Float(v) => Expr::Lit(Val::Float(v)),
+
             frontend::Expr::Prop(e, props) => Expr::Prop(Box::new(self.convert_expr(*e)), props),
             frontend::Expr::Slot(s) => Expr::Slot(s),
             frontend::Expr::List(es) => {

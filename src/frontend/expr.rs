@@ -3,7 +3,7 @@
 
 use crate::backend::Token;
 use crate::frontend::{PlanningContext, Result, Rule};
-use crate::{Slot, Val};
+use crate::{Slot};
 use pest::iterators::Pair;
 use std::collections::HashSet;
 use std::str::FromStr;
@@ -37,21 +37,20 @@ pub enum Expr {
         op: Op,
     },
 
-    Bool(bool),
+    // Literals
 
-    // TODO: Drop this in favor of having the literal types directly at this level, so we can
-    //       remove the dependency on Val, so that backends can be free to define Val representations
-    //       as they prefer
-    Lit(Val),
+    Bool(bool),
+    Int(i64),
+    Float(f64),
+    // TODO note that this could be like a gigabyte of user data, it would be better if we had
+    //      a way to plumb that directly into the backend, rather than malloc it onto the heap
+    String(String),
+    Map(Vec<MapEntryExpr>),
+    List(Vec<Expr>),
 
     // Lookup a property by id
     Prop(Box<Self>, Vec<Token>),
     Slot(Slot),
-    // Map expressions differ from eg. Lit(Val::Map) in that they can have expressions as
-    // values, like `{ name: trim_spaces(n.name) }`, and evaluate to Val maps.
-    Map(Vec<MapEntryExpr>),
-    // Same as map expressions in that they differ from List(Val::List) in having nested exprs
-    List(Vec<Expr>),
     FuncCall {
         name: Token,
         args: Vec<Expr>,
@@ -65,9 +64,11 @@ impl Expr {
     // Does this expression - when considered recursively - aggregate rows?
     pub fn is_aggregating(&self, aggregating_funcs: &HashSet<Token>) -> bool {
         match self {
-            Expr::Lit(_) => false,
             Expr::Prop(c, _) => c.is_aggregating(aggregating_funcs),
             Expr::Slot(_) => false,
+            Expr::Float(_) => false,
+            Expr::Int(_) => false,
+            Expr::String(_) => false,
             Expr::Map(children) => children
                 .iter()
                 .any(|c| c.val.is_aggregating(aggregating_funcs)),
@@ -127,7 +128,7 @@ fn plan_term(pc: &mut PlanningContext, term: Pair<Rule>) -> Result<Expr> {
                 .next()
                 .expect("Strings should always have an inner value")
                 .as_str();
-            return Ok(Expr::Lit(Val::String(String::from(content))));
+            return Ok(Expr::String(String::from(content)));
         }
         Rule::id => {
             let tok = pc.tokenize(term.as_str());
@@ -174,11 +175,11 @@ fn plan_term(pc: &mut PlanningContext, term: Pair<Rule>) -> Result<Expr> {
         }
         Rule::int => {
             let v = term.as_str().parse::<i64>()?;
-            return Ok(Expr::Lit(Val::Int(v)));
+            return Ok(Expr::Int(v));
         }
         Rule::float => {
             let v = term.as_str().parse::<f64>()?;
-            return Ok(Expr::Lit(Val::Float(v)));
+            return Ok(Expr::Float(v));
         }
         Rule::lit_true => return Ok(Expr::Bool(true)),
         Rule::lit_false => return Ok(Expr::Bool(false)),
