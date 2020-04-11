@@ -1044,8 +1044,6 @@ mod tests {
         #[test]
         fn plan_match_with_unhoistable_where() -> Result<()> {
             let mut p = plan("MATCH (n) WHERE true = opaque()")?;
-            let lbl_person = p.tokenize("Person");
-            let tpe_knows = p.tokenize("KNOWS");
             let id_n = p.tokenize("n");
             let id_opaque = p.tokenize("opaque");
 
@@ -1074,7 +1072,7 @@ mod tests {
     mod unwind {
         use crate::frontend::tests::plan;
         use crate::frontend::{Expr, LogicalPlan};
-        use crate::{Error, Val};
+        use crate::{Error};
 
         #[test]
         fn plan_unwind() -> Result<(), Error> {
@@ -1100,7 +1098,7 @@ mod tests {
     mod create {
         use crate::frontend::tests::plan;
         use crate::frontend::{Expr, LogicalPlan, MapEntryExpr, NodeSpec, RelSpec, RelType};
-        use crate::{Error, Val};
+        use crate::{Error};
 
         #[test]
         fn plan_create() -> Result<(), Error> {

@@ -228,16 +228,6 @@ mod tests {
         tokens: Rc<RefCell<Tokens>>,
     }
 
-    impl PlanArtifacts {
-        fn slot(&self, k: Token) -> usize {
-            self.slots[&k]
-        }
-
-        fn tokenize(&mut self, content: &str) -> Token {
-            self.tokens.borrow_mut().tokenize(content)
-        }
-    }
-
     fn plan(q: &str) -> Result<PlanArtifacts> {
         let tokens = Rc::new(RefCell::new(Tokens::new()));
         let tok_expr = tokens.borrow_mut().tokenize("expr");
