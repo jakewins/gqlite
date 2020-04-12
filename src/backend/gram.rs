@@ -2,20 +2,109 @@
 // It is currently single threaded, and provides no data durability guarantees.
 
 use crate::backend::gram::functions::AggregatingFuncSpec;
-use crate::backend::{BackendDesc, Token, Tokens};
-use crate::frontend::LogicalPlan;
-use crate::{frontend, Cursor, CursorState, Dir, Error, Row, Slot, Val};
+use crate::backend::{BackendDesc, Token, Tokens, Backend, BackendCursor};
+use crate::frontend::{LogicalPlan, Dir};
+use crate::{frontend, Error, Slot};
 use anyhow::Result;
 use rand::Rng;
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
-use std::fmt::Debug;
+use std::fmt::{self, Debug, Display, Formatter};
 use std::fs::File;
 use std::io::{Seek, SeekFrom, Write};
 use std::rc::Rc;
 use std::time::SystemTime;
 use uuid::v1::{Context as UuidContext, Timestamp};
 use uuid::Uuid;
+use std::cmp::Ordering;
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum Val {
+    Null,
+    String(String),
+    List(Vec<Val>),
+    Int(i64),
+    Float(f64),
+    Node(usize),
+    Rel { node: usize, rel_index: usize },
+}
+
+impl Val {
+    pub fn as_node_id(&self) -> usize {
+        match self {
+            Val::Node(id) => *id,
+            _ => panic!(
+                "invalid execution plan, non-node value feeds into thing expecting node value"
+            ),
+        }
+    }
+    pub fn as_string_literal(&self) -> &str {
+        match self {
+            Val::String(string) => &**string, // TODO: not clone
+            _ => panic!(
+                "invalid execution plan, non-property value feeds into thing expecting node value"
+            ),
+        }
+    }
+}
+
+impl PartialOrd for Val {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        match self {
+            Val::Int(self_v) => match other {
+                Val::String(_) => Some(Ordering::Greater),
+                Val::Int(other_v) => self_v.partial_cmp(other_v),
+                Val::Float(other_v) => self_v.partial_cmp(&&(*other_v as i64)),
+                Val::List(_) => Some(Ordering::Greater),
+                Val::Null => None,
+                _ => panic!("Don't know how to compare {:?} to {:?}", self, other),
+            },
+            Val::Float(self_v) => match other {
+                Val::String(_) => Some(Ordering::Greater),
+                Val::Int(other_v) => (*self_v).partial_cmp(&(*other_v as f64)),
+                Val::Float(other_v) => (*self_v).partial_cmp(other_v),
+                Val::List(_) => Some(Ordering::Greater),
+                Val::Null => None,
+                _ => panic!("Don't know how to compare {:?} to {:?}", self, other),
+            },
+            Val::String(self_v) => match other {
+                Val::Int(_) => Some(Ordering::Less),
+                Val::Float(_) => Some(Ordering::Less),
+                Val::String(other_v) => self_v.partial_cmp(other_v),
+                Val::List(_) => Some(Ordering::Greater),
+                Val::Null => None,
+                _ => panic!("Don't know how to compare {:?} to {:?}", self, other),
+            },
+            Val::List(self_v) => match other {
+                Val::String(_) => Some(Ordering::Less),
+                Val::Int(_) => Some(Ordering::Less),
+                Val::Float(_) => Some(Ordering::Less),
+                Val::List(other_v) => self_v.partial_cmp(&other_v),
+                Val::Null => None,
+                _ => panic!("Don't know how to compare {:?} to {:?}", self, other),
+            },
+            Val::Null => match other {
+                _ => None,
+            },
+            _ => panic!("Don't know how to compare {:?} to {:?}", self, other),
+        }
+    }
+}
+
+impl Display for Val {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        match self {
+            Val::Null => f.write_str("NULL"),
+            Val::String(s) => f.write_str(&s),
+            Val::List(vs) => f.write_str(&format!("{:?}", vs)),
+            Val::Node(id) => f.write_str(&format!("Node({})", id)),
+            Val::Rel { node, rel_index } => f.write_str(&format!("Rel({}/{})", node, rel_index)),
+            Val::Int(v) => f.write_str(&format!("{}", v)),
+            Val::Float(v) => f.write_str(&format!("{}", v)),
+        }
+    }
+}
+
 
 #[derive(Debug)]
 pub struct GramBackend {
@@ -190,14 +279,26 @@ impl GramBackend {
     }
 }
 
-impl super::Backend for GramBackend {
-    type State = GramCursorState;
+impl Backend for GramBackend {
+    type Cursor = GramCursor;
+
+    fn new_cursor(&mut self) -> GramCursor {
+        GramCursor{
+            ctx: Context {
+                g: Rc::clone(&self.g),
+                file: Rc::clone(&self.file),
+            },
+            plan: None,
+            slots: vec![],
+            row: GramRow { slots: vec![] }
+        }
+    }
 
     fn tokens(&self) -> Rc<RefCell<Tokens>> {
         Rc::clone(&self.tokens)
     }
 
-    fn eval(&mut self, plan: LogicalPlan, cursor: &mut Cursor<Self::State>) -> Result<(), Error> {
+    fn eval(&mut self, plan: LogicalPlan, cursor: &mut GramCursor) -> Result<(), Error> {
         let slots = match &plan {
             LogicalPlan::Return { projections, .. } => {
                 projections.iter().map(|p| (p.alias, p.dst)).collect()
@@ -205,14 +306,13 @@ impl super::Backend for GramBackend {
             _ => Vec::new(),
         };
         let plan = self.convert(plan)?;
-        cursor.state = Some(GramCursorState {
-            ctx: Context {
-                g: Rc::clone(&self.g),
-                file: Rc::clone(&self.file),
-            },
-            slots,
-            plan,
-        });
+        cursor.ctx = Context {
+            g: Rc::clone(&self.g),
+            file: Rc::clone(&self.file),
+        };
+        cursor.slots = slots;
+        cursor.plan = Some(plan);
+
         if cursor.row.slots.len() < 16 {
             // TODO derive this from the logical plan
             cursor.row.slots.resize(16, Val::Null);
@@ -231,19 +331,29 @@ impl super::Backend for GramBackend {
 }
 
 #[derive(Debug)]
-pub struct GramCursorState {
-    ctx: Context,
-    plan: Box<dyn Operator>,
-    slots: Vec<(Token, Slot)>,
+struct GramRow {
+    slots: Vec<Val>
 }
 
-impl CursorState for GramCursorState {
-    fn next(&mut self, row: &mut Row) -> Result<bool> {
-        self.plan.next(&mut self.ctx, row)
+#[derive(Debug)]
+pub struct GramCursor {
+    ctx: Context,
+    plan: Option<Box<dyn Operator>>,
+    slots: Vec<(Token, Slot)>,
+    row: GramRow,
+}
+
+impl BackendCursor for GramCursor {
+    fn next(&mut self) -> Result<bool> {
+        if let Some(p) = &mut self.plan {
+            return p.next(&mut self.ctx, &mut self.row);
+        } else {
+            Err(anyhow!("This cursor is not associated with a result, try passing the cursor to the run() function"))
+        }
     }
 
-    fn slot_index(&self, index: usize) -> usize {
-        self.slots[index].1
+    fn get_int(&mut self, column: usize) -> i64 {
+        unimplemented!()
     }
 }
 
@@ -263,7 +373,7 @@ enum Expr {
 }
 
 impl Expr {
-    fn eval_prop(ctx: &mut Context, row: &mut Row, expr: &Expr, props: &[Token]) -> Result<Val> {
+    fn eval_prop(ctx: &mut Context, row: &mut GramRow, expr: &Expr, props: &[Token]) -> Result<Val> {
         let mut v = expr.eval(ctx, row)?;
         for prop in props {
             v = match v {
@@ -281,7 +391,7 @@ impl Expr {
         Ok(v)
     }
 
-    fn eval(&self, ctx: &mut Context, row: &mut Row) -> Result<Val> {
+    fn eval(&self, ctx: &mut Context, row: &mut GramRow) -> Result<Val> {
         match self {
             Expr::Prop(expr, props) => Expr::eval_prop(ctx, row, expr, props),
             Expr::Slot(slot) => Ok(row.slots[*slot].clone()), // TODO not this
@@ -299,7 +409,7 @@ impl Expr {
 
 // Physical operator. We have one of these for each Logical operator the frontend emits.
 trait Operator: Debug {
-    fn next(&mut self, ctx: &mut Context, row: &mut Row) -> Result<bool>;
+    fn next(&mut self, ctx: &mut Context, row: &mut GramRow) -> Result<bool>;
 }
 
 #[derive(Debug)]
@@ -327,7 +437,7 @@ struct Expand {
 }
 
 impl Operator for Expand {
-    fn next(&mut self, ctx: &mut Context, out: &mut Row) -> Result<bool> {
+    fn next(&mut self, ctx: &mut Context, out: &mut GramRow) -> Result<bool> {
         loop {
             match &self.state {
                 ExpandState::NextNode => {
@@ -381,7 +491,7 @@ struct NodeScan {
 }
 
 impl Operator for NodeScan {
-    fn next(&mut self, ctx: &mut Context, out: &mut Row) -> Result<bool> {
+    fn next(&mut self, ctx: &mut Context, out: &mut GramRow) -> Result<bool> {
         loop {
             let g = ctx.g.borrow();
             if g.nodes.len() > self.next_node {
@@ -412,7 +522,7 @@ struct Argument {
 }
 
 impl Operator for Argument {
-    fn next(&mut self, _ctx: &mut Context, _out: &mut Row) -> Result<bool> {
+    fn next(&mut self, _ctx: &mut Context, _out: &mut GramRow) -> Result<bool> {
         if self.consumed {
             return Ok(false);
         }
@@ -435,7 +545,7 @@ struct Create {
 }
 
 impl Operator for Create {
-    fn next(&mut self, ctx: &mut Context, out: &mut Row) -> Result<bool, Error> {
+    fn next(&mut self, ctx: &mut Context, out: &mut GramRow) -> Result<bool, Error> {
         for node in &self.nodes {
             let node_properties = node
                 .props
@@ -461,7 +571,7 @@ struct Return {
 }
 
 impl Operator for Return {
-    fn next(&mut self, ctx: &mut Context, out: &mut Row) -> Result<bool> {
+    fn next(&mut self, ctx: &mut Context, out: &mut GramRow) -> Result<bool> {
         if self.print_header {
             println!("----");
             let mut first = true;
@@ -512,7 +622,7 @@ struct AggregateEntry {
 }
 
 impl Operator for Aggregate {
-    fn next(&mut self, ctx: &mut Context, row: &mut Row) -> Result<bool> {
+    fn next(&mut self, ctx: &mut Context, row: &mut GramRow) -> Result<bool> {
         if self.consumed {
             return Ok(false);
         }
@@ -543,7 +653,7 @@ struct Unwind {
 }
 
 impl Operator for Unwind {
-    fn next(&mut self, ctx: &mut Context, row: &mut Row) -> Result<bool> {
+    fn next(&mut self, ctx: &mut Context, row: &mut GramRow) -> Result<bool> {
         loop {
             if self.current_list.is_none() {
                 let src = &mut *self.src;
@@ -576,7 +686,7 @@ mod parser {
     use crate::backend::gram::{Graph, Node};
     use crate::backend::{Token, Tokens};
     use crate::pest::Parser;
-    use crate::Val;
+    use super::Val;
     use anyhow::Result;
     use std::collections::HashMap;
     use std::collections::HashSet;
@@ -864,9 +974,9 @@ fn append_node(
 }
 
 mod functions {
-    use crate::backend::gram::{Context, Expr};
     use crate::backend::{FuncSignature, FuncType, Tokens};
-    use crate::{Result, Row, Type, Val};
+    use crate::{Result, Type};
+    use super::{Val, GramRow, Context, Expr};
     use std::cmp::Ordering;
     use std::fmt::Debug;
 
@@ -884,7 +994,7 @@ mod functions {
 
     // A running aggregation in an executing query
     pub(super) trait AggregatingFunc: Debug {
-        fn apply(&mut self, ctx: &mut Context, row: &mut Row) -> Result<()>;
+        fn apply(&mut self, ctx: &mut Context, row: &mut GramRow) -> Result<()>;
         fn complete(&mut self) -> Result<&Val>;
     }
 
@@ -927,7 +1037,7 @@ mod functions {
     }
 
     impl AggregatingFunc for Min {
-        fn apply(&mut self, ctx: &mut Context, row: &mut Row) -> Result<()> {
+        fn apply(&mut self, ctx: &mut Context, row: &mut GramRow) -> Result<()> {
             let v = self.arg.eval(ctx, row)?;
             if let Some(current_min) = &self.min {
                 if v == Val::Null {
@@ -993,7 +1103,7 @@ mod functions {
     }
 
     impl AggregatingFunc for Max {
-        fn apply(&mut self, ctx: &mut Context, row: &mut Row) -> Result<()> {
+        fn apply(&mut self, ctx: &mut Context, row: &mut GramRow) -> Result<()> {
             let v = self.arg.eval(ctx, row)?;
             if let Some(current_max) = &self.max {
                 if v == Val::Null {

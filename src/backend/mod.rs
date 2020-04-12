@@ -3,7 +3,7 @@
 // logical operators the frontend emits that can act on that storage.
 //
 use crate::frontend::LogicalPlan;
-use crate::{Cursor, CursorState, Error, Type};
+use crate::{Error, Type};
 use anyhow::Result;
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
@@ -17,15 +17,35 @@ use std::rc::Rc;
 // in the planning side and in the API to not have to deal with different backends having different
 // generics. Much of that difficulty is likely my poor Rust skills tho.
 pub trait Backend: Debug {
-    type State: CursorState;
+    type Cursor: BackendCursor;
+
+    fn new_cursor(&mut self) -> Self::Cursor;
 
     fn tokens(&self) -> Rc<RefCell<Tokens>>;
 
-    // Evaluate a logical plan and run it on the cursor
-    fn eval(&mut self, plan: LogicalPlan, cursor: &mut Cursor<Self::State>) -> Result<()>;
+    // Evaluate a logical plan and set the cursor up to process the result
+    fn eval(&mut self, plan: LogicalPlan, cursor: &mut Self::Cursor) -> Result<()>;
 
     // Describe this backend for the frontends benefit
     fn describe(&self) -> Result<BackendDesc, Error>;
+}
+
+// To allow each backend to own how values are represented, and to let them optimize
+// iteration to fit their own desires, backends describe this cursor interface that sits
+// just below a thin veil of the public API.
+//
+// Like with the public API Cursor, this is almost equivalent to an iterator, except each
+// iteration can be done without allocation.
+pub trait BackendCursor {
+    // TODO I think we'd want a try_fold implementation here, to allow an opt-in version
+    //      of interior iteration, assuming benchmarking show that makes a difference.
+
+    // TODO could this be done with next returning a borrow, maybe that'd be nicer?
+
+    // Move to the next record; if result is happy, you can access the record with the accessor methods
+    fn next(&mut self) -> Result<bool>;
+
+    fn get_int(&mut self, column: usize) -> i64;
 }
 
 // Describes, for the frontend, the layout of the backend. This is intended to include things
@@ -135,4 +155,4 @@ impl Tokens {
 }
 
 #[cfg(feature = "gram")]
-pub(crate) mod gram;
+pub mod gram;
