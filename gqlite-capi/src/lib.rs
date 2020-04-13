@@ -1,8 +1,8 @@
 // If the documentation is available, we should warn on this (remove the next line and this comment)
 #![allow(clippy::missing_safety_doc)]
 
-use gqlite::{Cursor, Database, Error, GramCursor, GramDatabase};
-use gqlite::backend:
+use gqlite::gramdb::{GramCursor, GramDatabase};
+use gqlite::Error;
 use std::ffi::CStr;
 use std::fs::File;
 use std::os::raw::{c_char, c_int};
@@ -29,7 +29,7 @@ pub unsafe extern "C" fn gqlite_open(raw_url: *const c_char) -> *const database 
 
     match File::open(url) {
         Ok(file) => Box::into_raw(Box::new(database {
-            db: Some(Database::open(file).unwrap()),
+            db: Some(GramDatabase::open(file).unwrap()),
             last_error: None,
         })),
         Err(error) => Box::into_raw(Box::new(database {
@@ -75,9 +75,10 @@ pub unsafe extern "C" fn gqlite_cursor_close(raw_cursor: *mut cursor) {
 
 // Allocate a new cursor for the specified database
 #[no_mangle]
-pub extern "C" fn gqlite_cursor_new() -> *mut cursor {
+pub unsafe extern "C" fn gqlite_cursor_new(raw_db: *mut database) -> *mut cursor {
+    let db = (*raw_db).db.as_mut().unwrap();
     Box::into_raw(Box::new(cursor {
-        cursor: Cursor::new(),
+        cursor: db.new_cursor(),
     }))
 }
 

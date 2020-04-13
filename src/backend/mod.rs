@@ -3,7 +3,7 @@
 // logical operators the frontend emits that can act on that storage.
 //
 use crate::frontend::LogicalPlan;
-use crate::{Error, Type};
+use crate::{Error, Row, Type};
 use anyhow::Result;
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
@@ -40,12 +40,8 @@ pub trait BackendCursor {
     // TODO I think we'd want a try_fold implementation here, to allow an opt-in version
     //      of interior iteration, assuming benchmarking show that makes a difference.
 
-    // TODO could this be done with next returning a borrow, maybe that'd be nicer?
-
     // Move to the next record; if result is happy, you can access the record with the accessor methods
-    fn next(&mut self) -> Result<bool>;
-
-    fn get_int(&mut self, column: usize) -> i64;
+    fn next(&mut self) -> Result<Option<&Row>>;
 }
 
 // Describes, for the frontend, the layout of the backend. This is intended to include things

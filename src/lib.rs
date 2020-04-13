@@ -8,10 +8,11 @@ pub mod backend;
 pub mod frontend;
 
 pub use anyhow::{Error, Result};
-use std::fmt::{Debug};
+use std::fmt::{Debug, Display, Formatter};
 
-use frontend::Frontend;
 use backend::{Backend, BackendCursor};
+use core::fmt;
+use frontend::Frontend;
 
 #[derive(Debug)]
 pub struct Database<T: Backend> {
@@ -39,9 +40,7 @@ impl<T: Backend> Database<T> {
     //      follow!
     pub fn new_cursor(&mut self) -> Cursor<T> {
         let bc = self.backend.new_cursor();
-        Cursor{
-            inner: bc
-        }
+        Cursor { inner: bc }
     }
 
     pub fn run(&mut self, query_str: &str, cursor: &mut Cursor<T>) -> Result<()> {
@@ -70,15 +69,72 @@ impl<T: Backend> Database<T> {
 //
 // TL;DR: This is all up in the air. Design goals are to make zero-allocation *possible* and the
 //        default API *easy*, potentially by having two APIs.
+#[derive(Debug)]
 pub struct Cursor<B: Backend> {
-    inner: B::Cursor
+    inner: B::Cursor,
 }
 
 impl<B: Backend> Cursor<B> {
-    pub fn next(&mut self) -> Result<bool> {
+    pub fn next(&mut self) -> Result<Option<&Row>> {
         self.inner.next()
     }
 }
+
+#[derive(Debug, Clone)]
+pub struct Row {
+    pub slots: Vec<Val>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum Val {
+    Null,
+    Int(i64),
+    Float(f64),
+    String(String),
+
+    Map(Map),
+    List(Vec<Val>),
+
+    Node {
+        id: usize,
+        labels: Vec<String>,
+        props: Map,
+    },
+
+    Rel {
+        start: usize,
+        end: usize,
+        rel_type: String,
+        props: Map,
+    },
+}
+
+impl Display for Val {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        match self {
+            Val::Null => f.write_str("NULL"),
+            Val::Int(v) => f.write_str(&format!("{}", v)),
+            Val::Float(v) => f.write_str(&format!("{}", v)),
+            Val::String(s) => f.write_str(&s),
+            Val::List(vs) => f.write_str(&format!("{:?}", vs)),
+            Val::Map(v) => f.write_str(&format!("Map{:?}", v)),
+            Val::Node {
+                id,
+                labels: _,
+                props: _,
+            } => f.write_str(&format!("Node({})", id)),
+            Val::Rel {
+                start,
+                end: _,
+                rel_type,
+                props: _,
+            } => f.write_str(&format!("Rel({}/{})", start, rel_type)),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct Map {}
 
 // Pointer to a Val in a row
 pub type Slot = usize;
@@ -111,7 +167,7 @@ pub enum Type {
 
 #[cfg(feature = "gram")]
 pub mod gramdb {
-    use super::{Database, Cursor, Result};
+    use super::{Cursor, Database, Result};
     use crate::backend::gram;
     use std::fs::File;
 

@@ -1,5 +1,6 @@
 use cucumber::{after, before, cucumber};
-use gqlite::{Cursor, Database, GramCursor, GramDatabase};
+use gqlite::gramdb::{GramCursor, GramDatabase};
+use gqlite::Database;
 use tempfile::tempfile;
 
 pub struct GraphProperties {
@@ -23,9 +24,11 @@ impl cucumber::World for MyWorld {}
 impl std::default::Default for MyWorld {
     fn default() -> MyWorld {
         // This function is called every time a new scenario is started
+        let mut db = empty_db();
+        let cursor = db.new_cursor();
         MyWorld {
-            graph: empty_db(),
-            result: Cursor::new(),
+            graph: db,
+            result: cursor,
             starting_graph_properties: GraphProperties {
                 node_count: 0,
                 _relationship_count: 0,
@@ -37,14 +40,55 @@ impl std::default::Default for MyWorld {
 mod example_steps {
     use super::{empty_db, MyWorld};
     use cucumber::{steps, Step};
-    use gqlite::{Cursor, Error, GramCursor, Val};
+    use gqlite::gramdb::GramCursor;
+    use gqlite::{Error, Val};
+
     use std::iter::Peekable;
     use std::str::Chars;
 
+    // The OpenCypher spec contains an unspecified language to describe assertions;
+    // we have an informal parser for that language which yields these matchers
+
+    #[derive(Debug, PartialEq, Clone)]
+    pub enum ValMatcher {
+        String(String),
+        List(Vec<ValMatcher>),
+        Map(Vec<(String, ValMatcher)>),
+        Int(i64),
+        Float(f64),
+        Node { props: Vec<(String, ValMatcher)> },
+    }
+
+    impl ValMatcher {
+        pub fn assert_eq(&self, v: Val) {
+            match self {
+                ValMatcher::Int(e) => assert_eq!(Val::Int(*e), v),
+                ValMatcher::Float(e) => assert_eq!(Val::Float(*e), v),
+                ValMatcher::String(e) => assert_eq!(Val::String(e.clone()), v),
+                ValMatcher::Map(_) => panic!(".."),
+                ValMatcher::List(expected) => match v {
+                    Val::List(actual) => {
+                        if expected.len() != actual.len() {
+                            panic!(
+                                "Expected {:?}, got {:?} (not same length)",
+                                expected, actual
+                            )
+                        }
+                        for i in 0..expected.len() {
+                            expected[i].assert_eq(actual[i].clone())
+                        }
+                    }
+                    _ => panic!("Expected a list, found {:?}", v),
+                },
+                ValMatcher::Node { props: _ } => panic!("not implemented"),
+            }
+        }
+    }
+
     fn run_preparatory_query(world: &mut MyWorld, step: &Step) -> Result<(), Error> {
-        let mut cursor = Cursor::new();
+        let mut cursor = world.graph.new_cursor();
         let result = world.graph.run(&step.docstring().unwrap(), &mut cursor);
-        while cursor.next()? {
+        while let Some(_) = cursor.next()? {
             // consume
         }
         result
@@ -59,14 +103,14 @@ mod example_steps {
 
     fn count_rows(result: &mut GramCursor) -> Result<i32, Error> {
         let mut ct = 0;
-        while result.next()? {
+        while let Some(_) = result.next()? {
             ct += 1
         }
         Ok(ct)
     }
 
     fn count_nodes(world: &mut MyWorld) -> i32 {
-        let mut cursor = Cursor::new();
+        let mut cursor = world.graph.new_cursor();
         world
             .graph
             .run("MATCH (n) RETURN n", &mut cursor)
@@ -94,18 +138,19 @@ mod example_steps {
     fn assert_result(world: &mut MyWorld, step: &Step) {
         let table = step.table().unwrap().clone();
         for mut row in table.rows {
-            assert_eq!(true, world.result.next().unwrap());
-            for slot in 0..row.len() {
-                assert_eq!(
-                    str_to_val(&mut row[slot].chars().peekable()),
-                    world.result.get(slot).clone()
-                );
+            if let Ok(Some(actual)) = world.result.next() {
+                for slot in 0..row.len() {
+                    str_to_val(&mut row[slot].chars().peekable())
+                        .assert_eq(actual.slots[slot].clone());
+                }
+            } else {
+                assert_eq!(false, true, "Expected more results");
             }
         }
     }
 
-    fn str_to_val(mut chars: &mut Peekable<Chars>) -> Val {
-        fn str_to_number(chars: &mut Peekable<Chars>) -> Val {
+    fn str_to_val(mut chars: &mut Peekable<Chars>) -> ValMatcher {
+        fn parse_number(chars: &mut Peekable<Chars>) -> ValMatcher {
             let mut val = String::new();
             let mut is_float = false;
             val.push(chars.next().unwrap());
@@ -115,6 +160,7 @@ mod example_steps {
                     Some('-') => val.push(chars.next().unwrap()),
                     Some(' ') => break,
                     Some(']') => break,
+                    Some('}') => break,
                     Some(',') => break,
                     Some('.') => {
                         is_float = true;
@@ -125,45 +171,120 @@ mod example_steps {
                 }
             }
             if is_float {
-                return Val::Float(val.parse().unwrap());
+                return ValMatcher::Float(val.parse().unwrap());
             }
-            return Val::Int(val.parse().unwrap());
+            return ValMatcher::Int(val.parse().unwrap());
+        }
+        fn parse_identifier(chars: &mut Peekable<Chars>) -> String {
+            let mut id = String::new();
+            id.push(chars.next().unwrap());
+            loop {
+                match chars.peek() {
+                    Some('0'..='9') => id.push(chars.next().unwrap()),
+                    Some('-') => id.push(chars.next().unwrap()),
+                    Some('_') => id.push(chars.next().unwrap()),
+                    Some('a'..='z') => id.push(chars.next().unwrap()),
+                    Some('A'..='Z') => id.push(chars.next().unwrap()),
+                    _ => break,
+                }
+            }
+            return id;
         }
 
-        match chars.peek().unwrap() {
-            '0'..='9' => str_to_number(chars),
-            '-' => str_to_number(chars),
-            '\'' => {
-                let mut val = String::new();
-                chars.next().unwrap();
-                loop {
-                    match chars.next() {
-                        Some('\'') => return Val::String(val),
-                        None => return Val::String(val),
-                        Some(v) => val.push(v),
+        loop {
+            match chars.peek().unwrap() {
+                '0'..='9' => return parse_number(chars),
+                '-' => return parse_number(chars),
+                '\'' => {
+                    let mut val = String::new();
+                    chars.next().unwrap();
+                    loop {
+                        match chars.next() {
+                            Some('\'') => return ValMatcher::String(val),
+                            None => return ValMatcher::String(val),
+                            Some(v) => val.push(v),
+                        }
                     }
                 }
-            }
-            '[' => {
-                let mut items = Vec::new();
-                chars.next().unwrap();
-                loop {
-                    match chars.peek() {
-                        Some(']') => return Val::List(items),
-                        None => return Val::List(items),
-                        Some(',') => {
-                            chars.next().unwrap();
-                            ()
+                ' ' => {
+                    chars.next().unwrap();
+                    ()
+                }
+                '[' => {
+                    let mut items = Vec::new();
+                    chars.next().unwrap();
+                    loop {
+                        match chars.peek() {
+                            Some(']') => return ValMatcher::List(items),
+                            None => return ValMatcher::List(items),
+                            Some(',') => {
+                                chars.next().unwrap();
+                                ()
+                            }
+                            Some(' ') => {
+                                chars.next().unwrap();
+                                ()
+                            }
+                            _ => items.push(str_to_val(&mut chars)),
                         }
-                        Some(' ') => {
-                            chars.next().unwrap();
-                            ()
-                        }
-                        _ => items.push(str_to_val(&mut chars)),
                     }
                 }
+                '{' => {
+                    chars.next().unwrap();
+                    let mut entries = Vec::new();
+                    loop {
+                        // Parse entry identifier..
+                        let mut identifier = None;
+                        loop {
+                            match chars.peek() {
+                                Some('}') => {
+                                    chars.next().unwrap();
+                                    return ValMatcher::Map(entries);
+                                }
+                                Some('a'..='z') => identifier = Some(parse_identifier(chars)),
+                                Some(':') => {
+                                    chars.next().unwrap();
+                                    break;
+                                }
+                                Some(' ') => {
+                                    chars.next().unwrap();
+                                    ()
+                                }
+                                _ => panic!(format!("unknown map portion: '{:?}'", chars)),
+                            }
+                        }
+
+                        // Parse entry value..
+                        let value = str_to_val(chars);
+                        entries.push((identifier.unwrap(), value))
+                    }
+                }
+                '(' => {
+                    chars.next().unwrap();
+                    let mut props = Vec::new();
+                    loop {
+                        match chars.peek() {
+                            Some(')') => return ValMatcher::Node { props },
+                            None => return ValMatcher::Node { props },
+                            Some('{') => {
+                                match str_to_val(&mut chars) {
+                                    ValMatcher::Map(e) => {
+                                        props = e;
+                                    }
+                                    v => panic!("Expected property map, got {:?}", v),
+                                }
+                                ()
+                            }
+                            Some(' ') => {
+                                chars.next().unwrap();
+                                ()
+                            }
+                            _ => panic!(format!("unknown node spec portion: '{:?}'", chars.peek())),
+                        }
+                    }
+                }
+                _ => panic!(format!("unknown value: '{:?}'", chars)),
             }
-            _ => panic!(format!("unknown value: '{:?}'", chars)),
         }
     }
 

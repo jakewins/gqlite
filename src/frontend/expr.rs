@@ -3,7 +3,7 @@
 
 use crate::backend::Token;
 use crate::frontend::{PlanningContext, Result, Rule};
-use crate::{Slot};
+use crate::Slot;
 use pest::iterators::Pair;
 use std::collections::HashSet;
 use std::str::FromStr;
@@ -38,7 +38,6 @@ pub enum Expr {
     },
 
     // Literals
-
     Bool(bool),
     Int(i64),
     Float(f64),

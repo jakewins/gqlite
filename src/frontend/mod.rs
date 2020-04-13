@@ -6,7 +6,7 @@
 use pest::Parser;
 
 use crate::backend::{BackendDesc, Token, Tokens};
-use crate::{Slot};
+use crate::Slot;
 use anyhow::Result;
 use pest::iterators::Pair;
 use std::cell::RefCell;
@@ -1086,7 +1086,7 @@ mod tests {
     mod unwind {
         use crate::frontend::tests::plan;
         use crate::frontend::{Expr, LogicalPlan};
-        use crate::{Error};
+        use crate::Error;
 
         #[test]
         fn plan_unwind() -> Result<(), Error> {
@@ -1112,7 +1112,7 @@ mod tests {
     mod create {
         use crate::frontend::tests::plan;
         use crate::frontend::{Expr, LogicalPlan, MapEntryExpr, NodeSpec, RelSpec, RelType};
-        use crate::{Error};
+        use crate::Error;
 
         #[test]
         fn plan_create() -> Result<(), Error> {

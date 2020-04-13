@@ -1,4 +1,3 @@
-
 fn main() -> anyhow::Result<()> {
     #[cfg(all(feature = "cli", feature = "gram"))]
     {
@@ -29,7 +28,7 @@ fn main() -> anyhow::Result<()> {
         let mut cursor = db.new_cursor();
         db.run(query_str, &mut cursor)?;
 
-        while cursor.next()? {}
+        while let Some(_) = cursor.next()? {}
     }
 
     Ok(())
