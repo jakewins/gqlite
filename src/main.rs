@@ -2,7 +2,7 @@ fn main() -> anyhow::Result<()> {
     #[cfg(all(feature = "cli", feature = "gram"))]
     {
         use clap::{App, AppSettings};
-        use gqlite::{Cursor, Database};
+        use gqlite::gramdb::GramDatabase;
         use std::fs::OpenOptions;
 
         let matches = App::new("g")
@@ -23,11 +23,12 @@ fn main() -> anyhow::Result<()> {
             .write(true)
             .read(true)
             .open(path)?;
-        let mut db = Database::open(file)?;
-        let mut cursor = Cursor::new();
+
+        let mut db = GramDatabase::open(file)?;
+        let mut cursor = db.new_cursor();
         db.run(query_str, &mut cursor)?;
 
-        while cursor.next()? {}
+        while let Some(_) = cursor.next()? {}
     }
 
     Ok(())

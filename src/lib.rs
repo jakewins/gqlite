@@ -8,13 +8,11 @@ pub mod backend;
 pub mod frontend;
 
 pub use anyhow::{Error, Result};
-use std::fmt::{self, Debug, Display, Formatter};
-#[cfg(feature = "gram")]
-use std::fs::File;
+use std::fmt::{Debug, Display, Formatter};
 
-use crate::frontend::Frontend;
-use backend::Backend;
-use std::cmp::Ordering;
+use backend::{Backend, BackendCursor};
+use core::fmt;
+use frontend::Frontend;
 
 #[derive(Debug)]
 pub struct Database<T: Backend> {
@@ -31,90 +29,112 @@ impl<T: Backend> Database<T> {
         Ok(Database { backend, frontend })
     }
 
-    pub fn run(&mut self, query_str: &str, cursor: &mut Cursor<T::State>) -> Result<()> {
+    // TODO this is a side-effect, presumably, of me being bad at rust.
+    //      I'd like the public API to not require end-users to specify
+    //      generics everywhere, so they do not have them rewrite their
+    //      code if they swap backend.. but *at the same time* I don't
+    //      want to pay for dynamic dispatch in the hot loop of cursor
+    //      next and accessor methods.
+    //      So.. for now we lose the part where users can change backends
+    //      without rewriting their code. Benchmarking and exploration to
+    //      follow!
+    pub fn new_cursor(&mut self) -> Cursor<T> {
+        let bc = self.backend.new_cursor();
+        Cursor { inner: bc }
+    }
+
+    pub fn run(&mut self, query_str: &str, cursor: &mut Cursor<T>) -> Result<()> {
         let plan = self.frontend.plan(query_str)?;
-        self.backend.eval(plan, cursor)
+        self.backend.eval(plan, &mut cursor.inner)
     }
 }
 
-#[cfg(feature = "gram")]
-pub type GramDatabase = Database<backend::gram::GramBackend>;
-
-#[cfg(feature = "gram")]
-pub type GramCursor = Cursor<backend::gram::GramCursorState>;
-
-#[cfg(feature = "gram")]
-impl GramDatabase {
-    pub fn open(file: File) -> Result<GramDatabase> {
-        let backend = backend::gram::GramBackend::open(file)?;
-        Database::with_backend(backend)
-    }
-}
-
-// Backends provide this
-pub trait CursorState: Debug {
-    fn next(&mut self, row: &mut Row) -> Result<bool>;
-    // Convert a column index (as specified by the ordering in RETURN ..) to a slot in row;
-    // this is a side-effect of us also keeping temporary values in the row struct, so the
-    // mapping is not (currently) 1-1. You could make an argument that we should fix this
-    // by reorganizing slot assignments in the planner once it plans RETURN, so those outputs
-    // go in the right places. That also ties into the planner being smart enough to reuse
-    // slots that are no longer needed in different parts of the pipeline..
-    //
-    // Another alternative is to have each operator own it's own Row instance, copying values out
-    // to an output row?
-    fn slot_index(&self, index: usize) -> usize;
-}
-
-// Cursors are like iterators, except they don't require malloc for each row; the row you read is
-// valid until next time you call "next", or until the transaction you are in is closed.
+// A result cursor; the cursor, when in use, points to a current record and lets you access it.
+// It is approximately the same thing as an iterator, except it doesn't need to allocate on each
+// iteration.
+//
+// We are kind of having the same issue as discussed here:
+// https://www.reddit.com/r/rust/comments/303a09/looking_for_more_information_on_streaming/cpoysog/
+//
+// Eg. this is efficient, but very unergonomic. I think the solution - for now, at least? -
+// is to have a "sugared" version where you can get an iterator out of a cursor, so if you are
+// ok to pay a small performance penalty you get back the regular Rust iteration API.
+//
+// In fact, the sugared version should probably be the default thing you interact with, with an
+// option to drop down to a non-allocating core API if you like.
+//
+// If this could return a borrow on next(..), then you may have an API that both feels ergonomic
+// and is efficient.. we could at least do this with a try_fold version, which is likely faster
+// as well.
+//
+// TL;DR: This is all up in the air. Design goals are to make zero-allocation *possible* and the
+//        default API *easy*, potentially by having two APIs.
 #[derive(Debug)]
-pub struct Cursor<S: CursorState> {
-    pub state: Option<S>,
-    pub row: Row,
+pub struct Cursor<B: Backend> {
+    inner: B::Cursor,
 }
 
-impl<S: CursorState> Cursor<S> {
-    pub fn new() -> Cursor<S> {
-        Cursor {
-            state: None,
-            row: Row::default(),
-        }
-    }
-
-    #[allow(clippy::should_implement_trait)]
-    pub fn next(&mut self) -> Result<bool> {
-        match &mut self.state {
-            Some(state) => state.next(&mut self.row),
-            None => panic!("Use of uninitialized cursor"),
-        }
-    }
-
-    pub fn get(&self, index: usize) -> &Val {
-        // Sorry this is a giant mess lol
-        let slot = self.state.as_ref().unwrap().slot_index(index);
-        &self.row.slots[slot]
+impl<B: Backend> Cursor<B> {
+    pub fn next(&mut self) -> Result<Option<&Row>> {
+        self.inner.next()
     }
 }
 
-#[derive(Debug, PartialEq, Copy, Clone)]
-pub enum Dir {
-    Out,
-    In,
-}
-impl Dir {
-    fn reverse(self) -> Self {
-        match self {
-            Dir::Out => Dir::In,
-            Dir::In => Dir::Out,
-        }
-    }
-}
-
-#[derive(Debug, Default)]
+#[derive(Debug, Clone)]
 pub struct Row {
     pub slots: Vec<Val>,
 }
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum Val {
+    Null,
+    Int(i64),
+    Float(f64),
+    String(String),
+
+    Map(Map),
+    List(Vec<Val>),
+
+    Node {
+        id: usize,
+        labels: Vec<String>,
+        props: Map,
+    },
+
+    Rel {
+        start: usize,
+        end: usize,
+        rel_type: String,
+        props: Map,
+    },
+}
+
+impl Display for Val {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        match self {
+            Val::Null => f.write_str("NULL"),
+            Val::Int(v) => f.write_str(&format!("{}", v)),
+            Val::Float(v) => f.write_str(&format!("{}", v)),
+            Val::String(s) => f.write_str(&s),
+            Val::List(vs) => f.write_str(&format!("{:?}", vs)),
+            Val::Map(v) => f.write_str(&format!("Map{:?}", v)),
+            Val::Node {
+                id,
+                labels: _,
+                props: _,
+            } => f.write_str(&format!("Node({})", id)),
+            Val::Rel {
+                start,
+                end: _,
+                rel_type,
+                props: _,
+            } => f.write_str(&format!("Rel({}/{})", start, rel_type)),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct Map {}
 
 // Pointer to a Val in a row
 pub type Slot = usize;
@@ -145,89 +165,19 @@ pub enum Type {
     Map,
 }
 
-#[derive(Debug, Clone, PartialEq)]
-pub enum Val {
-    Null,
-    String(String),
-    List(Vec<Val>),
-    Int(i64),
-    Float(f64),
-    Node(usize),
-    Rel { node: usize, rel_index: usize },
-}
+#[cfg(feature = "gram")]
+pub mod gramdb {
+    use super::{Cursor, Database, Result};
+    use crate::backend::gram;
+    use std::fs::File;
 
-impl Val {
-    pub fn as_node_id(&self) -> usize {
-        match self {
-            Val::Node(id) => *id,
-            _ => panic!(
-                "invalid execution plan, non-node value feeds into thing expecting node value"
-            ),
-        }
-    }
-    pub fn as_string_literal(&self) -> &str {
-        match self {
-            Val::String(string) => &**string, // TODO: not clone
-            _ => panic!(
-                "invalid execution plan, non-property value feeds into thing expecting node value"
-            ),
-        }
-    }
-}
+    pub type GramDatabase = Database<gram::GramBackend>;
+    pub type GramCursor = Cursor<gram::GramBackend>;
 
-impl PartialOrd for Val {
-    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-        match self {
-            Val::Int(self_v) => match other {
-                Val::String(_) => Some(Ordering::Greater),
-                Val::Int(other_v) => self_v.partial_cmp(other_v),
-                Val::Float(other_v) => self_v.partial_cmp(&&(*other_v as i64)),
-                Val::List(_) => Some(Ordering::Greater),
-                Val::Null => None,
-                _ => panic!("Don't know how to compare {:?} to {:?}", self, other),
-            },
-            Val::Float(self_v) => match other {
-                Val::String(_) => Some(Ordering::Greater),
-                Val::Int(other_v) => (*self_v).partial_cmp(&(*other_v as f64)),
-                Val::Float(other_v) => (*self_v).partial_cmp(other_v),
-                Val::List(_) => Some(Ordering::Greater),
-                Val::Null => None,
-                _ => panic!("Don't know how to compare {:?} to {:?}", self, other),
-            },
-            Val::String(self_v) => match other {
-                Val::Int(_) => Some(Ordering::Less),
-                Val::Float(_) => Some(Ordering::Less),
-                Val::String(other_v) => self_v.partial_cmp(other_v),
-                Val::List(_) => Some(Ordering::Greater),
-                Val::Null => None,
-                _ => panic!("Don't know how to compare {:?} to {:?}", self, other),
-            },
-            Val::List(self_v) => match other {
-                Val::String(_) => Some(Ordering::Less),
-                Val::Int(_) => Some(Ordering::Less),
-                Val::Float(_) => Some(Ordering::Less),
-                Val::List(other_v) => self_v.partial_cmp(&other_v),
-                Val::Null => None,
-                _ => panic!("Don't know how to compare {:?} to {:?}", self, other),
-            },
-            Val::Null => match other {
-                _ => None,
-            },
-            _ => panic!("Don't know how to compare {:?} to {:?}", self, other),
-        }
-    }
-}
-
-impl Display for Val {
-    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        match self {
-            Val::Null => f.write_str("NULL"),
-            Val::String(s) => f.write_str(&s),
-            Val::List(vs) => f.write_str(&format!("{:?}", vs)),
-            Val::Node(id) => f.write_str(&format!("Node({})", id)),
-            Val::Rel { node, rel_index } => f.write_str(&format!("Rel({}/{})", node, rel_index)),
-            Val::Int(v) => f.write_str(&format!("{}", v)),
-            Val::Float(v) => f.write_str(&format!("{}", v)),
+    impl GramDatabase {
+        pub fn open(file: File) -> Result<GramDatabase> {
+            let backend = gram::GramBackend::open(file)?;
+            Database::with_backend(backend)
         }
     }
 }

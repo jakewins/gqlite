@@ -1,15 +1,20 @@
 // The Gram backend is a backend implementation that acts on a Gram file.
+// Note that this is primarily a playground currently, there are no tests and
+// things are duct-taped together; we're interested in exploration and learning
+// not a final product.
+
 // It is currently single threaded, and provides no data durability guarantees.
 
 use crate::backend::gram::functions::AggregatingFuncSpec;
-use crate::backend::{BackendDesc, Token, Tokens};
-use crate::frontend::LogicalPlan;
-use crate::{frontend, Cursor, CursorState, Dir, Error, Row, Slot, Val};
+use crate::backend::{Backend, BackendCursor, BackendDesc, Token, Tokens};
+use crate::frontend::{Dir, LogicalPlan};
+use crate::{frontend, Error, Map, Row, Slot, Val};
 use anyhow::Result;
 use rand::Rng;
 use std::cell::RefCell;
+use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
-use std::fmt::Debug;
+use std::fmt::{self, Debug, Display, Formatter};
 use std::fs::File;
 use std::io::{Seek, SeekFrom, Write};
 use std::rc::Rc;
@@ -190,32 +195,48 @@ impl GramBackend {
     }
 }
 
-impl super::Backend for GramBackend {
-    type State = GramCursorState;
+impl Backend for GramBackend {
+    type Cursor = GramCursor;
+
+    fn new_cursor(&mut self) -> GramCursor {
+        GramCursor {
+            ctx: Context {
+                g: Rc::clone(&self.g),
+                file: Rc::clone(&self.file),
+            },
+            plan: None,
+            slots: vec![],
+            row: GramRow { slots: vec![] },
+            projection: Row { slots: vec![] },
+        }
+    }
 
     fn tokens(&self) -> Rc<RefCell<Tokens>> {
         Rc::clone(&self.tokens)
     }
 
-    fn eval(&mut self, plan: LogicalPlan, cursor: &mut Cursor<Self::State>) -> Result<(), Error> {
+    fn eval(&mut self, plan: LogicalPlan, cursor: &mut GramCursor) -> Result<(), Error> {
         let slots = match &plan {
             LogicalPlan::Return { projections, .. } => {
                 projections.iter().map(|p| (p.alias, p.dst)).collect()
             }
             _ => Vec::new(),
         };
+        if cursor.projection.slots.len() < slots.len() {
+            cursor.projection.slots.resize(slots.len(), Val::Null);
+        }
+
         let plan = self.convert(plan)?;
-        cursor.state = Some(GramCursorState {
-            ctx: Context {
-                g: Rc::clone(&self.g),
-                file: Rc::clone(&self.file),
-            },
-            slots,
-            plan,
-        });
+        cursor.ctx = Context {
+            g: Rc::clone(&self.g),
+            file: Rc::clone(&self.file),
+        };
+        cursor.slots = slots;
+        cursor.plan = Some(plan);
+
         if cursor.row.slots.len() < 16 {
             // TODO derive this from the logical plan
-            cursor.row.slots.resize(16, Val::Null);
+            cursor.row.slots.resize(16, GramVal::Lit(Val::Null));
         }
         Ok(())
     }
@@ -231,19 +252,43 @@ impl super::Backend for GramBackend {
 }
 
 #[derive(Debug)]
-pub struct GramCursorState {
+struct GramRow {
+    slots: Vec<GramVal>,
+}
+
+#[derive(Debug)]
+pub struct GramCursor {
     ctx: Context,
-    plan: Box<dyn Operator>,
+    plan: Option<Box<dyn Operator>>,
+    // This is the internal data row, each operator in the execution plan acts on this,
+    // reading and writing slots. Another model would be that each operator has it's own
+    // row, and that we copy the values between each - or that you use "morsels", buffers of
+    // multiple rows, like how Neo4j does it.
+    row: GramRow,
+
+    // Each time we call next, we project the final result of the execution plan from
+    // row into this public projection; hence this is where we'd pay the cost to materialize
+    // node values, strings and so on
+    projection: Row,
+    // This maps from row to projection; each value corresponds to a slot in the projection,
+    // the token is the name assigned in the query (eg. RETURN 1 as banana)
     slots: Vec<(Token, Slot)>,
 }
 
-impl CursorState for GramCursorState {
-    fn next(&mut self, row: &mut Row) -> Result<bool> {
-        self.plan.next(&mut self.ctx, row)
-    }
-
-    fn slot_index(&self, index: usize) -> usize {
-        self.slots[index].1
+impl BackendCursor for GramCursor {
+    fn next(&mut self) -> Result<Option<&Row>> {
+        if let Some(p) = &mut self.plan {
+            if p.next(&mut self.ctx, &mut self.row)? {
+                for slot in 0..self.slots.len() {
+                    self.projection.slots[slot] = self.row.slots[self.slots[slot].1].project()
+                }
+                Ok(Some(&self.projection))
+            } else {
+                Ok(None)
+            }
+        } else {
+            Err(anyhow!("This cursor is not associated with a result, try passing the cursor to the run() function"))
+        }
     }
 }
 
@@ -263,35 +308,164 @@ enum Expr {
 }
 
 impl Expr {
-    fn eval_prop(ctx: &mut Context, row: &mut Row, expr: &Expr, props: &[Token]) -> Result<Val> {
+    fn eval_prop(
+        ctx: &mut Context,
+        row: &mut GramRow,
+        expr: &Expr,
+        props: &[Token],
+    ) -> Result<GramVal> {
         let mut v = expr.eval(ctx, row)?;
         for prop in props {
             v = match v {
-                Val::Null => bail!("NULL has no property {}", prop),
-                Val::String(_) => bail!("STRING has no property {}", prop),
-                Val::Node(id) => ctx.g.borrow().get_node_prop(id, *prop).unwrap_or(Val::Null),
-                Val::Rel { node, rel_index } => ctx
+                GramVal::Node { id } => ctx
                     .g
                     .borrow()
-                    .get_rel_prop(node, rel_index, *prop)
-                    .unwrap_or(Val::Null),
-                v => panic!("Gram backend does not yet support {:?}", v),
+                    .get_node_prop(id, *prop)
+                    .unwrap_or(GramVal::Lit(Val::Null)),
+                GramVal::Rel { node_id, rel_index } => ctx
+                    .g
+                    .borrow()
+                    .get_rel_prop(node_id, rel_index, *prop)
+                    .unwrap_or(GramVal::Lit(Val::Null)),
+                v => bail!("Gram backend does not yet support {:?}", v),
             };
         }
         Ok(v)
     }
 
-    fn eval(&self, ctx: &mut Context, row: &mut Row) -> Result<Val> {
+    fn eval(&self, ctx: &mut Context, row: &mut GramRow) -> Result<GramVal> {
         match self {
             Expr::Prop(expr, props) => Expr::eval_prop(ctx, row, expr, props),
             Expr::Slot(slot) => Ok(row.slots[*slot].clone()), // TODO not this
-            Expr::Lit(v) => Ok(v.clone()),                    // TODO not this,
+            Expr::Lit(v) => Ok(GramVal::Lit(v.clone())),      // TODO not this,
             Expr::List(vs) => {
                 let mut out = Vec::new();
                 for v in vs {
                     out.push(v.eval(ctx, row)?);
                 }
-                Ok(Val::List(out))
+                Ok(GramVal::List(out))
+            }
+        }
+    }
+}
+
+// The gram backends representation of values; this is what propagates through the execution plan
+// This is different from just Val in that it allows the Gram engine to avoid copying large string
+// values around - it can implement special reference types as it sees fit, that point to it's
+// internal structures, and only in the final projections of the execution plan is the value then
+// converted into a (borrowed!) val.
+#[derive(Debug, PartialEq, Clone)]
+enum GramVal {
+    Lit(Val),
+    List(Vec<GramVal>),
+    Node { id: usize },
+    Rel { node_id: usize, rel_index: usize },
+}
+
+impl GramVal {
+    pub fn project(&self) -> Val {
+        match self {
+            GramVal::Lit(v) => v.clone(),
+            GramVal::List(vs) => {
+                let mut out = Vec::new();
+                out.resize(vs.len(), Val::Null);
+                for i in 0..vs.len() {
+                    out[i] = vs[i].project();
+                }
+                return Val::List(out);
+            }
+            GramVal::Node { id } => {
+                return Val::Node {
+                    id: *id,
+                    labels: vec![],
+                    props: Map {},
+                }
+            }
+            _ => panic!("don't know how to project: {:?}", self),
+        }
+    }
+
+    pub fn as_node_id(&self) -> usize {
+        match self {
+            GramVal::Node { id } => *id,
+            _ => panic!(
+                "invalid execution plan, non-node value feeds into thing expecting node value"
+            ),
+        }
+    }
+    pub fn as_string_literal(&self) -> &str {
+        match self {
+            GramVal::Lit(Val::String(string)) => &**string, // TODO: not clone
+            _ => panic!(
+                "invalid execution plan, non-property value feeds into thing expecting node value"
+            ),
+        }
+    }
+}
+
+impl PartialOrd for GramVal {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        match self {
+            GramVal::Lit(Val::Int(self_v)) => match other {
+                GramVal::Lit(Val::Int(other_v)) => self_v.partial_cmp(other_v),
+                GramVal::Lit(Val::Float(other_v)) => self_v.partial_cmp(&&(*other_v as i64)),
+                GramVal::Lit(Val::String(_)) => Some(Ordering::Greater),
+                GramVal::Lit(Val::List(_)) => Some(Ordering::Greater),
+                GramVal::List(_) => Some(Ordering::Greater),
+                GramVal::Lit(Val::Null) => None,
+                _ => panic!("Don't know how to compare {:?} to {:?}", self, other),
+            },
+            GramVal::Lit(Val::Float(self_v)) => match other {
+                GramVal::Lit(Val::Int(other_v)) => (*self_v).partial_cmp(&(*other_v as f64)),
+                GramVal::Lit(Val::Float(other_v)) => (*self_v).partial_cmp(other_v),
+                GramVal::Lit(Val::String(_)) => Some(Ordering::Greater),
+                GramVal::Lit(Val::List(_)) => Some(Ordering::Greater),
+                GramVal::List(_) => Some(Ordering::Greater),
+                GramVal::Lit(Val::Null) => None,
+                _ => panic!("Don't know how to compare {:?} to {:?}", self, other),
+            },
+            GramVal::Lit(Val::String(self_v)) => match other {
+                GramVal::Lit(Val::Int(_)) => Some(Ordering::Less),
+                GramVal::Lit(Val::Float(_)) => Some(Ordering::Less),
+                GramVal::Lit(Val::String(other_v)) => self_v.partial_cmp(other_v),
+                GramVal::Lit(Val::List(_)) => Some(Ordering::Greater),
+                GramVal::List(_) => Some(Ordering::Greater),
+                GramVal::Lit(Val::Null) => None,
+                _ => panic!("Don't know how to compare {:?} to {:?}", self, other),
+            },
+            GramVal::Lit(Val::List(_self_v)) => match other {
+                GramVal::Lit(Val::String(_)) => Some(Ordering::Less),
+                GramVal::Lit(Val::Int(_)) => Some(Ordering::Less),
+                GramVal::Lit(Val::Float(_)) => Some(Ordering::Less),
+                GramVal::Lit(Val::Null) => None,
+                _ => panic!("Don't know how to compare {:?} to {:?}", self, other),
+            },
+            GramVal::List(self_v) => match other {
+                GramVal::Lit(Val::String(_)) => Some(Ordering::Less),
+                GramVal::Lit(Val::Int(_)) => Some(Ordering::Less),
+                GramVal::Lit(Val::Float(_)) => Some(Ordering::Less),
+                GramVal::List(other_vs) => {
+                    return self_v.partial_cmp(&other_vs);
+                }
+                GramVal::Lit(Val::Null) => None,
+                _ => panic!("Don't know how to compare {:?} to {:?}", self, other),
+            },
+            GramVal::Lit(Val::Null) => match other {
+                _ => None,
+            },
+            _ => panic!("Don't know how to compare {:?} to {:?}", self, other),
+        }
+    }
+}
+
+impl Display for GramVal {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        match self {
+            GramVal::Lit(v) => std::fmt::Display::fmt(&v, f),
+            GramVal::List(vs) => f.write_str(&format!("{:?}", vs)),
+            GramVal::Node { id } => f.write_str(&format!("Node({})", id)),
+            GramVal::Rel { node_id, rel_index } => {
+                f.write_str(&format!("Rel({}/{})", node_id, rel_index))
             }
         }
     }
@@ -299,7 +473,7 @@ impl Expr {
 
 // Physical operator. We have one of these for each Logical operator the frontend emits.
 trait Operator: Debug {
-    fn next(&mut self, ctx: &mut Context, row: &mut Row) -> Result<bool>;
+    fn next(&mut self, ctx: &mut Context, row: &mut GramRow) -> Result<bool>;
 }
 
 #[derive(Debug)]
@@ -327,7 +501,7 @@ struct Expand {
 }
 
 impl Operator for Expand {
-    fn next(&mut self, ctx: &mut Context, out: &mut Row) -> Result<bool> {
+    fn next(&mut self, ctx: &mut Context, out: &mut GramRow) -> Result<bool> {
         loop {
             match &self.state {
                 ExpandState::NextNode => {
@@ -352,11 +526,11 @@ impl Operator for Expand {
                     self.next_rel_index += 1;
 
                     if rel.rel_type == self.rel_type {
-                        out.slots[self.rel_slot] = Val::Rel {
-                            node,
+                        out.slots[self.rel_slot] = GramVal::Rel {
+                            node_id: node,
                             rel_index: self.next_rel_index - 1,
                         };
-                        out.slots[self.dst_slot] = Val::Node(rel.other_node);
+                        out.slots[self.dst_slot] = GramVal::Node { id: rel.other_node };
                         return Ok(true);
                     }
                 }
@@ -381,7 +555,7 @@ struct NodeScan {
 }
 
 impl Operator for NodeScan {
-    fn next(&mut self, ctx: &mut Context, out: &mut Row) -> Result<bool> {
+    fn next(&mut self, ctx: &mut Context, out: &mut GramRow) -> Result<bool> {
         loop {
             let g = ctx.g.borrow();
             if g.nodes.len() > self.next_node {
@@ -393,7 +567,7 @@ impl Operator for NodeScan {
                     }
                 }
 
-                out.slots[self.slot] = Val::Node(self.next_node);
+                out.slots[self.slot] = GramVal::Node { id: self.next_node };
                 self.next_node += 1;
                 return Ok(true);
             }
@@ -412,7 +586,7 @@ struct Argument {
 }
 
 impl Operator for Argument {
-    fn next(&mut self, _ctx: &mut Context, _out: &mut Row) -> Result<bool> {
+    fn next(&mut self, _ctx: &mut Context, _out: &mut GramRow) -> Result<bool> {
         if self.consumed {
             return Ok(false);
         }
@@ -435,7 +609,7 @@ struct Create {
 }
 
 impl Operator for Create {
-    fn next(&mut self, ctx: &mut Context, out: &mut Row) -> Result<bool, Error> {
+    fn next(&mut self, ctx: &mut Context, out: &mut GramRow) -> Result<bool, Error> {
         for node in &self.nodes {
             let node_properties = node
                 .props
@@ -461,7 +635,7 @@ struct Return {
 }
 
 impl Operator for Return {
-    fn next(&mut self, ctx: &mut Context, out: &mut Row) -> Result<bool> {
+    fn next(&mut self, ctx: &mut Context, out: &mut GramRow) -> Result<bool> {
         if self.print_header {
             println!("----");
             let mut first = true;
@@ -512,7 +686,7 @@ struct AggregateEntry {
 }
 
 impl Operator for Aggregate {
-    fn next(&mut self, ctx: &mut Context, row: &mut Row) -> Result<bool> {
+    fn next(&mut self, ctx: &mut Context, row: &mut GramRow) -> Result<bool> {
         if self.consumed {
             return Ok(false);
         }
@@ -538,12 +712,12 @@ struct Unwind {
     list_expr: Expr,
     dst: Slot,
     // TODO this should use an iterator
-    current_list: Option<Vec<Val>>,
+    current_list: Option<Vec<GramVal>>,
     next_index: usize,
 }
 
 impl Operator for Unwind {
-    fn next(&mut self, ctx: &mut Context, row: &mut Row) -> Result<bool> {
+    fn next(&mut self, ctx: &mut Context, row: &mut GramRow) -> Result<bool> {
         loop {
             if self.current_list.is_none() {
                 let src = &mut *self.src;
@@ -552,7 +726,7 @@ impl Operator for Unwind {
                 }
 
                 match self.list_expr.eval(ctx, row)? {
-                    Val::List(items) => self.current_list = Some(items),
+                    GramVal::List(items) => self.current_list = Some(items),
                     _ => return Err(anyhow!("UNWIND expression must yield a list")),
                 }
                 self.next_index = 0;
@@ -573,10 +747,10 @@ impl Operator for Unwind {
 }
 
 mod parser {
-    use crate::backend::gram::{Graph, Node};
+    use super::Val;
+    use crate::backend::gram::{GramVal, Graph, Node};
     use crate::backend::{Token, Tokens};
     use crate::pest::Parser;
-    use crate::Val;
     use anyhow::Result;
     use std::collections::HashMap;
     use std::collections::HashSet;
@@ -658,7 +832,7 @@ mod parser {
                 }
                 Rule::node => {
                     let mut identifier: Option<String> = None;
-                    let mut props: HashMap<Token, Val> = HashMap::new();
+                    let mut props: HashMap<Token, GramVal> = HashMap::new();
                     let mut labels: HashSet<Token> = HashSet::new();
 
                     for part in item.into_inner() {
@@ -698,7 +872,7 @@ mod parser {
                                     let key_str = key.unwrap();
                                     props.insert(
                                         tokens.tokenize(&key_str),
-                                        Val::String(val.unwrap()),
+                                        GramVal::Lit(Val::String(val.unwrap())),
                                     );
                                 }
                             }
@@ -728,7 +902,7 @@ pub struct RelHalf {
     rel_type: Token,
     dir: Dir,
     other_node: usize,
-    properties: Rc<HashMap<Token, Val>>,
+    properties: Rc<HashMap<Token, GramVal>>,
 }
 
 #[derive(Debug)]
@@ -755,7 +929,7 @@ impl Clone for NodeSpec {
 #[derive(Debug)]
 pub struct Node {
     labels: HashSet<Token>,
-    properties: HashMap<Token, Val>,
+    properties: HashMap<Token, GramVal>,
     rels: Vec<RelHalf>,
 }
 
@@ -765,11 +939,11 @@ pub struct Graph {
 }
 
 impl Graph {
-    fn get_node_prop(&self, node_id: usize, prop: Token) -> Option<Val> {
+    fn get_node_prop(&self, node_id: usize, prop: Token) -> Option<GramVal> {
         self.nodes[node_id].properties.get(&prop).cloned()
     }
 
-    fn get_rel_prop(&self, node_id: usize, rel_index: usize, prop: Token) -> Option<Val> {
+    fn get_rel_prop(&self, node_id: usize, rel_index: usize, prop: Token) -> Option<GramVal> {
         self.nodes[node_id].rels[rel_index]
             .properties
             .get(&prop)
@@ -813,8 +987,8 @@ fn append_node(
     ctx: &mut Context,
     tokens_in: Rc<RefCell<Tokens>>,
     labels: HashSet<Token>,
-    node_properties: HashMap<Token, Val>,
-) -> Result<Val, Error> {
+    node_properties: HashMap<Token, GramVal>,
+) -> Result<GramVal, Error> {
     let tokens = tokens_in.borrow();
     let properties_gram_ready: HashMap<&str, &str> = node_properties
         .iter()
@@ -858,15 +1032,15 @@ fn append_node(
         .expect("seek error");
 
     match ctx.file.borrow_mut().write_all(gram_string.as_bytes()) {
-        Ok(_) => Ok(Val::Node(node_id)),
+        Ok(_) => Ok(GramVal::Node { id: node_id }),
         Err(e) => Err(Error::new(e)),
     }
 }
 
 mod functions {
-    use crate::backend::gram::{Context, Expr};
+    use super::{Context, Expr, GramRow, GramVal, Val};
     use crate::backend::{FuncSignature, FuncType, Tokens};
-    use crate::{Result, Row, Type, Val};
+    use crate::{Result, Type};
     use std::cmp::Ordering;
     use std::fmt::Debug;
 
@@ -884,8 +1058,8 @@ mod functions {
 
     // A running aggregation in an executing query
     pub(super) trait AggregatingFunc: Debug {
-        fn apply(&mut self, ctx: &mut Context, row: &mut Row) -> Result<()>;
-        fn complete(&mut self) -> Result<&Val>;
+        fn apply(&mut self, ctx: &mut Context, row: &mut GramRow) -> Result<()>;
+        fn complete(&mut self) -> Result<&GramVal>;
     }
 
     #[derive(Debug)]
@@ -923,14 +1097,14 @@ mod functions {
     #[derive(Debug)]
     struct Min {
         arg: Expr,
-        min: Option<Val>,
+        min: Option<GramVal>,
     }
 
     impl AggregatingFunc for Min {
-        fn apply(&mut self, ctx: &mut Context, row: &mut Row) -> Result<()> {
+        fn apply(&mut self, ctx: &mut Context, row: &mut GramRow) -> Result<()> {
             let v = self.arg.eval(ctx, row)?;
             if let Some(current_min) = &self.min {
-                if v == Val::Null {
+                if v == GramVal::Lit(Val::Null) {
                     return Ok(());
                 }
                 if let Some(Ordering::Less) = v.partial_cmp(&current_min) {
@@ -942,7 +1116,7 @@ mod functions {
             Ok(())
         }
 
-        fn complete(&mut self) -> Result<&Val> {
+        fn complete(&mut self) -> Result<&GramVal> {
             if let Some(v) = &self.min {
                 return Ok(v);
             } else {
@@ -989,14 +1163,14 @@ mod functions {
     #[derive(Debug)]
     struct Max {
         arg: Expr,
-        max: Option<Val>,
+        max: Option<GramVal>,
     }
 
     impl AggregatingFunc for Max {
-        fn apply(&mut self, ctx: &mut Context, row: &mut Row) -> Result<()> {
+        fn apply(&mut self, ctx: &mut Context, row: &mut GramRow) -> Result<()> {
             let v = self.arg.eval(ctx, row)?;
             if let Some(current_max) = &self.max {
-                if v == Val::Null {
+                if v == GramVal::Lit(Val::Null) {
                     return Ok(());
                 }
                 if let Some(Ordering::Greater) = v.partial_cmp(&current_max) {
@@ -1008,7 +1182,7 @@ mod functions {
             Ok(())
         }
 
-        fn complete(&mut self) -> Result<&Val> {
+        fn complete(&mut self) -> Result<&GramVal> {
             if let Some(v) = &self.max {
                 return Ok(v);
             } else {

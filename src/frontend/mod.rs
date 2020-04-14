@@ -6,7 +6,7 @@
 use pest::Parser;
 
 use crate::backend::{BackendDesc, Token, Tokens};
-use crate::{Dir, Slot};
+use crate::Slot;
 use anyhow::Result;
 use pest::iterators::Pair;
 use std::cell::RefCell;
@@ -135,6 +135,20 @@ pub enum LogicalPlan {
         src: Box<Self>,
         projections: Vec<Projection>,
     },
+}
+
+#[derive(Debug, PartialEq, Copy, Clone)]
+pub enum Dir {
+    Out,
+    In,
+}
+impl Dir {
+    fn reverse(self) -> Self {
+        match self {
+            Dir::Out => Dir::In,
+            Dir::In => Dir::Out,
+        }
+    }
 }
 
 #[derive(Debug, PartialEq, Copy, Clone)]
@@ -1072,7 +1086,7 @@ mod tests {
     mod unwind {
         use crate::frontend::tests::plan;
         use crate::frontend::{Expr, LogicalPlan};
-        use crate::{Error};
+        use crate::Error;
 
         #[test]
         fn plan_unwind() -> Result<(), Error> {
@@ -1098,7 +1112,7 @@ mod tests {
     mod create {
         use crate::frontend::tests::plan;
         use crate::frontend::{Expr, LogicalPlan, MapEntryExpr, NodeSpec, RelSpec, RelType};
-        use crate::{Error};
+        use crate::Error;
 
         #[test]
         fn plan_create() -> Result<(), Error> {
