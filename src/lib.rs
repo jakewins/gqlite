@@ -86,6 +86,21 @@ pub struct Row {
 }
 
 #[derive(Debug, Clone, PartialEq)]
+pub struct Node {
+    pub id: usize,
+    pub labels: Vec<String>,
+    pub props: Map,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct Rel {
+    pub start: usize,
+    pub end: usize,
+    pub rel_type: String,
+    pub props: Map,
+}
+
+#[derive(Debug, Clone, PartialEq)]
 pub enum Val {
     Null,
     Int(i64),
@@ -95,18 +110,8 @@ pub enum Val {
     Map(Map),
     List(Vec<Val>),
 
-    Node {
-        id: usize,
-        labels: Vec<String>,
-        props: Map,
-    },
-
-    Rel {
-        start: usize,
-        end: usize,
-        rel_type: String,
-        props: Map,
-    },
+    Node(Node),
+    Rel(Rel),
 }
 
 impl Display for Val {
@@ -118,23 +123,19 @@ impl Display for Val {
             Val::String(s) => f.write_str(&s),
             Val::List(vs) => f.write_str(&format!("{:?}", vs)),
             Val::Map(v) => f.write_str(&format!("Map{:?}", v)),
-            Val::Node {
-                id,
-                labels: _,
-                props: _,
-            } => f.write_str(&format!("Node({})", id)),
-            Val::Rel {
-                start,
-                end: _,
-                rel_type,
-                props: _,
-            } => f.write_str(&format!("Rel({}/{})", start, rel_type)),
+            Val::Node(v) => f.write_str(&format!("Node({})", v.id)),
+            Val::Rel(v) => f.write_str(&format!("Rel({}/{})", v.start, v.rel_type)),
         }
     }
 }
 
-#[derive(Debug, Clone, PartialEq)]
-pub struct Map {}
+// Don't like this at all
+// 1) Forced to copy all those string keys each time we create one of these
+// 2) Unergonomic for Rust users, they'd need a HashMap or a BTreeMap or some other random-access, I guess?
+// 3) Meh for crossing the FFI boundary
+//
+// So just here to have something to let work on getting a walking skeleton can continue
+pub type Map = Vec<(String, Val)>;
 
 // Pointer to a Val in a row
 pub type Slot = usize;

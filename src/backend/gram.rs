@@ -8,7 +8,7 @@
 use crate::backend::gram::functions::AggregatingFuncSpec;
 use crate::backend::{Backend, BackendCursor, BackendDesc, Token, Tokens};
 use crate::frontend::{Dir, LogicalPlan};
-use crate::{frontend, Error, Map, Row, Slot, Val};
+use crate::{frontend, Error, Row, Slot, Val};
 use anyhow::Result;
 use rand::Rng;
 use std::cell::RefCell;
@@ -201,6 +201,7 @@ impl Backend for GramBackend {
     fn new_cursor(&mut self) -> GramCursor {
         GramCursor {
             ctx: Context {
+                tokens: Rc::clone(&self.tokens),
                 g: Rc::clone(&self.g),
                 file: Rc::clone(&self.file),
             },
@@ -228,6 +229,7 @@ impl Backend for GramBackend {
 
         let plan = self.convert(plan)?;
         cursor.ctx = Context {
+            tokens: Rc::clone(&self.tokens),
             g: Rc::clone(&self.g),
             file: Rc::clone(&self.file),
         };
@@ -280,7 +282,8 @@ impl BackendCursor for GramCursor {
         if let Some(p) = &mut self.plan {
             if p.next(&mut self.ctx, &mut self.row)? {
                 for slot in 0..self.slots.len() {
-                    self.projection.slots[slot] = self.row.slots[self.slots[slot].1].project()
+                    self.projection.slots[slot] =
+                        self.row.slots[self.slots[slot].1].project(&mut self.ctx)
                 }
                 Ok(Some(&self.projection))
             } else {
@@ -294,6 +297,7 @@ impl BackendCursor for GramCursor {
 
 #[derive(Debug)]
 struct Context {
+    tokens: Rc<RefCell<Tokens>>,
     g: Rc<RefCell<Graph>>,
     file: Rc<RefCell<File>>,
 }
@@ -312,30 +316,28 @@ impl Expr {
         ctx: &mut Context,
         row: &mut GramRow,
         expr: &Expr,
-        props: &[Token],
+        prop: Token,
     ) -> Result<GramVal> {
-        let mut v = expr.eval(ctx, row)?;
-        for prop in props {
-            v = match v {
-                GramVal::Node { id } => ctx
-                    .g
-                    .borrow()
-                    .get_node_prop(id, *prop)
-                    .unwrap_or(GramVal::Lit(Val::Null)),
-                GramVal::Rel { node_id, rel_index } => ctx
-                    .g
-                    .borrow()
-                    .get_rel_prop(node_id, rel_index, *prop)
-                    .unwrap_or(GramVal::Lit(Val::Null)),
-                v => bail!("Gram backend does not yet support {:?}", v),
-            };
-        }
-        Ok(v)
+        let v = match expr.eval(ctx, row)? {
+            GramVal::Node { id } => ctx.g.borrow().get_node_prop(id, prop).unwrap_or(Val::Null),
+            GramVal::Rel { node_id, rel_index } => ctx
+                .g
+                .borrow()
+                .get_rel_prop(node_id, rel_index, prop)
+                .unwrap_or(Val::Null),
+            v => bail!("Gram backend does not yet support {:?}", v),
+        };
+        Ok(GramVal::Lit(v))
     }
 
     fn eval(&self, ctx: &mut Context, row: &mut GramRow) -> Result<GramVal> {
         match self {
-            Expr::Prop(expr, props) => Expr::eval_prop(ctx, row, expr, props),
+            Expr::Prop(expr, props) => {
+                if props.len() != 1 {
+                    panic!("Can't handle property expressions referring to more than one key")
+                }
+                Expr::eval_prop(ctx, row, expr, props[0])
+            }
             Expr::Slot(slot) => Ok(row.slots[*slot].clone()), // TODO not this
             Expr::Lit(v) => Ok(GramVal::Lit(v.clone())),      // TODO not this,
             Expr::List(vs) => {
@@ -351,7 +353,7 @@ impl Expr {
 
 // The gram backends representation of values; this is what propagates through the execution plan
 // This is different from just Val in that it allows the Gram engine to avoid copying large string
-// values around - it can implement special reference types as it sees fit, that point to it's
+// values around - it can implement special reference types as it sees fit, that point to its
 // internal structures, and only in the final projections of the execution plan is the value then
 // converted into a (borrowed!) val.
 #[derive(Debug, PartialEq, Clone)]
@@ -363,23 +365,31 @@ enum GramVal {
 }
 
 impl GramVal {
-    pub fn project(&self) -> Val {
+    pub fn project(&self, ctx: &mut Context) -> Val {
         match self {
             GramVal::Lit(v) => v.clone(),
             GramVal::List(vs) => {
                 let mut out = Vec::new();
                 out.resize(vs.len(), Val::Null);
                 for i in 0..vs.len() {
-                    out[i] = vs[i].project();
+                    out[i] = vs[i].project(ctx);
                 }
                 return Val::List(out);
             }
             GramVal::Node { id } => {
-                return Val::Node {
+                let n = &ctx.g.borrow().nodes[*id];
+                let mut props = crate::Map::new();
+                for (k, v) in &n.properties {
+                    props.push((
+                        ctx.tokens.borrow().lookup(*k).unwrap().to_string(),
+                        v.clone(),
+                    ));
+                }
+                return Val::Node(crate::Node {
                     id: *id,
                     labels: vec![],
-                    props: Map {},
-                }
+                    props,
+                });
             }
             _ => panic!("don't know how to project: {:?}", self),
         }
@@ -390,14 +400,6 @@ impl GramVal {
             GramVal::Node { id } => *id,
             _ => panic!(
                 "invalid execution plan, non-node value feeds into thing expecting node value"
-            ),
-        }
-    }
-    pub fn as_string_literal(&self) -> &str {
-        match self {
-            GramVal::Lit(Val::String(string)) => &**string, // TODO: not clone
-            _ => panic!(
-                "invalid execution plan, non-property value feeds into thing expecting node value"
             ),
         }
     }
@@ -614,7 +616,13 @@ impl Operator for Create {
             let node_properties = node
                 .props
                 .iter()
-                .map(|p| (*p.0, (p.1.eval(ctx, out).unwrap())))
+                .map(|p| {
+                    if let Ok(GramVal::Lit(val)) = p.1.eval(ctx, out) {
+                        return (*p.0, (val));
+                    } else {
+                        panic!("Property creation expression yielded non-literal?")
+                    }
+                })
                 .collect();
             out.slots[node.slot] = append_node(
                 ctx,
@@ -748,7 +756,7 @@ impl Operator for Unwind {
 
 mod parser {
     use super::Val;
-    use crate::backend::gram::{GramVal, Graph, Node};
+    use crate::backend::gram::{Graph, Node};
     use crate::backend::{Token, Tokens};
     use crate::pest::Parser;
     use anyhow::Result;
@@ -832,7 +840,7 @@ mod parser {
                 }
                 Rule::node => {
                     let mut identifier: Option<String> = None;
-                    let mut props: HashMap<Token, GramVal> = HashMap::new();
+                    let mut props: HashMap<Token, Val> = HashMap::new();
                     let mut labels: HashSet<Token> = HashSet::new();
 
                     for part in item.into_inner() {
@@ -872,7 +880,7 @@ mod parser {
                                     let key_str = key.unwrap();
                                     props.insert(
                                         tokens.tokenize(&key_str),
-                                        GramVal::Lit(Val::String(val.unwrap())),
+                                        Val::String(val.unwrap()),
                                     );
                                 }
                             }
@@ -902,9 +910,11 @@ pub struct RelHalf {
     rel_type: Token,
     dir: Dir,
     other_node: usize,
-    properties: Rc<HashMap<Token, GramVal>>,
+    properties: Rc<HashMap<Token, Val>>,
 }
 
+// Nodespec is used by the CREATE operator, and differs from Node in that its properties are
+// expressions rather than materialized values.
 #[derive(Debug)]
 struct NodeSpec {
     pub slot: usize,
@@ -929,7 +939,7 @@ impl Clone for NodeSpec {
 #[derive(Debug)]
 pub struct Node {
     labels: HashSet<Token>,
-    properties: HashMap<Token, GramVal>,
+    properties: HashMap<Token, Val>,
     rels: Vec<RelHalf>,
 }
 
@@ -939,11 +949,11 @@ pub struct Graph {
 }
 
 impl Graph {
-    fn get_node_prop(&self, node_id: usize, prop: Token) -> Option<GramVal> {
+    fn get_node_prop(&self, node_id: usize, prop: Token) -> Option<Val> {
         self.nodes[node_id].properties.get(&prop).cloned()
     }
 
-    fn get_rel_prop(&self, node_id: usize, rel_index: usize, prop: Token) -> Option<GramVal> {
+    fn get_rel_prop(&self, node_id: usize, rel_index: usize, prop: Token) -> Option<Val> {
         self.nodes[node_id].rels[rel_index]
             .properties
             .get(&prop)
@@ -987,12 +997,12 @@ fn append_node(
     ctx: &mut Context,
     tokens_in: Rc<RefCell<Tokens>>,
     labels: HashSet<Token>,
-    node_properties: HashMap<Token, GramVal>,
+    node_properties: HashMap<Token, Val>,
 ) -> Result<GramVal, Error> {
     let tokens = tokens_in.borrow();
-    let properties_gram_ready: HashMap<&str, &str> = node_properties
+    let properties_gram_ready: HashMap<&str, String> = node_properties
         .iter()
-        .map(|kvp| (tokens.lookup(*kvp.0).unwrap(), (*kvp.1).as_string_literal()))
+        .map(|kvp| (tokens.lookup(*kvp.0).unwrap(), format!("{}", (*kvp.1))))
         .collect();
     let gram_identifier = generate_uuid().to_hyphenated().to_string();
     let gram_string = if !labels.is_empty() {
