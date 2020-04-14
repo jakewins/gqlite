@@ -80,7 +80,28 @@ mod example_steps {
                     }
                     _ => panic!("Expected a list, found {:?}", v),
                 },
-                ValMatcher::Node { props: _ } => panic!("not implemented"),
+                ValMatcher::Node { props } => {
+                    if let Val::Node(n) = v {
+                        if n.props.len() != props.len() {
+                            panic!("Node has different number of properties from spec, expected {:?}, got {:?}",
+                                   props, n.props);
+                        }
+                        for (k, prop_val) in &n.props {
+                            let mut found = false;
+                            for (ek, ev) in props {
+                                if ek == k {
+                                    found = true;
+                                    ev.assert_eq(prop_val.clone());
+                                }
+                            }
+                            if !found {
+                                panic!("Node has unspecified property {}", k);
+                            }
+                        }
+                    } else {
+                        panic!("Expected a node, found {:?}", v);
+                    }
+                }
             }
         }
     }
@@ -91,6 +112,7 @@ mod example_steps {
         while let Some(_) = cursor.next()? {
             // consume
         }
+        world.starting_graph_properties.node_count = count_nodes(world);
         result
     }
 
