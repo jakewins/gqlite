@@ -69,26 +69,26 @@ Feature: WithAcceptance
       | (:A) |
     And no side effects
 
-#  Scenario: No dependencies between the query parts
-#    Given an empty graph
-#    And having executed:
-#      """
-#      CREATE (:A), (:B)
-#      """
-#    When executing query:
-#      """
-#      MATCH (a)
-#      WITH a
-#      MATCH (b)
-#      RETURN a, b
-#      """
-#    Then the result should be, in any order:
-#      | a    | b    |
-#      | (:A) | (:A) |
-#      | (:A) | (:B) |
-#      | (:B) | (:A) |
-#      | (:B) | (:B) |
-#    And no side effects
+  Scenario: No dependencies between the query parts
+    Given an empty graph
+    And having executed:
+      """
+      CREATE (:A), (:B)
+      """
+    When executing query:
+      """
+      MATCH (a)
+      WITH a
+      MATCH (b)
+      RETURN a, b
+      """
+    Then the result should be, in any order:
+      | a    | b    |
+      | (:A) | (:A) |
+      | (:A) | (:B) |
+      | (:B) | (:A) |
+      | (:B) | (:B) |
+    And no side effects
 
   Scenario: Aliasing
     Given an empty graph
