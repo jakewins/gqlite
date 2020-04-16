@@ -89,28 +89,28 @@ Feature: WithAcceptance
 #      | (:B) | (:A) |
 #      | (:B) | (:B) |
 #    And no side effects
-#
-#  Scenario: Aliasing
-#    Given an empty graph
-#    And having executed:
-#      """
-#      CREATE (:Begin {num: 42}),
-#             (:End {num: 42}),
-#             (:End {num: 3})
-#      """
-#    When executing query:
-#      """
-#      MATCH (a:Begin)
-#      WITH a.num AS property
-#      MATCH (b:End)
-#      WHERE property = b.num
-#      RETURN b
-#      """
-#    Then the result should be, in any order:
-#      | b                |
-#      | (:End {num: 42}) |
-#    And no side effects
-#
+
+  Scenario: Aliasing
+    Given an empty graph
+    And having executed:
+      """
+      CREATE (:Begin {num: 42}),
+             (:End {num: 42}),
+             (:End {num: 3})
+      """
+    When executing query:
+      """
+      MATCH (a:Begin)
+      WITH a.num AS property
+      MATCH (b:End)
+      WHERE property = b.num
+      RETURN b
+      """
+    Then the result should be, in any order:
+      | b                |
+      | (:End {num: 42}) |
+    And no side effects
+
 #  Scenario: Handle dependencies across WITH
 #    Given an empty graph
 #    And having executed:
