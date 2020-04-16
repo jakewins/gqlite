@@ -68,7 +68,7 @@ Feature: WithAcceptance
 #      | a    |
 #      | (:A) |
 #    And no side effects
-#
+
 #  Scenario: No dependencies between the query parts
 #    Given an empty graph
 #    And having executed:
