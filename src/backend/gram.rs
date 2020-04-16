@@ -59,7 +59,7 @@ impl GramBackend {
                 slot,
                 labels,
             })),
-            LogicalPlan::Create { src, nodes, .. } => {
+            LogicalPlan::Create { src, nodes, rels } => {
                 let mut out_nodes = Vec::with_capacity(nodes.len());
                 for (i, ns) in nodes.into_iter().enumerate() {
                     let mut props = HashMap::new();
@@ -75,9 +75,27 @@ impl GramBackend {
                         },
                     );
                 }
+                let mut out_rels = Vec::with_capacity(rels.len());
+                for (i, ns) in rels.into_iter().enumerate() {
+                    let mut props = HashMap::new();
+                    for k in ns.props {
+                        props.insert(k.key, self.convert_expr(k.val));
+                    }
+                    out_rels.insert(
+                        i,
+                        RelSpec {
+                            slot: ns.slot,
+                            start_node_slot: ns.start_node_slot,
+                            end_node_slot: ns.end_node_slot,
+                            rel_type: ns.rel_type,
+                            props,
+                        },
+                    );
+                }
                 Ok(Box::new(Create {
                     src: self.convert(*src)?,
                     nodes: out_nodes,
+                    rels: out_rels,
                     tokens: self.tokens.clone(),
                 }))
             }
@@ -93,7 +111,7 @@ impl GramBackend {
                 src_slot,
                 rel_slot,
                 dst_slot,
-                rel_type: rel_type.token(),
+                rel_type,
                 next_rel_index: 0,
                 state: ExpandState::NextNode,
             })),
@@ -134,6 +152,7 @@ impl GramBackend {
                     converted_projections.push(Projection {
                         expr: self.convert_expr(projection.expr),
                         alias: projection.alias,
+                        slot: projection.dst,
                     })
                 }
 
@@ -141,6 +160,21 @@ impl GramBackend {
                     src: self.convert(*src)?,
                     projections: converted_projections,
                     print_header: true,
+                }))
+            }
+            LogicalPlan::Project { src, projections } => {
+                let mut converted_projections = Vec::new();
+                for projection in projections {
+                    converted_projections.push(Projection {
+                        expr: self.convert_expr(projection.expr),
+                        alias: projection.alias,
+                        slot: projection.dst,
+                    })
+                }
+
+                Ok(Box::new(Project {
+                    src: self.convert(*src)?,
+                    projections: converted_projections,
                 }))
             }
         }
@@ -385,9 +419,13 @@ impl GramVal {
                         v.clone(),
                     ));
                 }
+                let mut labels = Vec::new();
+                for l in &n.labels {
+                    labels.push(ctx.tokens.borrow().lookup(*l).unwrap().to_string());
+                }
                 return Val::Node(crate::Node {
                     id: *id,
-                    labels: vec![],
+                    labels,
                     props,
                 });
             }
@@ -494,7 +532,7 @@ struct Expand {
 
     pub dst_slot: usize,
 
-    pub rel_type: Token,
+    pub rel_type: Option<Token>,
 
     // In the current adjacency list, what is the next index we should return?
     pub next_rel_index: usize,
@@ -511,14 +549,17 @@ impl Operator for Expand {
                     if !self.src.next(ctx, out)? {
                         return Ok(false);
                     }
+                    println!("[expand]  in: {:?}", out);
                     self.state = ExpandState::InNode;
                 }
                 ExpandState::InNode => {
                     let node = out.slots[self.src_slot].as_node_id();
                     let g = ctx.g.borrow();
                     let rels = &g.nodes[node].rels;
+                    println!("[expand]  relcount={}", rels.len());
                     if self.next_rel_index >= rels.len() {
                         // No more rels on this node
+                        println!("[expand]  no mas");
                         self.state = ExpandState::NextNode;
                         self.next_rel_index = 0;
                         continue;
@@ -527,12 +568,13 @@ impl Operator for Expand {
                     let rel = &rels[self.next_rel_index];
                     self.next_rel_index += 1;
 
-                    if rel.rel_type == self.rel_type {
+                    if self.rel_type == None || rel.rel_type == self.rel_type.unwrap() {
                         out.slots[self.rel_slot] = GramVal::Rel {
                             node_id: node,
                             rel_index: self.next_rel_index - 1,
                         };
                         out.slots[self.dst_slot] = GramVal::Node { id: rel.other_node };
+                        println!("[expand]  out: {:?}", out);
                         return Ok(true);
                     }
                 }
@@ -597,16 +639,44 @@ impl Operator for Argument {
     }
 }
 
-#[derive(Debug, Clone)]
-struct Projection {
-    pub expr: Expr,
-    pub alias: Token,
+// Nodespec is used by the CREATE operator, and differs from Node in that its properties are
+// expressions rather than materialized values.
+#[derive(Debug)]
+struct NodeSpec {
+    pub slot: usize,
+    pub labels: HashSet<Token>,
+    pub props: HashMap<Token, Expr>,
+}
+
+impl Clone for NodeSpec {
+    fn clone(&self) -> Self {
+        NodeSpec {
+            slot: self.slot,
+            labels: self.labels.iter().cloned().collect(),
+            props: self.props.clone(),
+        }
+    }
+
+    fn clone_from(&mut self, _source: &'_ Self) {
+        unimplemented!()
+    }
+}
+
+// Specifies a rel to be created (thought: Could these be implemented as functions?)
+#[derive(Debug)]
+struct RelSpec {
+    pub slot: usize,
+    pub start_node_slot: usize,
+    pub end_node_slot: usize,
+    pub rel_type: Token,
+    pub props: HashMap<Token, Expr>,
 }
 
 #[derive(Debug)]
 struct Create {
     pub src: Box<dyn Operator>,
     nodes: Vec<NodeSpec>,
+    rels: Vec<RelSpec>,
     tokens: Rc<RefCell<Tokens>>,
 }
 
@@ -630,6 +700,31 @@ impl Operator for Create {
                 node.labels.clone(),
                 node_properties,
             )?;
+        }
+        for rel in &self.rels {
+            let rel_properties = rel
+                .props
+                .iter()
+                .map(|p| {
+                    if let Ok(GramVal::Lit(val)) = p.1.eval(ctx, out) {
+                        return (*p.0, (val));
+                    } else {
+                        panic!("Property creation expression yielded non-literal?")
+                    }
+                })
+                .collect();
+
+            let start_node = match out.slots[rel.start_node_slot] {
+                GramVal::Node { id } => id,
+                _ => unreachable!("Start node for rel create must be a node value"),
+            };
+            let end_node = match out.slots[rel.end_node_slot] {
+                GramVal::Node { id } => id,
+                _ => unreachable!("End node for rel create must be a node value"),
+            };
+
+            out.slots[rel.slot] =
+                append_rel(ctx, start_node, end_node, rel.rel_type, rel_properties)?;
         }
         Ok(false)
     }
@@ -672,6 +767,31 @@ impl Operator for Return {
             }
             println!();
             // Do this to 'yield' one row at a time to the cursor
+            return Ok(true);
+        }
+        Ok(false)
+    }
+}
+
+#[derive(Debug, Clone)]
+struct Projection {
+    pub expr: Expr,
+    pub alias: Token,
+    pub slot: usize,
+}
+
+#[derive(Debug)]
+struct Project {
+    pub src: Box<dyn Operator>,
+    pub projections: Vec<Projection>,
+}
+
+impl Operator for Project {
+    fn next(&mut self, ctx: &mut Context, out: &mut GramRow) -> Result<bool> {
+        if self.src.next(ctx, out)? {
+            for proj in &self.projections {
+                out.slots[proj.slot] = proj.expr.eval(ctx, out)?;
+            }
             return Ok(true);
         }
         Ok(false)
@@ -806,6 +926,8 @@ mod parser {
                     let mut start_identifier: Option<Token> = None;
                     let mut end_identifier: Option<Token> = None;
 
+                    let mut rel_type = None;
+
                     for part in item.into_inner() {
                         match part.as_rule() {
                             Rule::node => {
@@ -820,6 +942,12 @@ mod parser {
                                 for rel_part in part.into_inner() {
                                     match rel_part.as_rule() {
                                         Rule::map => {}
+                                        Rule::rel_type => {
+                                            let rt_id = rel_part.into_inner().next().unwrap();
+                                            rel_type = Some(node_ids.tokenize(
+                                                rt_id.into_inner().next().unwrap().as_str(),
+                                            ));
+                                        }
                                         _ => panic!(
                                             "what? {:?} / {}",
                                             rel_part.as_rule(),
@@ -835,7 +963,7 @@ mod parser {
                     g.add_rel(
                         start_identifier.unwrap(),
                         end_identifier.unwrap(),
-                        tokens.tokenize("KNOWS"),
+                        rel_type.unwrap_or(tokens.tokenize("_")),
                     );
                 }
                 Rule::node => {
@@ -888,9 +1016,12 @@ mod parser {
                         }
                     }
 
+                    let gid_string = identifier.unwrap();
+                    let gid = tokens.tokenize(&gid_string);
                     g.add_node(
-                        node_ids.tokenize(&identifier.unwrap()),
+                        node_ids.tokenize(&gid_string),
                         Node {
+                            gid,
                             labels,
                             properties: props,
                             rels: vec![],
@@ -906,41 +1037,20 @@ mod parser {
 }
 
 #[derive(Debug)]
+pub struct Node {
+    // Identifier assigned this node in the gram file
+    gid: Token,
+    labels: HashSet<Token>,
+    properties: HashMap<Token, Val>,
+    rels: Vec<RelHalf>,
+}
+
+#[derive(Debug)]
 pub struct RelHalf {
     rel_type: Token,
     dir: Dir,
     other_node: usize,
     properties: Rc<HashMap<Token, Val>>,
-}
-
-// Nodespec is used by the CREATE operator, and differs from Node in that its properties are
-// expressions rather than materialized values.
-#[derive(Debug)]
-struct NodeSpec {
-    pub slot: usize,
-    pub labels: HashSet<Token>,
-    pub props: HashMap<Token, Expr>,
-}
-
-impl Clone for NodeSpec {
-    fn clone(&self) -> Self {
-        NodeSpec {
-            slot: self.slot,
-            labels: self.labels.iter().cloned().collect(),
-            props: self.props.clone(),
-        }
-    }
-
-    fn clone_from(&mut self, _source: &'_ Self) {
-        unimplemented!()
-    }
-}
-
-#[derive(Debug)]
-pub struct Node {
-    labels: HashSet<Token>,
-    properties: HashMap<Token, Val>,
-    rels: Vec<RelHalf>,
 }
 
 #[derive(Debug)]
@@ -964,20 +1074,24 @@ impl Graph {
         self.nodes.insert(id, n);
     }
 
-    fn add_rel(&mut self, from: usize, to: usize, rel_type: Token) {
+    // Add a rel, return the index of the rel from the start nodes perspective
+    fn add_rel(&mut self, from: usize, to: usize, rel_type: Token) -> usize {
         let props = Rc::new(Default::default());
-        self.nodes[from].rels.push(RelHalf {
+        let fromrels = &mut self.nodes[from].rels;
+        fromrels.push(RelHalf {
             rel_type,
             dir: Dir::Out,
             other_node: to,
             properties: Rc::clone(&props),
         });
+        let index = fromrels.len() - 1;
         self.nodes[to].rels.push(RelHalf {
             rel_type,
             dir: Dir::In,
             other_node: from,
             properties: props,
-        })
+        });
+        return index;
     }
 }
 
@@ -999,7 +1113,7 @@ fn append_node(
     labels: HashSet<Token>,
     node_properties: HashMap<Token, Val>,
 ) -> Result<GramVal, Error> {
-    let tokens = tokens_in.borrow();
+    let mut tokens = tokens_in.borrow_mut();
     let properties_gram_ready: HashMap<&str, String> = node_properties
         .iter()
         .map(|kvp| (tokens.lookup(*kvp.0).unwrap(), format!("{}", (*kvp.1))))
@@ -1023,6 +1137,7 @@ fn append_node(
     };
 
     let out_node = Node {
+        gid: tokens.tokenize(&gram_identifier),
         labels,
         properties: node_properties,
         rels: vec![],
@@ -1043,6 +1158,53 @@ fn append_node(
 
     match ctx.file.borrow_mut().write_all(gram_string.as_bytes()) {
         Ok(_) => Ok(GramVal::Node { id: node_id }),
+        Err(e) => Err(Error::new(e)),
+    }
+}
+
+fn append_rel(
+    ctx: &mut Context,
+    start_node: usize,
+    end_node: usize,
+    rel_type: Token,
+    props: HashMap<Token, Val>,
+) -> Result<GramVal, Error> {
+    let tokens = ctx.tokens.borrow();
+    let mut g = ctx.g.borrow_mut();
+
+    let properties_gram_ready: HashMap<&str, String> = props
+        .iter()
+        .map(|kvp| (tokens.lookup(*kvp.0).unwrap(), format!("{}", (*kvp.1))))
+        .collect();
+
+    let startgid = tokens.lookup(g.nodes[start_node].gid).unwrap();
+    let endgid = tokens.lookup(g.nodes[end_node].gid).unwrap();
+    let reltype_str = tokens.lookup(rel_type).unwrap();
+
+    let gram_string = format!(
+        "(`{}`)-[:`{}` {}]->(`{}`)\n",
+        startgid,
+        reltype_str,
+        json::stringify(properties_gram_ready),
+        endgid,
+    );
+
+    println!("--- About to write ---");
+    println!("{}", gram_string);
+    println!("------");
+
+    let rel_index = g.add_rel(start_node, end_node, rel_type);
+
+    ctx.file
+        .borrow_mut()
+        .seek(SeekFrom::End(0))
+        .expect("seek error");
+
+    match ctx.file.borrow_mut().write_all(gram_string.as_bytes()) {
+        Ok(_) => Ok(GramVal::Rel {
+            node_id: start_node,
+            rel_index: rel_index,
+        }),
         Err(e) => Err(Error::new(e)),
     }
 }

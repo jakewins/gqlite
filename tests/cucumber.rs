@@ -56,7 +56,10 @@ mod example_steps {
         Map(Vec<(String, ValMatcher)>),
         Int(i64),
         Float(f64),
-        Node { props: Vec<(String, ValMatcher)> },
+        Node {
+            props: Vec<(String, ValMatcher)>,
+            labels: Vec<String>,
+        },
     }
 
     impl ValMatcher {
@@ -80,7 +83,7 @@ mod example_steps {
                     }
                     _ => panic!("Expected a list, found {:?}", v),
                 },
-                ValMatcher::Node { props } => {
+                ValMatcher::Node { props, labels } => {
                     if let Val::Node(n) = v {
                         if n.props.len() != props.len() {
                             panic!("Node has different number of properties from spec, expected {:?}, got {:?}",
@@ -96,6 +99,25 @@ mod example_steps {
                             }
                             if !found {
                                 panic!("Node has unspecified property {}", k);
+                            }
+                        }
+
+                        if n.labels.len() != labels.len() {
+                            panic!("Node has different number of labels from spec, expected {:?}, got {:?}", labels, n.labels);
+                        }
+                        for l in labels {
+                            let mut found = false;
+                            for actual in &n.labels {
+                                if actual == l {
+                                    found = true;
+                                    break;
+                                }
+                            }
+                            if !found {
+                                panic!(
+                                    "Missing expected labels. Expected {:?}, got {:?}",
+                                    labels, n.labels
+                                );
                             }
                         }
                     } else {
@@ -284,10 +306,11 @@ mod example_steps {
                 '(' => {
                     chars.next().unwrap();
                     let mut props = Vec::new();
+                    let mut labels: Vec<String> = Vec::new();
                     loop {
                         match chars.peek() {
-                            Some(')') => return ValMatcher::Node { props },
-                            None => return ValMatcher::Node { props },
+                            Some(')') => return ValMatcher::Node { props, labels },
+                            None => return ValMatcher::Node { props, labels },
                             Some('{') => {
                                 match str_to_val(&mut chars) {
                                     ValMatcher::Map(e) => {
@@ -300,6 +323,10 @@ mod example_steps {
                             Some(' ') => {
                                 chars.next().unwrap();
                                 ()
+                            }
+                            Some(':') => {
+                                chars.next().unwrap();
+                                labels.push(parse_identifier(chars))
                             }
                             _ => panic!(format!("unknown node spec portion: '{:?}'", chars.peek())),
                         }
