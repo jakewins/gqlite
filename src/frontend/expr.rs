@@ -1,7 +1,7 @@
 // This module contains our definition of expressions, including code to convert parse streams
 // to expressions.
 
-use crate::backend::Token;
+use crate::backend::{Token, Tokens};
 use crate::frontend::{PlanningContext, Result, Rule};
 use crate::Slot;
 use pest::iterators::Pair;
@@ -83,6 +83,13 @@ impl Expr {
                 left.is_aggregating(aggregating_funcs) | right.is_aggregating(aggregating_funcs)
             }
             Expr::HasLabel(_, _) => false,
+        }
+    }
+
+    pub fn fmt_pretty(&self, _indent: &str, _t: &Tokens) -> String {
+        match self {
+            Expr::Slot(s) => format!("Slot({})", s),
+            _ => format!("Expr_NoPretty({:?})", self),
         }
     }
 }
@@ -242,13 +249,7 @@ mod tests {
             tokens: Rc::clone(&tokens),
             backend_desc: BackendDesc::new(vec![]),
         };
-        let mut pc = PlanningContext {
-            slots: Default::default(),
-            anon_rel_seq: 0,
-            anon_node_seq: 0,
-            tokens: Rc::clone(&tokens),
-            backend_desc: &backend_desc,
-        };
+        let mut pc = PlanningContext::new(Rc::clone(&tokens), &backend_desc);
         let plan = frontend.plan_in_context(&format!("RETURN {}", q), &mut pc);
 
         if let Ok(LogicalPlan::Return {

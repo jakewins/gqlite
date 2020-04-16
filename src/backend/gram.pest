@@ -2,10 +2,10 @@
 WHITESPACE = _{ " " | "\t" | "\r" | "\n" }
 
 expr = { string | id | num }
-//
-// id = { (( ASCII_ALPHA | "_" | "-" ) +) | ("`" ~ str_inner ~ "`") }
-id = { ("`" ~ id_inner ~ "`" ) | (( ASCII_ALPHA | "_" | "-" ) +) }
 
+id = { ("`" ~ id_inner ~ "`" ) | id_noticks }
+
+id_noticks = @{ (( ASCII_ALPHA | "_" | "-" ) +) }
 id_inner = @{ id_char* }
 id_char = {
     !("`" | "\\") ~ ANY
@@ -34,10 +34,10 @@ map_pair = { id ~ ":" ~ expr }
 
 node = { "(" ~ id? ~ ( ":" ~ label )* ~ map? ~ ")" }
 
-label = { id }
+label = ${ id }
 
 rel = { "<"? ~ "-" ~ ( "[" ~ id? ~ ( ":" ~ rel_type )? ~ map? ~ "]" )? ~ "-" ~ ">"? }
-rel_type = { id }
+rel_type = ${ id }
 
 path = { node ~ ( rel ~ node )+ }
 //

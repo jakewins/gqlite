@@ -88,6 +88,7 @@ pub struct Row {
 #[derive(Debug, Clone, PartialEq)]
 pub struct Node {
     pub id: usize,
+    // TODO not forcing massive amounts of variable-length data copying..
     pub labels: Vec<String>,
     pub props: Map,
 }
@@ -96,6 +97,7 @@ pub struct Node {
 pub struct Rel {
     pub start: usize,
     pub end: usize,
+    // TODO not forcing massive amounts of variable-length data copying..
     pub rel_type: String,
     pub props: Map,
 }

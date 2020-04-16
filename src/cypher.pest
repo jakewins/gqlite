@@ -64,15 +64,17 @@ right_arrow = { ">" }
 
 pattern = { node  ~ ( rel ~ node )* }
 
-projection = { expr ~ ("AS" ~ id)? }
+projection = { expr ~ (^"AS" ~ id)? }
 projections = { projection ~ ( "," ~ projection )* }
+project_all = { "*" }
 
-where_clause = { "WHERE" ~ expr }
+where_clause = { ^"WHERE" ~ expr }
 
-create_stmt = { "CREATE" ~ pattern }
-match_stmt = { "MATCH" ~ pattern ~ where_clause? }
-unwind_stmt = { "UNWIND" ~ expr ~ "AS" ~ id }
-return_stmt = { "RETURN" ~ projections }
+create_stmt = { ^"CREATE" ~ pattern }
+match_stmt = { ^"MATCH" ~ pattern ~ where_clause? }
+with_stmt = { ^"WITH" ~ projections }
+unwind_stmt = { ^"UNWIND" ~ expr ~ ^"AS" ~ id }
+return_stmt = { ^"RETURN" ~ ( projections | project_all ) }
 
-statement = _{ create_stmt | match_stmt | unwind_stmt }
+statement = _{ create_stmt | match_stmt | unwind_stmt | with_stmt }
 query = { SOI ~ ( statement )* ~ return_stmt? ~ EOI }
