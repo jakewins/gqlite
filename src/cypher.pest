@@ -1,8 +1,8 @@
 
 WHITESPACE = _{ " " | "\t" | "\r" | "\n" }
 
-expr = { and_expr ~ (^"OR" ~ and_expr)* }
-and_expr = { term ~ (^"AND" ~ term)* }
+expr = { and_expr ~ (^"OR " ~ and_expr)* }
+and_expr = { term ~ (^"AND " ~ term)* }
 term = _{ binary_op | atom }
 
 binary_op = { atom ~ op ~ atom }
@@ -71,9 +71,14 @@ project_all = { "*" }
 
 where_clause = { ^"WHERE" ~ expr }
 
+order_clause = { ^"ORDER BY" ~ order_expr ~ ( "," ~ order_expr )* ~ limit_clause? }
+order_expr = { expr ~ (^"DESC")? }
+
+limit_clause = { ^"LIMIT" ~ int }
+
 create_stmt = { ^"CREATE" ~ patterns }
 match_stmt = { ^"MATCH" ~ pattern ~ where_clause? }
-with_stmt = { ^"WITH" ~ projections }
+with_stmt = { ^"WITH" ~ projections ~ order_clause? }
 unwind_stmt = { ^"UNWIND" ~ expr ~ ^"AS" ~ id }
 return_stmt = { ^"RETURN" ~ ( projections | project_all ) }
 

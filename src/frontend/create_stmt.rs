@@ -1,6 +1,5 @@
 use super::{
-    parse_pattern_graph, Dir, LogicalPlan, NodeSpec, Pair, PlanningContext,
-    RelSpec, Result, Rule,
+    parse_pattern_graph, Dir, LogicalPlan, NodeSpec, Pair, PlanningContext, RelSpec, Result, Rule,
 };
 
 pub fn plan_create(

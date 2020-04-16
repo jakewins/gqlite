@@ -48,26 +48,26 @@ Feature: WithAcceptance
       | (:A) | (:B) |
     And no side effects
 
-#  Scenario: ORDER BY and LIMIT can be used
-#    Given an empty graph
-#    And having executed:
-#      """
-#      CREATE (a:A), (), (), (),
-#             (a)-[:REL]->()
-#      """
-#    When executing query:
-#      """
-#      MATCH (a:A)
-#      WITH a
-#      ORDER BY a.name
-#      LIMIT 1
-#      MATCH (a)-->(b)
-#      RETURN a
-#      """
-#    Then the result should be, in any order:
-#      | a    |
-#      | (:A) |
-#    And no side effects
+  Scenario: ORDER BY and LIMIT can be used
+    Given an empty graph
+    And having executed:
+      """
+      CREATE (a:A), (), (), (),
+             (a)-[:REL]->()
+      """
+    When executing query:
+      """
+      MATCH (a:A)
+      WITH a
+      ORDER BY a.name
+      LIMIT 1
+      MATCH (a)-->(b)
+      RETURN a
+      """
+    Then the result should be, in any order:
+      | a    |
+      | (:A) |
+    And no side effects
 
 #  Scenario: No dependencies between the query parts
 #    Given an empty graph
