@@ -162,7 +162,11 @@ impl GramBackend {
                     print_header: true,
                 }))
             }
-            LogicalPlan::Project { src, projections } => {
+            LogicalPlan::Project {
+                src,
+                projections,
+                limit: _,
+            } => {
                 let mut converted_projections = Vec::new();
                 for projection in projections {
                     converted_projections.push(Projection {

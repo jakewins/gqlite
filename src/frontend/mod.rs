@@ -141,6 +141,15 @@ pub enum LogicalPlan {
     Project {
         src: Box<Self>,
         projections: Vec<Projection>,
+        // Maybe it's better to put LIMIT in it's own thing..
+        // but you can have WITH .. LIMIT and RETURN .. LIMIT without
+        // ORDER BY, so then you'd need a dedicated logical plan node for
+        // just "limit", which becomes a PITA because you'll eventually want
+        // the backends able to optimize for the super common TOP N case,
+        // "RETURN x ORDER BY x LIMIT 10".. so for now lets see how things
+        // flow if we just expose it like this; nothing stopping backends
+        // from converting this into whatever they like.
+        limit: Option<Expr>,
     },
 }
 
@@ -164,7 +173,11 @@ impl LogicalPlan {
                     proj
                 )
             }
-            LogicalPlan::Project { src, projections } => {
+            LogicalPlan::Project {
+                src,
+                projections,
+                limit,
+            } => {
                 let next_indent = &format!("{}  ", ind);
                 let mut proj = String::new();
                 for (i, p) in projections.iter().enumerate() {
@@ -174,11 +187,11 @@ impl LogicalPlan {
                     proj.push_str(&p.fmt_pretty(next_indent, t))
                 }
                 format!(
-                    "Project(\n{}src={},\n{}projections=[{}])",
+                    "Project(\n{}src={},\n{}projections=[{}],\n{}limit={:?})",
                     next_indent,
                     src.fmt_pretty(&format!("{}  ", next_indent), t),
-                    next_indent,
-                    proj
+                    next_indent, proj,
+                    next_indent, limit,
                 )
             }
             LogicalPlan::NodeScan { src, slot, labels } => {
@@ -545,6 +558,7 @@ fn plan_match(
         if pc.is_declared(candidate.identifier) {
             // MATCH (n) WITH n MATCH (n)-->(b); "n" is already a bound value, so we start there
             pattern_has_bound_nodes = true;
+            candidate.solved = true;
         }
 
         // If the node is not anonymous, make sure its identifier is declared

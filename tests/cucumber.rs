@@ -294,6 +294,10 @@ mod example_steps {
                                     chars.next().unwrap();
                                     ()
                                 }
+                                Some(',') => {
+                                    chars.next().unwrap();
+                                    ()
+                                }
                                 _ => panic!(format!("unknown map portion: '{:?}'", chars)),
                             }
                         }
