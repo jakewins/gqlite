@@ -190,8 +190,10 @@ impl LogicalPlan {
                     "Project(\n{}src={},\n{}projections=[{}],\n{}limit={:?})",
                     next_indent,
                     src.fmt_pretty(&format!("{}  ", next_indent), t),
-                    next_indent, proj,
-                    next_indent, limit,
+                    next_indent,
+                    proj,
+                    next_indent,
+                    limit,
                 )
             }
             LogicalPlan::NodeScan { src, slot, labels } => {
