@@ -602,7 +602,7 @@ pub enum NodeScanState {
     // Next call will pull another row from src
     Idle,
     // We're in the middle of a scan, next call will continue scanning
-    Scanning{ next_node: usize },
+    Scanning { next_node: usize },
 }
 
 impl Operator for NodeScan {
@@ -610,11 +610,11 @@ impl Operator for NodeScan {
         loop {
             match &self.state {
                 NodeScanState::Idle => {
-                    if ! self.src.next(ctx, out)? {
-                        return Ok(false)
+                    if !self.src.next(ctx, out)? {
+                        return Ok(false);
                     }
                     self.state = NodeScanState::Scanning { next_node: 0 }
-                },
+                }
                 NodeScanState::Scanning { next_node } => {
                     let g = ctx.g.borrow();
                     let mut node_id = *next_node;
@@ -628,11 +628,13 @@ impl Operator for NodeScan {
                         }
 
                         out.slots[self.slot] = GramVal::Node { id: node_id };
-                        self.state = NodeScanState::Scanning { next_node: node_id + 1 };
+                        self.state = NodeScanState::Scanning {
+                            next_node: node_id + 1,
+                        };
                         return Ok(true);
                     }
                     self.state = NodeScanState::Idle;
-                },
+                }
             }
         }
     }

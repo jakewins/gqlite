@@ -12,12 +12,19 @@ pub fn plan_create(
     let mut nodes = Vec::new();
     let mut rels = Vec::new();
     for id in pg.e_order {
-        if pc.is_bound(id) {
+        if pc.is_declared(id) {
             // We already know about this node, it isn't meant to be created. ie
             // MATCH (n) CREATE (n)-[:NEWREL]->(newnode)
             continue;
         }
+
         let node = pg.e.remove(&id).ok_or(anyhow!("failed to parse pattern in query, please report this and include the query you are running"))?;
+        // Non-anonymous nodes declare new identifiers; we do this
+        // here rather than in parse_pattern_graph so we can do the
+        // is_declared check further up in this block.
+        if !node.anonymous {
+            pc.declare_tok(id);
+        }
         nodes.push(NodeSpec {
             slot: pc.get_or_alloc_slot(id),
             labels: node.labels,
@@ -26,6 +33,9 @@ pub fn plan_create(
     }
 
     for rel in pg.v {
+        if !rel.anonymous {
+            pc.declare_tok(rel.identifier);
+        }
         match rel.dir {
             Some(Dir::Out) => {
                 rels.push(RelSpec {
@@ -289,6 +299,48 @@ mod tests {
                     end_node_slot: p.slot(id_o),
                     props: vec![]
                 },]
+            }
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn plan_create_referring_to_prop_in_same_create_stmt() -> Result<(), Error> {
+        // It's not entirely clear *why* this is a useful feature, or what the semantics
+        // of the ordering here is, so if you come back here and are confused.. you're not
+        // missing something. However, this is part of a setup statement in the TCK, so we need
+        // it to work this specific way to pass the TCK
+        // Note that if you invert it (so the (b) node comes first) then the num property is set
+        // to null in Neo4j Cypher (as of 3.5 at least).
+        let mut p = plan("CREATE (a {id: 0}), (b {num: a.id})")?;
+
+        let id_a = p.tokenize("a");
+        let id_b = p.tokenize("b");
+        let key_num = p.tokenize("num");
+        let key_id = p.tokenize("id");
+        assert_eq!(
+            p.plan,
+            LogicalPlan::Create {
+                src: Box::new(LogicalPlan::Argument),
+                nodes: vec![
+                    NodeSpec {
+                        slot: p.slot(id_a),
+                        labels: vec![],
+                        props: vec![MapEntryExpr {
+                            key: key_id,
+                            val: Expr::Int(0)
+                        }]
+                    },
+                    NodeSpec {
+                        slot: p.slot(id_b),
+                        labels: vec![],
+                        props: vec![MapEntryExpr {
+                            key: key_num,
+                            val: Expr::Prop(Box::new(Expr::Slot(p.slot(id_a))), vec![key_id])
+                        }]
+                    }
+                ],
+                rels: vec![]
             }
         );
         Ok(())
