@@ -141,6 +141,15 @@ pub enum LogicalPlan {
     Project {
         src: Box<Self>,
         projections: Vec<Projection>,
+        // Maybe it's better to put LIMIT in it's own thing..
+        // but you can have WITH .. LIMIT and RETURN .. LIMIT without
+        // ORDER BY, so then you'd need a dedicated logical plan node for
+        // just "limit", which becomes a PITA because you'll eventually want
+        // the backends able to optimize for the super common TOP N case,
+        // "RETURN x ORDER BY x LIMIT 10".. so for now lets see how things
+        // flow if we just expose it like this; nothing stopping backends
+        // from converting this into whatever they like.
+        limit: Option<Expr>,
     },
 }
 
@@ -164,7 +173,11 @@ impl LogicalPlan {
                     proj
                 )
             }
-            LogicalPlan::Project { src, projections } => {
+            LogicalPlan::Project {
+                src,
+                projections,
+                limit,
+            } => {
                 let next_indent = &format!("{}  ", ind);
                 let mut proj = String::new();
                 for (i, p) in projections.iter().enumerate() {
@@ -174,11 +187,13 @@ impl LogicalPlan {
                     proj.push_str(&p.fmt_pretty(next_indent, t))
                 }
                 format!(
-                    "Project(\n{}src={},\n{}projections=[{}])",
+                    "Project(\n{}src={},\n{}projections=[{}],\n{}limit={:?})",
                     next_indent,
                     src.fmt_pretty(&format!("{}  ", next_indent), t),
                     next_indent,
-                    proj
+                    proj,
+                    next_indent,
+                    limit,
                 )
             }
             LogicalPlan::NodeScan { src, slot, labels } => {
@@ -350,17 +365,22 @@ impl<'i> PlanningContext<'i> {
 
     // Declare a named identifier in the current scope if it isn't already;
     // the identifier becomes visible to operations like RETURN * and WITH *, et cetera.
+    fn declare_tok(&mut self, tok: Token) {
+        self.named_identifiers.insert(tok);
+    }
+
+    // Shorthand for tokenize + declare_tok
     fn declare(&mut self, contents: &str) -> Token {
         let tok = self.tokenize(contents);
-        self.named_identifiers.insert(tok);
+        self.declare_tok(tok);
         return tok;
     }
 
     // Is the given token a value that we know about already?
     // This is used to determine if entities in CREATE refer to existing bound identifiers
     // or if they are introducing new entities to be created.
-    pub fn is_bound(&self, tok: Token) -> bool {
-        self.slots.contains_key(&tok)
+    pub fn is_declared(&self, tok: Token) -> bool {
+        self.named_identifiers.contains(&tok)
     }
 
     pub fn get_or_alloc_slot(&mut self, tok: Token) -> usize {
@@ -416,6 +436,10 @@ pub struct PatternNode {
     identifier: Token,
     labels: Vec<Token>,
     props: Vec<MapEntryExpr>,
+    // In the pattern, was this node assigned an identifier?
+    // eg. in "MATCH (a)-->()", the second node is anonymous; it will have
+    // been assigned an anonymous identifier
+    anonymous: bool,
     solved: bool,
 }
 
@@ -432,6 +456,10 @@ pub struct PatternRel {
     // From the perspective of the left node, is this pattern inbound or outbound?
     dir: Option<Dir>,
     props: Vec<MapEntryExpr>,
+    // In the pattern, was this node assigned an identifier?
+    // eg. in "MATCH (a)-[r]->(b)-->(c)", the second rel is anonymous; it will have
+    // been assigned an auto-generated identifier
+    anonymous: bool,
     solved: bool,
 }
 
@@ -516,7 +544,11 @@ fn plan_match(
 
     // Ok, now we have parsed the pattern into a full graph, time to start solving it
     println!("built pg: {:?}", pg);
-    // Start by picking one high-selectivity node
+
+    // 1: Loop through all nodes in the pattern and..
+    //    - Find any pre-existing bound nodes we could start from
+    //    - Pick a candidate start point to use if ^^ doesn't work
+    //    - Declare all identifiers introduced
     let mut candidate_id = None;
     let mut pattern_has_bound_nodes = false;
     for id in &pg.e_order {
@@ -524,11 +556,18 @@ fn plan_match(
             candidate_id = Some(id);
         }
         let candidate = pg.e.get_mut(id).unwrap();
-        if candidate.solved {
+
+        if pc.is_declared(candidate.identifier) {
             // MATCH (n) WITH n MATCH (n)-->(b); "n" is already a bound value, so we start there
             pattern_has_bound_nodes = true;
-            break;
+            candidate.solved = true;
         }
+
+        // If the node is not anonymous, make sure its identifier is declared
+        if !candidate.anonymous {
+            pc.declare_tok(candidate.identifier)
+        }
+
         // Prefer a candidate with labels since that has higher selectivity
         if !candidate.labels.is_empty() {
             if candidate.labels.len() > 1 {
@@ -537,7 +576,8 @@ fn plan_match(
             candidate_id = Some(id)
         }
     }
-    // If there were no starting points already, do a node scan for a candidate we picked
+
+    // 2: If there's no bound nodes, use the candidate as start point
     if !pattern_has_bound_nodes {
         if let Some(candidate_id) = candidate_id {
             let candidate = pg.e.get_mut(candidate_id).unwrap();
@@ -553,7 +593,9 @@ fn plan_match(
         }
     }
 
-    // Now we iterate until the whole pattern is solved. The way this works is that "solving"
+    // 3: Solve the pattern
+    //
+    // We iterate until the whole pattern is solved. The way this works is that "solving"
     // a part of the pattern expands the plan such that when the top-level part of the plan is
     // executed, all the solved identifiers will be present in the output row. That then unlocks
     // the ability to solve other parts of the pattern, and so on.
@@ -578,6 +620,13 @@ fn plan_match(
                 right_node.solved = true;
                 rel.solved = true;
                 solved_any = true;
+
+                // Annoying to have to do this here, maybe move this
+                // back up into parse_pattern_graph..
+                if !rel.anonymous {
+                    pc.declare_tok(rel.identifier);
+                }
+
                 let dst = pc.get_or_alloc_slot(right_id);
                 let expand = LogicalPlan::Expand {
                     src: Box::new(plan),
@@ -594,6 +643,13 @@ fn plan_match(
                 left_node.solved = true;
                 rel.solved = true;
                 solved_any = true;
+
+                // Annoying to have to do this here, maybe move this
+                // back up into parse_pattern_graph..
+                if !rel.anonymous {
+                    pc.declare_tok(rel.identifier);
+                }
+
                 let dst = pc.get_or_alloc_slot(left_id);
                 let expand = LogicalPlan::Expand {
                     src: Box::new(plan),
@@ -685,7 +741,7 @@ fn parse_pattern_node(pc: &mut PlanningContext, pattern_node: Pair<Rule>) -> Res
     let mut props = Vec::new();
     for part in pattern_node.into_inner() {
         match part.as_rule() {
-            Rule::id => identifier = Some(pc.declare(part.as_str())),
+            Rule::id => identifier = Some(pc.tokenize(part.as_str())),
             Rule::label => {
                 for label in part.into_inner() {
                     labels.push(pc.tokenize(label.as_str()));
@@ -698,6 +754,7 @@ fn parse_pattern_node(pc: &mut PlanningContext, pattern_node: Pair<Rule>) -> Res
         }
     }
 
+    let anonymous = identifier.is_none();
     let id = identifier.unwrap_or_else(|| pc.new_anon_node());
     labels.sort_unstable();
     labels.dedup();
@@ -705,7 +762,8 @@ fn parse_pattern_node(pc: &mut PlanningContext, pattern_node: Pair<Rule>) -> Res
         identifier: id,
         labels,
         props,
-        solved: pc.is_bound(id),
+        anonymous,
+        solved: false,
     })
 }
 
@@ -720,7 +778,7 @@ fn parse_pattern_rel(
     let mut props = Vec::new();
     for part in pattern_rel.into_inner() {
         match part.as_rule() {
-            Rule::id => identifier = Some(pc.declare(part.as_str())),
+            Rule::id => identifier = Some(pc.tokenize(part.as_str())),
             Rule::rel_type => rel_type = Some(pc.tokenize(part.as_str())),
             Rule::left_arrow => dir = Some(Dir::In),
             Rule::right_arrow => {
@@ -735,7 +793,7 @@ fn parse_pattern_rel(
             _ => unreachable!(),
         }
     }
-    // TODO don't use this empty identifier here
+    let anonymous = identifier.is_none();
     let id = identifier.unwrap_or_else(|| pc.new_anon_rel());
     Ok(PatternRel {
         left_node,
@@ -744,6 +802,7 @@ fn parse_pattern_rel(
         rel_type,
         dir,
         props,
+        anonymous,
         solved: false,
     })
 }

@@ -55,9 +55,9 @@ impl GramBackend {
             LogicalPlan::Argument => Ok(Box::new(Argument { consumed: false })),
             LogicalPlan::NodeScan { src, slot, labels } => Ok(Box::new(NodeScan {
                 src: self.convert(*src)?,
-                next_node: 0,
                 slot,
                 labels,
+                state: NodeScanState::Idle,
             })),
             LogicalPlan::Create { src, nodes, rels } => {
                 let mut out_nodes = Vec::with_capacity(nodes.len());
@@ -162,7 +162,11 @@ impl GramBackend {
                     print_header: true,
                 }))
             }
-            LogicalPlan::Project { src, projections } => {
+            LogicalPlan::Project {
+                src,
+                projections,
+                limit: _,
+            } => {
                 let mut converted_projections = Vec::new();
                 for projection in projections {
                     converted_projections.push(Projection {
@@ -588,34 +592,54 @@ impl Operator for Expand {
 struct NodeScan {
     pub src: Box<dyn Operator>,
 
-    // Next node id in g to return
-    pub next_node: usize,
-
     // Where should this scan write its output?
     pub slot: usize,
 
-    // If the empty string, return all nodes, otherwise only nodes with the specified label
+    // If None, return all nodes, otherwise only nodes with the specified label
     pub labels: Option<Token>,
+
+    pub state: NodeScanState,
+}
+
+#[derive(Debug)]
+pub enum NodeScanState {
+    // Next call will pull another row from src
+    Idle,
+    // We're in the middle of a scan, next call will continue scanning
+    Scanning { next_node: usize },
 }
 
 impl Operator for NodeScan {
     fn next(&mut self, ctx: &mut Context, out: &mut GramRow) -> Result<bool> {
         loop {
-            let g = ctx.g.borrow();
-            if g.nodes.len() > self.next_node {
-                let node = g.nodes.get(self.next_node).unwrap();
-                if let Some(tok) = self.labels {
-                    if !node.labels.contains(&tok) {
-                        self.next_node += 1;
-                        continue;
+            match &self.state {
+                NodeScanState::Idle => {
+                    if !self.src.next(ctx, out)? {
+                        return Ok(false);
                     }
+                    self.state = NodeScanState::Scanning { next_node: 0 }
                 }
+                NodeScanState::Scanning { next_node } => {
+                    let g = ctx.g.borrow();
+                    let mut node_id = *next_node;
+                    while g.nodes.len() > node_id {
+                        let node = g.nodes.get(node_id).unwrap();
+                        if let Some(tok) = self.labels {
+                            if !node.labels.contains(&tok) {
+                                node_id += 1;
+                                continue;
+                            }
+                        }
 
-                out.slots[self.slot] = GramVal::Node { id: self.next_node };
-                self.next_node += 1;
-                return Ok(true);
+                        out.slots[self.slot] = GramVal::Node { id: node_id };
+                        self.state = NodeScanState::Scanning {
+                            next_node: node_id + 1,
+                        };
+                        return Ok(true);
+                    }
+                    self.state = NodeScanState::Idle;
+                }
             }
-            return Ok(false);
         }
     }
 }

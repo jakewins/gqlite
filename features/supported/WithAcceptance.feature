@@ -69,26 +69,26 @@ Feature: WithAcceptance
       | (:A) |
     And no side effects
 
-#  Scenario: No dependencies between the query parts
-#    Given an empty graph
-#    And having executed:
-#      """
-#      CREATE (:A), (:B)
-#      """
-#    When executing query:
-#      """
-#      MATCH (a)
-#      WITH a
-#      MATCH (b)
-#      RETURN a, b
-#      """
-#    Then the result should be, in any order:
-#      | a    | b    |
-#      | (:A) | (:A) |
-#      | (:A) | (:B) |
-#      | (:B) | (:A) |
-#      | (:B) | (:B) |
-#    And no side effects
+  Scenario: No dependencies between the query parts
+    Given an empty graph
+    And having executed:
+      """
+      CREATE (:A), (:B)
+      """
+    When executing query:
+      """
+      MATCH (a)
+      WITH a
+      MATCH (b)
+      RETURN a, b
+      """
+    Then the result should be, in any order:
+      | a    | b    |
+      | (:A) | (:A) |
+      | (:A) | (:B) |
+      | (:B) | (:A) |
+      | (:B) | (:B) |
+    And no side effects
 
   Scenario: Aliasing
     Given an empty graph
@@ -111,28 +111,28 @@ Feature: WithAcceptance
       | (:End {num: 42}) |
     And no side effects
 
-#  Scenario: Handle dependencies across WITH
-#    Given an empty graph
-#    And having executed:
-#      """
-#      CREATE (a:End {num: 42, id: 0}),
-#             (:End {num: 3}),
-#             (:Begin {num: a.id})
-#      """
-#    When executing query:
-#      """
-#      MATCH (a:Begin)
-#      WITH a.num AS property
-#        LIMIT 1
-#      MATCH (b)
-#      WHERE b.id = property
-#      RETURN b
-#      """
-#    Then the result should be, in any order:
-#      | b                       |
-#      | (:End {num: 42, id: 0}) |
-#    And no side effects
-#
+  Scenario: Handle dependencies across WITH
+    Given an empty graph
+    And having executed:
+      """
+      CREATE (a:End {num: 42, id: 0}),
+             (:End {num: 3}),
+             (:Begin {num: a.id})
+      """
+    When executing query:
+      """
+      MATCH (a:Begin)
+      WITH a.num AS property
+        LIMIT 1
+      MATCH (b)
+      WHERE b.id = property
+      RETURN b
+      """
+    Then the result should be, in any order:
+      | b                       |
+      | (:End {num: 42, id: 0}) |
+    And no side effects
+
 #  Scenario: Handle dependencies across WITH with SKIP
 #    Given an empty graph
 #    And having executed:

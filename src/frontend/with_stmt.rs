@@ -11,10 +11,30 @@ pub fn plan_with(
         .next()
         .map(|p| plan_projections(pc, p))
         .expect("RETURN must start with projections")?;
+
+    let mut limit = None;
+    for part in parts {
+        match part.as_rule() {
+            Rule::limit_clause => {
+                let limit_expr = part
+                    .into_inner()
+                    .next()
+                    .ok_or(anyhow!("LIMIT contained unexpected part"))?;
+                limit = Some(plan_expr(pc, limit_expr)?);
+            }
+            Rule::order_clause => {
+                // Skip this for now; we don't support ORDER BY, but there are
+                // TCK specs that use ORDER BY where just ignoring it still passes the test
+            }
+            _ => unreachable!("WITH/RETURN clause contained unexpected part: {:?}", part),
+        }
+    }
+
     if !is_aggregate {
         return Ok(LogicalPlan::Project {
             src: Box::new(src),
             projections,
+            limit,
         });
     }
 
@@ -53,6 +73,7 @@ pub fn plan_with(
             aggregations,
         }),
         projections: aggregation_projections,
+        limit: None,
     })
 }
 
@@ -62,7 +83,12 @@ pub fn plan_return(
     return_stmt: Pair<Rule>,
 ) -> Result<LogicalPlan> {
     let result = plan_with(pc, src, return_stmt)?;
-    if let LogicalPlan::Project { src, projections } = result {
+    if let LogicalPlan::Project {
+        src,
+        projections,
+        limit: _,
+    } = result
+    {
         // TODO This is the same as plan_with; we should drop LogicalPlan::Return and instead have
         //      RETURN represented as ProduceResult{src: Project{..}}, so return is just an embellishment
         //      on WITH.
@@ -164,7 +190,8 @@ mod tests {
                     expr: Expr::Slot(p.slot(id_n)),
                     alias: id_n,
                     dst: p.slot(id_n),
-                }]
+                }],
+                limit: None,
             }
         );
         Ok(())
@@ -188,7 +215,33 @@ mod tests {
                     expr: Expr::Slot(p.slot(id_n)),
                     alias: id_p,
                     dst: p.slot(id_p),
-                }]
+                }],
+                limit: None,
+            }
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn plan_with_limit() -> Result<(), Error> {
+        let mut p = plan("MATCH (n) WITH n as p LIMIT 1")?;
+
+        let id_n = p.tokenize("n");
+        let id_p = p.tokenize("p");
+        assert_eq!(
+            p.plan,
+            LogicalPlan::Project {
+                src: Box::new(LogicalPlan::NodeScan {
+                    src: Box::new(LogicalPlan::Argument),
+                    slot: 0,
+                    labels: None,
+                }),
+                projections: vec![Projection {
+                    expr: Expr::Slot(p.slot(id_n)),
+                    alias: id_p,
+                    dst: p.slot(id_p),
+                }],
+                limit: Some(Expr::Int(1)),
             }
         );
         Ok(())
@@ -221,7 +274,8 @@ mod tests {
                         expr: Expr::Slot(p.slot(id_a)),
                         alias: id_a,
                         dst: p.slot(id_a),
-                    }]
+                    }],
+                    limit: None,
                 }),
                 projections: vec![Projection {
                     expr: Expr::Slot(p.slot(id_a)),
