@@ -6,15 +6,16 @@ and_expr = { term ~ (^"AND " ~ term)* }
 term = _{ binary_op | atom }
 
 binary_op = { atom ~ op ~ atom }
-op = { "=" }
+op = ${ "=" | ">" }
 
-atom = _{ bool | float | int | prop_lookup | func_call | string | id | list | "(" ~ expr ~ ")" }
+atom = _{ bool | float | int | prop_lookup | count_call | func_call | string | id | list | "(" ~ expr ~ ")" }
 
 id = ${ ( ASCII_ALPHA | "_" | "-" ) + }
 
 prop_lookup = { id ~ ("." ~ id)+ }
 
 func_call = { id ~ "(" ~ (expr ~ ("," ~ expr)*)? ~ ")" }
+count_call = { ^"COUNT" ~ "(" ~ "*" ~ ")" }
 
 string = ${
   "\"" ~ dblq_str_inner ~ "\"" |

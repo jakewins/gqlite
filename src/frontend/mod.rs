@@ -253,6 +253,16 @@ impl LogicalPlan {
                     format!("{:?}", rels)
                 )
             }
+            LogicalPlan::Selection { src, predicate } => {
+                let next_indent = &format!("{}  ", ind);
+                format!(
+                    "Selection(\n{}src={}\n{}predicate={:?})",
+                    next_indent,
+                    src.fmt_pretty(next_indent, t),
+                    next_indent,
+                    predicate,
+                )
+            }
             LogicalPlan::Aggregate {
                 src,
                 grouping,

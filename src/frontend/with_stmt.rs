@@ -434,6 +434,34 @@ mod tests {
     }
 
     #[test]
+    fn plan_return_count() -> Result<(), Error> {
+        let mut p = plan("MATCH (n) RETURN COUNT(*)")?;
+        let alias = p.tokenize("COUNT(*)");
+        let fn_count = p.tokenize("count");
+        assert_eq!(
+            p.plan,
+            LogicalPlan::Return {
+                src: Box::new(LogicalPlan::Aggregate {
+                    src: Box::new(LogicalPlan::NodeScan {
+                        src: Box::new(LogicalPlan::Argument),
+                        slot: 0,
+                        labels: None,
+                    }),
+                    grouping: vec![],
+                    aggregations: vec![
+                        (Expr::FuncCall { name: fn_count, args: vec![] }, p.slot(alias))]
+                }),
+                projections: vec![Projection {
+                    expr: Expr::Slot(p.slot(alias)),
+                    alias,
+                    dst: p.slot(alias),
+                }]
+            }
+        );
+        Ok(())
+    }
+
+    #[test]
     fn plan_return_distinct() -> Result<(), Error> {
         let mut p = plan("MATCH (n) RETURN DISTINCT n.name")?;
         let alias = p.tokenize("n.name");

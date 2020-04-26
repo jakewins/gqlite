@@ -176,29 +176,29 @@ Feature: WithAcceptance
       | ({name: 'B'}) |
     And no side effects
 
-#  Scenario: WHERE after WITH can filter on top of an aggregation
-#    Given an empty graph
-#    And having executed:
-#      """
-#      CREATE (a {name: 'A'}),
-#             (b {name: 'B'})
-#      CREATE (a)-[:REL]->(),
-#             (a)-[:REL]->(),
-#             (a)-[:REL]->(),
-#             (b)-[:REL]->()
-#      """
-#    When executing query:
-#      """
-#      MATCH (a)-->()
-#      WITH a, count(*) AS relCount
-#      WHERE relCount > 1
-#      RETURN a
-#      """
-#    Then the result should be, in any order:
-#      | a             |
-#      | ({name: 'A'}) |
-#    And no side effects
-#
+  Scenario: WHERE after WITH can filter on top of an aggregation
+    Given an empty graph
+    And having executed:
+      """
+      CREATE (a {name: 'A'}),
+             (b {name: 'B'})
+      CREATE (a)-[:REL]->(),
+             (a)-[:REL]->(),
+             (a)-[:REL]->(),
+             (b)-[:REL]->()
+      """
+    When executing query:
+      """
+      MATCH (a)-->()
+      WITH a, count(*) AS relCount
+      WHERE relCount > 1
+      RETURN a
+      """
+    Then the result should be, in any order:
+      | a             |
+      | ({name: 'A'}) |
+    And no side effects
+
 #  Scenario: ORDER BY on an aggregating key
 #    Given an empty graph
 #    And having executed:
