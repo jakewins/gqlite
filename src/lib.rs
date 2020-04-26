@@ -108,6 +108,7 @@ pub enum Val {
     Int(i64),
     Float(f64),
     String(String),
+    Bool(bool),
 
     Map(Map),
     List(Vec<Val>),
@@ -122,6 +123,7 @@ impl Display for Val {
             Val::Null => f.write_str("NULL"),
             Val::Int(v) => f.write_str(&format!("{}", v)),
             Val::Float(v) => f.write_str(&format!("{}", v)),
+            Val::Bool(v) => f.write_str(&format!("{}", v)),
             Val::String(s) => f.write_str(&s),
             Val::List(vs) => f.write_str(&format!("{:?}", vs)),
             Val::Map(v) => f.write_str(&format!("Map{:?}", v)),

@@ -116,7 +116,7 @@ pub(super) fn plan_expr(pc: &mut PlanningContext, expression: Pair<Rule>) -> Res
                 };
                 or_expressions.push(and_expr);
             }
-            _ => panic!("({:?}): {}", inner.as_rule(), inner.as_str()),
+            _ => bail!("({:?}): {}", inner.as_rule(), inner.as_str()),
         }
     }
     if or_expressions.len() == 1 {
@@ -163,7 +163,7 @@ fn plan_term(pc: &mut PlanningContext, term: Pair<Rule>) -> Result<Expr> {
             let func_name_item = func_call
                 .next()
                 .expect("All func_calls must start with an identifier");
-            let name = pc.tokenize(func_name_item.as_str());
+            let name = pc.tokenize(&func_name_item.as_str().to_lowercase());
             // Parse args
             let mut args = Vec::new();
             for arg in func_call {
