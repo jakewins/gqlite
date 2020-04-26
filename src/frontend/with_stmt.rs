@@ -12,12 +12,20 @@ pub fn plan_with(
 
     // Simple case, no need to do a bunch of introspection
     if !projections.is_aggregating && !projections.is_distinct {
-        return Ok(LogicalPlan::Project {
+        let proj = LogicalPlan::Project {
             src: Box::new(src),
             projections: projections.projections,
             skip: projections.skip,
             limit: projections.limit,
-        });
+        };
+        return if let Some(e) = projections.selection {
+            Ok(LogicalPlan::Selection {
+                src: Box::new(proj),
+                predicate: e,
+            })
+        } else {
+            Ok(proj)
+        };
     }
 
     // Deal with aggregation / distinct
@@ -53,7 +61,7 @@ pub fn plan_with(
         })
     }
 
-    Ok(LogicalPlan::Project {
+    let proj = LogicalPlan::Project {
         src: Box::new(LogicalPlan::Aggregate {
             src: Box::new(src),
             grouping,
@@ -62,7 +70,17 @@ pub fn plan_with(
         projections: post_aggregation_projections,
         skip: projections.skip,
         limit: projections.limit,
-    })
+    };
+
+    // TODO this is obviously wrong; skip/limit must be on the outside of the predicate
+    return if let Some(e) = projections.selection {
+        Ok(LogicalPlan::Selection {
+            src: Box::new(proj),
+            predicate: e,
+        })
+    } else {
+        Ok(proj)
+    };
 }
 
 pub fn plan_return(
@@ -93,6 +111,7 @@ struct Projections {
     is_distinct: bool,
     // Does the projection include explicit aggregating expressions?
     is_aggregating: bool,
+    selection: Option<Expr>,
     skip: Option<Expr>,
     limit: Option<Expr>,
 }
@@ -103,6 +122,7 @@ fn parse_projections(pc: &mut PlanningContext, parts: Pairs<Rule>) -> Result<Pro
     let mut is_aggregating = false;
     let mut skip = None;
     let mut limit = None;
+    let mut selection = None;
     for part in parts {
         match part.as_rule() {
             Rule::distinct_clause => {
@@ -146,6 +166,13 @@ fn parse_projections(pc: &mut PlanningContext, parts: Pairs<Rule>) -> Result<Pro
                 });
                 projections = Some(out);
             }
+            Rule::where_clause => {
+                let where_expr = part
+                    .into_inner()
+                    .next()
+                    .ok_or(anyhow!("WHERE contained unexpected part"))?;
+                selection = Some(plan_expr(pc, where_expr)?);
+            }
             Rule::skip_clause => {
                 let skip_expr = part
                     .into_inner()
@@ -171,6 +198,7 @@ fn parse_projections(pc: &mut PlanningContext, parts: Pairs<Rule>) -> Result<Pro
         projections: projections.unwrap(),
         is_distinct,
         is_aggregating,
+        selection,
         skip,
         limit,
     })
@@ -201,7 +229,7 @@ fn parse_projection(pc: &mut PlanningContext, projection: Pair<Rule>) -> Result<
 #[cfg(test)]
 mod tests {
     use crate::frontend::tests::plan;
-    use crate::frontend::{Dir, Expr, LogicalPlan, Projection};
+    use crate::frontend::{Dir, Expr, LogicalPlan, Op, Projection};
     use crate::Error;
 
     #[test]
@@ -297,6 +325,45 @@ mod tests {
                 }],
                 skip: None,
                 limit: Some(Expr::Int(1)),
+            }
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn plan_with_where() -> Result<(), Error> {
+        let mut p = plan("MATCH (n) WITH n WHERE n.name = 'bob'")?;
+
+        // TODO while in this particular case this is an ok plan, if there were skip/limit
+        //      involved then doing the selection afterwards won't fly; it needs to go
+        //      between the projection and the skip/limit
+        let id_n = p.tokenize("n");
+        let key_name = p.tokenize("name");
+        assert_eq!(
+            p.plan,
+            LogicalPlan::Selection {
+                src: Box::new(LogicalPlan::Project {
+                    src: Box::new(LogicalPlan::NodeScan {
+                        src: Box::new(LogicalPlan::Argument),
+                        slot: 0,
+                        labels: None,
+                    }),
+                    projections: vec![Projection {
+                        expr: Expr::Slot(p.slot(id_n)),
+                        alias: id_n,
+                        dst: p.slot(id_n),
+                    }],
+                    skip: None,
+                    limit: None,
+                }),
+                predicate: Expr::BinaryOp {
+                    left: Box::new(Expr::Prop(
+                        Box::new(Expr::Slot(p.slot(id_n))),
+                        vec![key_name]
+                    )),
+                    right: Box::new(Expr::String("bob".to_string())),
+                    op: Op::Eq
+                }
             }
         );
         Ok(())
