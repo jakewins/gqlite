@@ -69,18 +69,21 @@ projection = { expr ~ (^"AS" ~ id)? }
 projections = { projection ~ ( "," ~ projection )* }
 project_all = { "*" }
 
+distinct_clause = { ^"DISTINCT" }
+
 where_clause = { ^"WHERE" ~ expr }
 
 order_clause = { ^"ORDER BY" ~ order_expr ~ ( "," ~ order_expr )* }
 order_expr = { expr ~ (^"DESC")? }
 
+skip_clause = { ^"SKIP" ~ expr }
 limit_clause = { ^"LIMIT" ~ expr }
 
 create_stmt = { ^"CREATE" ~ patterns }
 match_stmt = { ^"MATCH" ~ pattern ~ where_clause? }
-with_stmt = { ^"WITH" ~ projections ~ order_clause? ~ limit_clause? }
+with_stmt = { ^"WITH" ~ distinct_clause? ~ projections ~ order_clause? ~ skip_clause? ~ limit_clause? }
 unwind_stmt = { ^"UNWIND" ~ expr ~ ^"AS" ~ id }
-return_stmt = { ^"RETURN" ~ ( projections | project_all ) }
+return_stmt = { ^"RETURN" ~ distinct_clause? ~ ( projections | project_all ) ~ order_clause? ~ skip_clause? ~ limit_clause? }
 
 statement = _{ create_stmt | match_stmt | unwind_stmt | with_stmt }
 query = { SOI ~ ( statement )* ~ return_stmt? ~ EOI }

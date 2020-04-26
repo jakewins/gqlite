@@ -1,69 +1,56 @@
 use super::{plan_expr, Expr, LogicalPlan, Pair, PlanningContext, Projection, Result, Rule};
+use pest::iterators::Pairs;
 
 pub fn plan_with(
     pc: &mut PlanningContext,
     src: LogicalPlan,
     stmt: Pair<Rule>,
 ) -> Result<LogicalPlan> {
-    let mut parts = stmt.into_inner();
+    let parts = stmt.into_inner();
 
-    let (is_aggregate, projections) = parts
-        .next()
-        .map(|p| plan_projections(pc, p))
-        .expect("RETURN must start with projections")?;
+    let projections: Projections = parse_projections(pc, parts)?;
 
-    let mut limit = None;
-    for part in parts {
-        match part.as_rule() {
-            Rule::limit_clause => {
-                let limit_expr = part
-                    .into_inner()
-                    .next()
-                    .ok_or(anyhow!("LIMIT contained unexpected part"))?;
-                limit = Some(plan_expr(pc, limit_expr)?);
-            }
-            Rule::order_clause => {
-                // Skip this for now; we don't support ORDER BY, but there are
-                // TCK specs that use ORDER BY where just ignoring it still passes the test
-            }
-            _ => unreachable!("WITH/RETURN clause contained unexpected part: {:?}", part),
-        }
-    }
-
-    if !is_aggregate {
+    // Simple case, no need to do a bunch of introspection
+    if !projections.is_aggregating && !projections.is_distinct {
         return Ok(LogicalPlan::Project {
             src: Box::new(src),
-            projections,
-            limit,
+            projections: projections.projections,
+            skip: projections.skip,
+            limit: projections.limit,
         });
     }
 
-    // Split the projections into groupings and aggregating projections, so in a statement like
+    // Deal with aggregation / distinct
+
+    // So; multiple cases. If there are DISTINCT clauses, we, for now, emit a sort+uniq plan
+    // combo.. this becomes really interesting once you mix multiple DISTINCT projections,
+    // explicit ORDER_BY, aggregations, as well as index-backed order-by.
     //
-    //   MATCH (n) RETURN n.age, count(n)
+    // There is also the fact that if you pick the right starting points, DISTINCT may
+    // be guaranteed by upstream plan entries. Eg. a node scan will return distinct nodes.
     //
-    // You end up with `n.age` in the groupings vector and count(n) in the aggregations vector.
-    // For RETURNs (and WITHs) with no aggregations, this ends up being effectively a wasted copy of
-    // the projections vector into the groupings vector; so we double the allocation in the common case
-    // which kind of sucks. We could probably do this split in plan_return_projections instead,
-    // avoiding the copying.
+    // If there are aggregations, then by definition the grouping keys are distinct, so that's
+    // a thing to be aware of.
+    //
+    // This is a good thing to have read when thinking about aggregations:
+    // https://github.com/postgres/postgres/blob/master/src/backend/executor/nodeAgg.c
+
+    let mut post_aggregation_projections = Vec::new();
     let mut grouping = Vec::new();
     let mut aggregations = Vec::new();
-    // If we end up producing an aggregation, then we wrap it in a Return that describes the order
-    // the user asked values to be returned in
-    let mut aggregation_projections = Vec::new();
-    for projection in projections {
-        let agg_projection_slot = pc.get_or_alloc_slot(projection.alias);
-        aggregation_projections.push(Projection {
-            expr: Expr::Slot(agg_projection_slot),
-            alias: projection.alias,
-            dst: agg_projection_slot,
-        });
-        if projection.expr.is_aggregating(&pc.backend_desc.aggregates) {
-            aggregations.push((projection.expr, pc.get_or_alloc_slot(projection.alias)));
+    for p in projections.projections {
+        if p.expr.is_aggregating(&pc.backend_desc.aggregates) {
+            aggregations.push((p.expr, p.dst))
         } else {
-            grouping.push((projection.expr, pc.get_or_alloc_slot(projection.alias)));
+            grouping.push((p.expr, p.dst))
         }
+        // After the aggregation we still have a projection, for now at least, that
+        // exists only to define the order and aliasing of the slots
+        post_aggregation_projections.push(Projection {
+            expr: Expr::Slot(p.dst),
+            alias: p.alias,
+            dst: p.dst,
+        })
     }
 
     Ok(LogicalPlan::Project {
@@ -72,8 +59,9 @@ pub fn plan_with(
             grouping,
             aggregations,
         }),
-        projections: aggregation_projections,
-        limit: None,
+        projections: post_aggregation_projections,
+        skip: projections.skip,
+        limit: projections.limit,
     })
 }
 
@@ -86,6 +74,7 @@ pub fn plan_return(
     if let LogicalPlan::Project {
         src,
         projections,
+        skip: _,
         limit: _,
     } = result
     {
@@ -99,72 +88,114 @@ pub fn plan_return(
     }
 }
 
-// The bool return here is nasty, refactor, maybe make into a struct?
-fn plan_projections(
-    pc: &mut PlanningContext,
-    projections: Pair<Rule>,
-) -> Result<(bool, Vec<Projection>)> {
-    match projections.as_rule() {
-        // WITH a as b, count(c); aka normal explicit projection
-        Rule::projections => {
-            // This projection clears out all named identifiers that existed previously;
-            // what we need here is scopes, but for now we're doing the bare minimum to pass
-            // the TCK..
-            pc.named_identifiers.clear();
+struct Projections {
+    projections: Vec<Projection>,
+    is_distinct: bool,
+    // Does the projection include explicit aggregating expressions?
+    is_aggregating: bool,
+    skip: Option<Expr>,
+    limit: Option<Expr>,
+}
 
-            let mut out = Vec::new();
-            let mut contains_aggregations = false;
-            for projection in projections.into_inner() {
-                if let Rule::projection = projection.as_rule() {
-                    let default_alias = projection.as_str();
-                    let mut parts = projection.into_inner();
-                    let expr = parts.next().map(|p| plan_expr(pc, p)).unwrap()?;
-                    contains_aggregations =
-                        contains_aggregations || expr.is_aggregating(&pc.backend_desc.aggregates);
-                    let alias = parts
-                        .next()
-                        .and_then(|p| match p.as_rule() {
-                            Rule::id => Some(pc.declare(p.as_str())),
-                            _ => None,
-                        })
-                        .unwrap_or_else(|| pc.declare(default_alias.trim_end()));
+fn parse_projections(pc: &mut PlanningContext, parts: Pairs<Rule>) -> Result<Projections> {
+    let mut projections = None;
+    let mut is_distinct = false;
+    let mut is_aggregating = false;
+    let mut skip = None;
+    let mut limit = None;
+    for part in parts {
+        match part.as_rule() {
+            Rule::distinct_clause => {
+                is_distinct = true;
+            }
+            // WITH a as b, count(c); aka normal explicit projection
+            Rule::projections => {
+                // This projection clears out all named identifiers that existed previously;
+                // what we need here is scopes, but for now we're doing the bare minimum to pass
+                // the TCK..
+                pc.named_identifiers.clear();
+
+                let mut out = Vec::new();
+                for projection in part.into_inner() {
+                    let p = parse_projection(pc, projection)?;
+                    is_aggregating =
+                        is_aggregating || p.expr.is_aggregating(&pc.backend_desc.aggregates);
+                    out.push(p);
+                }
+                projections = Some(out);
+            }
+            // WITH *
+            Rule::project_all => {
+                let mut out = Vec::new();
+                for id in &pc.named_identifiers {
                     out.push(Projection {
-                        expr,
-                        alias,
+                        expr: Expr::Slot(*pc.slots.get(id).unwrap()),
+                        alias: *id,
                         // TODO note that this adds a bunch of unecessary copying in all RETURN clauses and
                         //      in cases where we use projections that just rename stuff (eg. WITH blah as
                         //      x); we should consider making expr in Projection Optional, so it can be
                         //      used for pure renaming, if benchmarking shows that's helpful.
-                        dst: pc.get_or_alloc_slot(alias),
+                        dst: *pc.slots.get(id).unwrap(),
                     });
                 }
-            }
-            Ok((contains_aggregations, out))
-        }
-        // WITH *
-        Rule::project_all => {
-            let mut out = Vec::new();
-            for id in &pc.named_identifiers {
-                out.push(Projection {
-                    expr: Expr::Slot(*pc.slots.get(id).unwrap()),
-                    alias: *id,
-                    // TODO note that this adds a bunch of unecessary copying in all RETURN clauses and
-                    //      in cases where we use projections that just rename stuff (eg. WITH blah as
-                    //      x); we should consider making expr in Projection Optional, so it can be
-                    //      used for pure renaming, if benchmarking shows that's helpful.
-                    dst: *pc.slots.get(id).unwrap(),
+                let tokens = pc.tokens.borrow();
+                out.sort_by(|a, b| {
+                    let a_str = tokens.lookup(a.alias);
+                    let b_str = tokens.lookup(b.alias);
+                    a_str.cmp(&b_str)
                 });
+                projections = Some(out);
             }
-            let tokens = pc.tokens.borrow();
-            out.sort_by(|a, b| {
-                let a_str = tokens.lookup(a.alias);
-                let b_str = tokens.lookup(b.alias);
-                a_str.cmp(&b_str)
-            });
-            Ok((false, out))
+            Rule::skip_clause => {
+                let skip_expr = part
+                    .into_inner()
+                    .next()
+                    .ok_or(anyhow!("SKIP contained unexpected part"))?;
+                skip = Some(plan_expr(pc, skip_expr)?);
+            }
+            Rule::limit_clause => {
+                let limit_expr = part
+                    .into_inner()
+                    .next()
+                    .ok_or(anyhow!("LIMIT contained unexpected part"))?;
+                limit = Some(plan_expr(pc, limit_expr)?);
+            }
+            Rule::order_clause => {
+                // Skip this for now; we don't support ORDER BY, but there are
+                // TCK specs that use ORDER BY where just ignoring it still passes the test
+            }
+            _ => bail!("unexpected part of WITH or RETURN: {:?}", part),
         }
-        _ => unreachable!("RETURN projections must either be project_all or list of projection"),
     }
+    Ok(Projections {
+        projections: projections.unwrap(),
+        is_distinct,
+        is_aggregating,
+        skip,
+        limit,
+    })
+}
+
+fn parse_projection(pc: &mut PlanningContext, projection: Pair<Rule>) -> Result<Projection> {
+    let default_alias = projection.as_str();
+    let mut parts = projection.into_inner();
+    let expr = parts.next().map(|p| plan_expr(pc, p)).unwrap()?;
+    let alias = parts
+        .next()
+        .and_then(|p| match p.as_rule() {
+            Rule::id => Some(pc.declare(p.as_str())),
+            _ => None,
+        })
+        .unwrap_or_else(|| pc.declare(default_alias.trim_end()));
+    Ok(Projection {
+        expr,
+        alias,
+        // TODO note that this adds a bunch of unecessary copying in all RETURN clauses and
+        //      in cases where we use projections that just rename stuff (eg. WITH blah as
+        //      x); we should consider making expr in Projection Optional, so it can be
+        //      used for pure renaming, if benchmarking shows that's helpful.
+        dst: pc.get_or_alloc_slot(alias),
+    })
 }
 
 #[cfg(test)]
@@ -191,6 +222,7 @@ mod tests {
                     alias: id_n,
                     dst: p.slot(id_n),
                 }],
+                skip: None,
                 limit: None,
             }
         );
@@ -216,6 +248,28 @@ mod tests {
                     alias: id_p,
                     dst: p.slot(id_p),
                 }],
+                skip: None,
+                limit: None,
+            }
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn plan_with_order_skip() -> Result<(), Error> {
+        let mut p = plan("WITH 1 as p ORDER BY p SKIP 1")?;
+
+        let id_p = p.tokenize("p");
+        assert_eq!(
+            p.plan,
+            LogicalPlan::Project {
+                src: Box::new(LogicalPlan::Argument),
+                projections: vec![Projection {
+                    expr: Expr::Int(1),
+                    alias: id_p,
+                    dst: p.slot(id_p),
+                }],
+                skip: Some(Expr::Int(1)),
                 limit: None,
             }
         );
@@ -241,6 +295,7 @@ mod tests {
                     alias: id_p,
                     dst: p.slot(id_p),
                 }],
+                skip: None,
                 limit: Some(Expr::Int(1)),
             }
         );
@@ -275,6 +330,7 @@ mod tests {
                         alias: id_a,
                         dst: p.slot(id_a),
                     }],
+                    skip: None,
                     limit: None,
                 }),
                 projections: vec![Projection {
@@ -304,6 +360,37 @@ mod tests {
                     expr: Expr::Slot(p.slot(id_n)),
                     alias: id_n,
                     dst: p.slot(id_n),
+                }]
+            }
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn plan_return_distinct() -> Result<(), Error> {
+        let mut p = plan("MATCH (n) RETURN DISTINCT n.name")?;
+        let alias = p.tokenize("n.name");
+        let id_n = p.tokenize("n");
+        let prop_name = p.tokenize("name");
+        assert_eq!(
+            p.plan,
+            LogicalPlan::Return {
+                src: Box::new(LogicalPlan::Aggregate {
+                    src: Box::new(LogicalPlan::NodeScan {
+                        src: Box::new(LogicalPlan::Argument),
+                        slot: 0,
+                        labels: None,
+                    }),
+                    grouping: vec![(
+                        Expr::Prop(Box::new(Expr::Slot(p.slot(id_n))), vec![prop_name]),
+                        1
+                    ),],
+                    aggregations: vec![]
+                }),
+                projections: vec![Projection {
+                    expr: Expr::Slot(p.slot(alias)),
+                    alias,
+                    dst: p.slot(alias),
                 }]
             }
         );

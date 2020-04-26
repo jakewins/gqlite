@@ -133,29 +133,29 @@ Feature: WithAcceptance
       | (:End {num: 42, id: 0}) |
     And no side effects
 
-#  Scenario: Handle dependencies across WITH with SKIP
-#    Given an empty graph
-#    And having executed:
-#      """
-#      CREATE (a {name: 'A', num: 0, id: 0}),
-#             ({name: 'B', num: a.id, id: 1}),
-#             ({name: 'C', num: 0, id: 2})
-#      """
-#    When executing query:
-#      """
-#      MATCH (a)
-#      WITH a.name AS property, a.num AS idToUse
-#        ORDER BY property
-#        SKIP 1
-#      MATCH (b)
-#      WHERE b.id = idToUse
-#      RETURN DISTINCT b
-#      """
-#    Then the result should be, in any order:
-#      | b                            |
-#      | ({name: 'A', num: 0, id: 0}) |
-#    And no side effects
-#
+  Scenario: Handle dependencies across WITH with SKIP
+    Given an empty graph
+    And having executed:
+      """
+      CREATE (a {name: 'A', num: 0, id: 0}),
+             ({name: 'B', num: a.id, id: 1}),
+             ({name: 'C', num: 0, id: 2})
+      """
+    When executing query:
+      """
+      MATCH (a)
+      WITH a.name AS property, a.num AS idToUse
+        ORDER BY property
+        SKIP 1
+      MATCH (b)
+      WHERE b.id = idToUse
+      RETURN DISTINCT b
+      """
+    Then the result should be, in any order:
+      | b                            |
+      | ({name: 'A', num: 0, id: 0}) |
+    And no side effects
+
 #  Scenario: WHERE after WITH should filter results
 #    Given an empty graph
 #    And having executed:

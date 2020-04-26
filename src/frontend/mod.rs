@@ -21,7 +21,7 @@ mod create_stmt;
 mod with_stmt;
 
 use expr::plan_expr;
-pub use expr::{Expr, MapEntryExpr};
+pub use expr::{Expr, MapEntryExpr, Op};
 
 #[derive(Parser)]
 #[grammar = "cypher.pest"]
@@ -121,9 +121,10 @@ pub enum LogicalPlan {
         //
         // It is legal for this to be empty; indicating there is a single global group.
 
-        // "Please evaluate expression expr and store the result in Slot"
+        // Grouping key
         grouping: Vec<(Expr, Slot)>,
         // "Please evaluate the aggregating expr and output the final accumulation in Slot"
+        // Note that this may be empty, eg in the case of RETURN DISTINCT a.name.
         aggregations: Vec<(Expr, Slot)>,
     },
     Unwind {
@@ -141,7 +142,7 @@ pub enum LogicalPlan {
     Project {
         src: Box<Self>,
         projections: Vec<Projection>,
-        // Maybe it's better to put LIMIT in it's own thing..
+        // Maybe it's better to put SKIP/LIMIT in it's own thing..
         // but you can have WITH .. LIMIT and RETURN .. LIMIT without
         // ORDER BY, so then you'd need a dedicated logical plan node for
         // just "limit", which becomes a PITA because you'll eventually want
@@ -149,6 +150,7 @@ pub enum LogicalPlan {
         // "RETURN x ORDER BY x LIMIT 10".. so for now lets see how things
         // flow if we just expose it like this; nothing stopping backends
         // from converting this into whatever they like.
+        skip: Option<Expr>,
         limit: Option<Expr>,
     },
 }
@@ -176,6 +178,7 @@ impl LogicalPlan {
             LogicalPlan::Project {
                 src,
                 projections,
+                skip,
                 limit,
             } => {
                 let next_indent = &format!("{}  ", ind);
@@ -187,11 +190,13 @@ impl LogicalPlan {
                     proj.push_str(&p.fmt_pretty(next_indent, t))
                 }
                 format!(
-                    "Project(\n{}src={},\n{}projections=[{}],\n{}limit={:?})",
+                    "Project(\n{}src={},\n{}projections=[{}],\n{}skip={:?},\n{}limit={:?})",
                     next_indent,
                     src.fmt_pretty(&format!("{}  ", next_indent), t),
                     next_indent,
                     proj,
+                    next_indent,
+                    skip,
                     next_indent,
                     limit,
                 )
@@ -246,6 +251,22 @@ impl LogicalPlan {
                     format!("{:?}", nodes),
                     next_indent,
                     format!("{:?}", rels)
+                )
+            }
+            LogicalPlan::Aggregate {
+                src,
+                grouping,
+                aggregations,
+            } => {
+                let next_indent = &format!("{}  ", ind);
+                format!(
+                    "Aggregate(\n{}src={}\n{}grouping=[{:?}]\n{}aggregations=[{:?}])",
+                    ind,
+                    src.fmt_pretty(next_indent, t),
+                    ind,
+                    grouping,
+                    ind,
+                    aggregations,
                 )
             }
             _ => format!("NoPretty({:?})", self),

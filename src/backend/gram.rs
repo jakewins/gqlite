@@ -16,6 +16,7 @@ use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
 use std::fmt::{self, Debug, Display, Formatter};
 use std::fs::File;
+use std::hash::{Hash, Hasher};
 use std::io::{Seek, SeekFrom, Write};
 use std::rc::Rc;
 use std::time::SystemTime;
@@ -115,13 +116,25 @@ impl GramBackend {
                 next_rel_index: 0,
                 state: ExpandState::NextNode,
             })),
-            // TODO: unwrap selection for now, actually implement
-            LogicalPlan::Selection { src, .. } => self.convert(*src),
+            LogicalPlan::Selection { src, predicate } => {
+                // self.convert(*src)
+                Ok(Box::new(Select {
+                    src: self.convert(*src)?,
+                    predicate: self.convert_expr(predicate),
+                }))
+            }
             LogicalPlan::Aggregate {
                 src,
-                grouping: _,
+                grouping,
                 aggregations,
             } => {
+                let mut group_expr = Vec::new();
+                for (expr, slot) in grouping {
+                    group_expr.push(GroupEntry {
+                        expr: self.convert_expr(expr),
+                        slot,
+                    })
+                }
                 let mut agg_exprs = Vec::new();
                 for (expr, slot) in aggregations {
                     agg_exprs.push(AggregateEntry {
@@ -129,10 +142,14 @@ impl GramBackend {
                         slot,
                     })
                 }
-                Ok(Box::new(Aggregate {
+                Ok(Box::new(HashAggregation {
                     src: self.convert(*src)?,
+                    grouping: group_expr,
                     aggregations: agg_exprs,
+                    group_aggregations: Default::default(),
+                    group_order: Vec::new(),
                     consumed: false,
+                    aggregated: false,
                 }))
             }
             LogicalPlan::Unwind {
@@ -165,6 +182,7 @@ impl GramBackend {
             LogicalPlan::Project {
                 src,
                 projections,
+                skip: _,
                 limit: _,
             } => {
                 let mut converted_projections = Vec::new();
@@ -216,6 +234,13 @@ impl GramBackend {
             frontend::Expr::Int(v) => Expr::Lit(Val::Int(v)),
             frontend::Expr::Float(v) => Expr::Lit(Val::Float(v)),
 
+            frontend::Expr::BinaryOp { left, right, op } => match op {
+                frontend::Op::Eq => Expr::Equal(
+                    Box::new(self.convert_expr(*left)),
+                    Box::new(self.convert_expr(*right)),
+                ),
+            },
+
             frontend::Expr::Prop(e, props) => Expr::Prop(Box::new(self.convert_expr(*e)), props),
             frontend::Expr::Slot(s) => Expr::Slot(s),
             frontend::Expr::List(es) => {
@@ -224,6 +249,22 @@ impl GramBackend {
                     items.push(self.convert_expr(e));
                 }
                 Expr::List(items)
+            }
+
+            frontend::Expr::FuncCall { name, args } => {
+                // TODO lol
+                let mut tokens = self.tokens.borrow_mut();
+                if name == tokens.tokenize("not") {
+                    let convargs = args.iter().map(|i| self.convert_expr(i.clone())).collect();
+                    return Expr::Call(functions::Func::Not, convargs);
+                } else {
+                    panic!("Unknown function: {:?}", tokens.lookup(name).unwrap(),)
+                }
+            }
+            frontend::Expr::Bool(v) => Expr::Lit(Val::Bool(v)),
+
+            frontend::Expr::And(terms) => {
+                Expr::And(terms.iter().map(|e| self.convert_expr(e.clone())).collect())
             }
             _ => panic!(
                 "The gram backend does not support this expression type yet: {:?}",
@@ -291,7 +332,7 @@ impl Backend for GramBackend {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct GramRow {
     slots: Vec<GramVal>,
 }
@@ -347,6 +388,11 @@ enum Expr {
     Prop(Box<Expr>, Vec<Token>),
     Slot(Slot),
     List(Vec<Expr>),
+
+    Call(functions::Func, Vec<Expr>),
+    And(Vec<Expr>),
+
+    Equal(Box<Expr>, Box<Expr>),
 }
 
 impl Expr {
@@ -384,6 +430,30 @@ impl Expr {
                     out.push(v.eval(ctx, row)?);
                 }
                 Ok(GramVal::List(out))
+            }
+            Expr::Equal(a, b) => {
+                let a_val = a.eval(ctx, row)?;
+                let b_val = b.eval(ctx, row)?;
+                let eq = a_val.eq(&b_val);
+                Ok(GramVal::Lit(Val::Bool(eq)))
+            }
+            Expr::And(terms) => {
+                for t in terms {
+                    match t.eval(ctx, row)? {
+                        GramVal::Lit(Val::Bool(b)) => if !b {
+                            return Ok(GramVal::Lit(Val::Bool(false)))
+                        },
+                        _ => panic!("The gram backend does not know how to do binary logic on non-boolean expressions")
+                    }
+                }
+                return Ok(GramVal::Lit(Val::Bool(true)));
+            }
+            Expr::Call(f, args) => {
+                let mut argv = Vec::with_capacity(args.len());
+                for a in args {
+                    argv.push(a.eval(ctx, row)?);
+                }
+                f.apply(&argv)
             }
         }
     }
@@ -823,12 +893,75 @@ impl Operator for Project {
 }
 
 #[derive(Debug)]
-struct Aggregate {
-    src: Box<dyn Operator>,
+struct Select {
+    pub src: Box<dyn Operator>,
+    pub predicate: Expr,
+}
 
-    aggregations: Vec<AggregateEntry>,
+impl Operator for Select {
+    fn next(&mut self, ctx: &mut Context, out: &mut GramRow) -> Result<bool> {
+        while self.src.next(ctx, out)? {
+            if let GramVal::Lit(Val::Bool(true)) = self.predicate.eval(ctx, out)? {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+}
 
-    consumed: bool,
+// So, this gets complicated. Cypher defines two types with a lot of baggage: NULL and IEEE-754
+// floats. One of the side-effects of this is that the cypher type system only has partial order
+// and partial equality defined. This creates problems; what should be the result of this
+// query?
+//
+//   WITH toFloat("NaN") AS n UNWIND [{k:n,v:1},{k:n,v:1}] AS e RETURN e.k, COUNT(*);
+//
+// Well. Cypher hacks around this problem by defining a *second* type of equality called
+// "equivalence". Predicates are evaluated with the equality rules, while aggregate keys are
+// evaluated with the equivalence rules.
+//
+// This struct uses the equivalence rules to implement rusts equal and hashcode traits, so
+// you can wrap your stuff with this and have rust follow the cypher equivalence rules.
+#[derive(Debug, Clone)]
+struct GroupKey {
+    vals: Vec<GramVal>,
+}
+
+impl Eq for GroupKey {}
+
+impl PartialEq for GroupKey {
+    fn eq(&self, other: &Self) -> bool {
+        for v in &self.vals {
+            for ov in &other.vals {
+                if v.ne(ov) {
+                    return false;
+                }
+            }
+        }
+        return true;
+    }
+}
+
+impl Hash for GroupKey {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        for v in &self.vals {
+            match v {
+                GramVal::Lit(lv) => match lv {
+                    Val::Null => 0.hash(state),
+                    Val::String(sv) => sv.hash(state),
+                    _ => panic!("gram backend can't yet use {:?} as aggregate keys", v),
+                },
+                GramVal::Node { id } => id.hash(state),
+                _ => panic!("gram backend can't yet use {:?} as aggregate keys", v),
+            };
+        }
+    }
+}
+
+#[derive(Debug)]
+struct GroupEntry {
+    expr: Expr,
+    slot: Slot,
 }
 
 #[derive(Debug)]
@@ -837,24 +970,81 @@ struct AggregateEntry {
     slot: Slot,
 }
 
-impl Operator for Aggregate {
+// This whole thing is throw-away, just want to spike through a working implementation to get
+// a feel for things.
+#[derive(Debug)]
+struct HashAggregation {
+    src: Box<dyn Operator>,
+
+    grouping: Vec<GroupEntry>,
+    aggregations: Vec<AggregateEntry>,
+
+    group_aggregations: HashMap<GroupKey, Vec<Box<dyn functions::Aggregation>>>,
+    group_order: Vec<GroupKey>,
+
+    consumed: bool,
+    aggregated: bool,
+}
+
+impl Operator for HashAggregation {
     fn next(&mut self, ctx: &mut Context, row: &mut GramRow) -> Result<bool> {
-        if self.consumed {
-            return Ok(false);
-        }
-        let src = &mut *self.src;
-        while src.next(ctx, row)? {
-            for agge in &mut self.aggregations {
-                agge.func.apply(ctx, row)?;
+        loop {
+            if self.consumed {
+                return Ok(false);
             }
-        }
+            if self.aggregated {
+                if self.group_aggregations.is_empty() {
+                    self.consumed = true;
+                    return Ok(false);
+                }
+                let key = self.group_order.pop().unwrap();
+                let mut aggregation = self.group_aggregations.remove(&key).unwrap();
 
-        for agge in &mut self.aggregations {
-            row.slots[agge.slot] = agge.func.complete()?.clone();
-        }
+                for i in 0..self.grouping.len() {
+                    let keyslot = self.grouping[i].slot;
+                    let k = key.vals[i].clone();
+                    row.slots[keyslot] = k;
+                }
 
-        self.consumed = true;
-        return Ok(true);
+                for i in 0..self.aggregations.len() {
+                    let agge = &mut aggregation[i];
+                    let slot = self.aggregations[i].slot;
+                    row.slots[slot] = agge.complete()?.clone();
+                }
+
+                return Ok(true);
+            }
+            let src = &mut *self.src;
+            while src.next(ctx, row)? {
+                // Calculate the group key
+                let mut key = GroupKey {
+                    vals: Vec::with_capacity(self.grouping.len()),
+                };
+                for group in &self.grouping {
+                    key.vals.push(group.expr.eval(ctx, row)?)
+                }
+                // Does an entry like that exist?
+                let maybe_state = self.group_aggregations.get_mut(&key);
+                if let None = maybe_state {
+                    let mut group_state = Vec::with_capacity(self.aggregations.len());
+                    for agge in &mut self.aggregations {
+                        group_state.push(agge.func.init(ctx))
+                    }
+                    for agge in &mut group_state {
+                        agge.apply(ctx, row)?;
+                    }
+                    self.group_order.push(key.clone());
+                    self.group_aggregations.insert(key, group_state);
+                } else {
+                    let group_state = maybe_state.unwrap();
+                    for agge in group_state {
+                        agge.apply(ctx, row)?;
+                    }
+                }
+            }
+
+            self.aggregated = true;
+        }
     }
 }
 
@@ -932,13 +1122,11 @@ mod parser {
         let mut g = Graph { nodes: vec![] };
 
         let query_str = read_to_string(file).unwrap();
-        let maybe_parse = GramParser::parse(Rule::gram, &query_str);
+        let mut parse_result = GramParser::parse(Rule::gram, &query_str)?;
 
-        let gram = maybe_parse
-            .expect("unsuccessful parse") // unwrap the parse result
-            .next()
-            .unwrap(); // get and unwrap the `file` rule; never fails
+        let gram = parse_result.next().unwrap(); // get and unwrap the `file` rule; never fails
 
+        let mut anon_id_gen = 0;
         //    let id_map = HashMap::new();
         let mut node_ids = Tokens {
             table: Default::default(),
@@ -1040,7 +1228,16 @@ mod parser {
                         }
                     }
 
-                    let gid_string = identifier.unwrap();
+                    let gid_string = identifier.unwrap_or_else(|| {
+                        // Entry with no identifier, generate one
+                        loop {
+                            let candidate = format!("anon#{}", anon_id_gen);
+                            if !node_ids.table.contains_key(&candidate) {
+                                return candidate;
+                            }
+                            anon_id_gen += 1;
+                        }
+                    });
                     let gid = tokens.tokenize(&gid_string);
                     g.add_node(
                         node_ids.tokenize(&gid_string),
@@ -1247,13 +1444,48 @@ mod functions {
         return out;
     }
 
+    #[derive(Debug, Clone)]
+    pub(super) enum Func {
+        Not,
+    }
+
+    impl Func {
+        pub fn apply(&self, args: &Vec<GramVal>) -> Result<GramVal> {
+            match self {
+                Func::Not => match args.get(0).ok_or(anyhow!("NOT takes one argument"))? {
+                    GramVal::Lit(v) => match v {
+                        Val::Bool(b) => Ok(GramVal::Lit(Val::Bool(!*b))),
+                        v => bail!("don't know how to do NOT({:?})", v),
+                    },
+                    v => bail!("don't know how to do NOT({:?})", v),
+                },
+            }
+        }
+    }
+
+    // This trait combines with AggregatingFunc and Aggregation to specify uhh, aggregation.
+    // The split is basically: AggregatingFuncSpec is used before query execution starts,
+    // we call init() with the expressions from the query plan to get an AggregatingFunc
+    // specifically for the query we're executing now. Then aggregatingFunc#init is called
+    // once for each aggregation group, yielding, finally, Aggregation, which is the accumulating
+    // state for each group.
+    //
+    // There are a large number of problems with this design, but you gotta start somewhere :)
+    //
+    // Some thoughts: It's annoying that this is all heap allocated; aggregations is one of
+    // two critical places where memory management really, really matters (sorting being the other),
+    // and so it'd be nice if the environment these guys execute in had more control of where their
+    // state goes and how big it gets..
     pub(super) trait AggregatingFuncSpec: Debug {
         fn signature(&self) -> &FuncSignature;
         fn init(&self, args: Vec<Expr>) -> Box<dyn AggregatingFunc>;
     }
 
-    // A running aggregation in an executing query
     pub(super) trait AggregatingFunc: Debug {
+        fn init(&mut self, ctx: &mut Context) -> Box<dyn Aggregation>;
+    }
+
+    pub(super) trait Aggregation: Debug {
         fn apply(&mut self, ctx: &mut Context, row: &mut GramRow) -> Result<()>;
         fn complete(&mut self) -> Result<&GramVal>;
     }
@@ -1285,7 +1517,6 @@ mod functions {
         fn init(&self, mut args: Vec<Expr>) -> Box<dyn AggregatingFunc> {
             Box::new(Min {
                 arg: args.pop().expect("min takes 1 arg"),
-                min: None,
             })
         }
     }
@@ -1293,10 +1524,24 @@ mod functions {
     #[derive(Debug)]
     struct Min {
         arg: Expr,
-        min: Option<GramVal>,
     }
 
     impl AggregatingFunc for Min {
+        fn init(&mut self, _ctx: &mut Context) -> Box<dyn Aggregation> {
+            Box::new(MinAggregation {
+                arg: self.arg.clone(),
+                min: None,
+            })
+        }
+    }
+
+    #[derive(Debug)]
+    struct MinAggregation {
+        arg: Expr,
+        min: Option<GramVal>,
+    }
+
+    impl Aggregation for MinAggregation {
         fn apply(&mut self, ctx: &mut Context, row: &mut GramRow) -> Result<()> {
             let v = self.arg.eval(ctx, row)?;
             if let Some(current_min) = &self.min {
@@ -1351,7 +1596,6 @@ mod functions {
             println!("Init max({:?})", args);
             Box::new(Max {
                 arg: args.pop().expect("max takes 1 argument"),
-                max: None,
             })
         }
     }
@@ -1359,10 +1603,24 @@ mod functions {
     #[derive(Debug)]
     struct Max {
         arg: Expr,
-        max: Option<GramVal>,
     }
 
     impl AggregatingFunc for Max {
+        fn init(&mut self, _ctx: &mut Context) -> Box<dyn Aggregation> {
+            Box::new(MaxAggregation {
+                arg: self.arg.clone(),
+                max: None,
+            })
+        }
+    }
+
+    #[derive(Debug)]
+    struct MaxAggregation {
+        arg: Expr,
+        max: Option<GramVal>,
+    }
+
+    impl Aggregation for MaxAggregation {
         fn apply(&mut self, ctx: &mut Context, row: &mut GramRow) -> Result<()> {
             let v = self.arg.eval(ctx, row)?;
             if let Some(current_max) = &self.max {

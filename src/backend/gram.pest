@@ -12,14 +12,18 @@ id_char = {
     | "\\" ~ ("`" | "\\" | "/" | "b" | "f" | "n" | "r" | "t")
 }
 
-//
-// prop_lookup = { id ~ ("." ~ id)+ }
-//
-string = ${ "\"" ~ str_inner ~ "\"" }
-str_inner = @{ char* }
-char = {
-    !("\"" | "`" | "\\") ~ ANY
+string = ${
+  "\"" ~ dblq_str_inner ~ "\"" |
+  "'" ~ singleq_str_inner ~ "'" }
+dblq_str_inner = @{ dbldq_char* }
+dbldq_char = {
+    !("\"" | "\\") ~ ANY
     | "\\" ~ ("\"" | "\\" | "/" | "b" | "f" | "n" | "r" | "t")
+}
+singleq_str_inner = @{ singleq_char* }
+singleq_char = {
+    !("'" | "\\") ~ ANY
+    | "\\" ~ ("'" | "\\" | "/" | "b" | "f" | "n" | "r" | "t")
 }
 
 num = { int ~ ("." ~ ASCII_DIGIT*)? ~ (^"e" ~ int)? }
