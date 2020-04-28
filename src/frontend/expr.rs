@@ -11,6 +11,7 @@ use std::str::FromStr;
 #[derive(Debug, PartialEq, Clone)]
 pub enum Op {
     Eq,
+    Gt,
 }
 
 impl FromStr for Op {
@@ -19,6 +20,7 @@ impl FromStr for Op {
     fn from_str(s: &str) -> Result<Self> {
         match s {
             "=" => Ok(Op::Eq),
+            ">" => Ok(Op::Gt),
             _ => bail!("Unknown operator: {}", s),
         }
     }
@@ -170,6 +172,13 @@ fn plan_term(pc: &mut PlanningContext, term: Pair<Rule>) -> Result<Expr> {
                 args.push(plan_expr(pc, arg)?);
             }
             return Ok(Expr::FuncCall { name, args });
+        }
+        Rule::count_call => {
+            let name = pc.tokenize("count");
+            return Ok(Expr::FuncCall {
+                name,
+                args: Vec::new(),
+            });
         }
         Rule::list => {
             let mut items = Vec::new();
@@ -324,6 +333,14 @@ mod tests {
                     op: Op::Eq
                 }),
                 op: Op::Eq
+            },
+        );
+        assert_eq!(
+            plan("1 > 2")?.expr,
+            Expr::BinaryOp {
+                left: Box::new(Expr::Int(1)),
+                right: Box::new(Expr::Int(2)),
+                op: Op::Gt
             },
         );
         Ok(())

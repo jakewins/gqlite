@@ -179,12 +179,7 @@ impl GramBackend {
                     print_header: true,
                 }))
             }
-            LogicalPlan::Project {
-                src,
-                projections,
-                skip: _,
-                limit: _,
-            } => {
+            LogicalPlan::Project { src, projections } => {
                 let mut converted_projections = Vec::new();
                 for projection in projections {
                     converted_projections.push(Projection {
@@ -197,6 +192,35 @@ impl GramBackend {
                 Ok(Box::new(Project {
                     src: self.convert(*src)?,
                     projections: converted_projections,
+                }))
+            }
+            LogicalPlan::Sort { src, sort_by } => {
+                let mut conv_sort_by = Vec::with_capacity(sort_by.len());
+                for s in sort_by {
+                    conv_sort_by.push(self.convert_expr(s));
+                }
+                Ok(Box::new(Sort {
+                    src: self.convert(*src)?,
+                    state: SortState::Init,
+                    rows: vec![],
+                    sort_by: conv_sort_by,
+                }))
+            }
+            LogicalPlan::Limit { src, skip, limit } => {
+                let mut conv_skip = None;
+                let mut conv_limit = None;
+                if let Some(skip_expr) = skip {
+                    conv_skip = Some(self.convert_expr(skip_expr));
+                }
+                if let Some(limit_expr) = limit {
+                    conv_limit = Some(self.convert_expr(limit_expr));
+                }
+                Ok(Box::new(Limit {
+                    src: self.convert(*src)?,
+                    skip: conv_skip,
+                    limit: conv_limit,
+                    initialized: false,
+                    limit_remaining: None,
                 }))
             }
         }
@@ -236,6 +260,10 @@ impl GramBackend {
 
             frontend::Expr::BinaryOp { left, right, op } => match op {
                 frontend::Op::Eq => Expr::Equal(
+                    Box::new(self.convert_expr(*left)),
+                    Box::new(self.convert_expr(*right)),
+                ),
+                frontend::Op::Gt => Expr::Gt(
                     Box::new(self.convert_expr(*left)),
                     Box::new(self.convert_expr(*right)),
                 ),
@@ -359,6 +387,13 @@ pub struct GramCursor {
 impl BackendCursor for GramCursor {
     fn next(&mut self) -> Result<Option<&Row>> {
         if let Some(p) = &mut self.plan {
+            // TODO hackety hack: If there are no slots to project, just spin through the tree
+            if self.slots.is_empty() {
+                while p.next(&mut self.ctx, &mut self.row)? {
+                    // ..
+                }
+                return Ok(None);
+            }
             if p.next(&mut self.ctx, &mut self.row)? {
                 for slot in 0..self.slots.len() {
                     self.projection.slots[slot] =
@@ -392,16 +427,12 @@ enum Expr {
     Call(functions::Func, Vec<Expr>),
     And(Vec<Expr>),
 
+    Gt(Box<Expr>, Box<Expr>),
     Equal(Box<Expr>, Box<Expr>),
 }
 
 impl Expr {
-    fn eval_prop(
-        ctx: &mut Context,
-        row: &mut GramRow,
-        expr: &Expr,
-        prop: Token,
-    ) -> Result<GramVal> {
+    fn eval_prop(ctx: &mut Context, row: &GramRow, expr: &Expr, prop: Token) -> Result<GramVal> {
         let v = match expr.eval(ctx, row)? {
             GramVal::Node { id } => ctx.g.borrow().get_node_prop(id, prop).unwrap_or(Val::Null),
             GramVal::Rel { node_id, rel_index } => ctx
@@ -414,7 +445,7 @@ impl Expr {
         Ok(GramVal::Lit(v))
     }
 
-    fn eval(&self, ctx: &mut Context, row: &mut GramRow) -> Result<GramVal> {
+    fn eval(&self, ctx: &mut Context, row: &GramRow) -> Result<GramVal> {
         match self {
             Expr::Prop(expr, props) => {
                 if props.len() != 1 {
@@ -430,6 +461,14 @@ impl Expr {
                     out.push(v.eval(ctx, row)?);
                 }
                 Ok(GramVal::List(out))
+            }
+            Expr::Gt(a, b) => {
+                let a_val = a.eval(ctx, row)?;
+                let b_val = b.eval(ctx, row)?;
+                match a_val.partial_cmp(&b_val) {
+                    Some(Ordering::Greater) => Ok(GramVal::Lit(Val::Bool(true))),
+                    _ => Ok(GramVal::Lit(Val::Bool(false))),
+                }
             }
             Expr::Equal(a, b) => {
                 let a_val = a.eval(ctx, row)?;
@@ -776,6 +815,9 @@ struct Create {
 
 impl Operator for Create {
     fn next(&mut self, ctx: &mut Context, out: &mut GramRow) -> Result<bool, Error> {
+        if !self.src.next(ctx, out)? {
+            return Ok(false);
+        }
         for node in &self.nodes {
             let node_properties = node
                 .props
@@ -808,9 +850,12 @@ impl Operator for Create {
                 })
                 .collect();
 
-            let start_node = match out.slots[rel.start_node_slot] {
-                GramVal::Node { id } => id,
-                _ => unreachable!("Start node for rel create must be a node value"),
+            let start_node = match &out.slots[rel.start_node_slot] {
+                GramVal::Node { id } => *id,
+                v => unreachable!(
+                    "Start node for rel create must be a node value, got {:?} from Slot({})",
+                    v, rel.start_node_slot
+                ),
             };
             let end_node = match out.slots[rel.end_node_slot] {
                 GramVal::Node { id } => id,
@@ -820,7 +865,7 @@ impl Operator for Create {
             out.slots[rel.slot] =
                 append_rel(ctx, start_node, end_node, rel.rel_type, rel_properties)?;
         }
-        Ok(false)
+        Ok(true)
     }
 }
 
@@ -889,6 +934,119 @@ impl Operator for Project {
             return Ok(true);
         }
         Ok(false)
+    }
+}
+
+#[derive(Debug)]
+struct Limit {
+    src: Box<dyn Operator>,
+    skip: Option<Expr>,
+    limit: Option<Expr>,
+
+    initialized: bool,
+    limit_remaining: Option<i64>,
+}
+
+impl Operator for Limit {
+    fn next(&mut self, ctx: &mut Context, out: &mut GramRow) -> Result<bool> {
+        if !self.initialized {
+            self.initialized = true;
+            if let Some(skip_expr) = &self.skip {
+                let skip_val = skip_expr.eval(ctx, out)?;
+                let mut skip = if let GramVal::Lit(Val::Int(i)) = skip_val {
+                    i
+                } else {
+                    bail!("SKIP expression must be an integer, got {:?}", skip_val)
+                };
+                while skip > 0 && self.src.next(ctx, out)? {
+                    skip -= 1
+                }
+            }
+            if let Some(limit_expr) = &self.limit {
+                let limit_val = limit_expr.eval(ctx, out)?;
+                self.limit_remaining = if let GramVal::Lit(Val::Int(i)) = limit_val {
+                    Some(i)
+                } else {
+                    bail!("LIMIT expression must be an integer, got {:?}", limit_val)
+                };
+            }
+        }
+
+        if let Some(limit_remaining) = self.limit_remaining {
+            if limit_remaining == 0 {
+                return Ok(false);
+            }
+            self.limit_remaining = Some(limit_remaining - 1);
+        }
+
+        self.src.next(ctx, out)
+    }
+}
+
+#[derive(Debug)]
+struct Sort {
+    src: Box<dyn Operator>,
+    state: SortState,
+    rows: Vec<GramRow>,
+    sort_by: Vec<Expr>,
+}
+
+#[derive(Debug)]
+enum SortState {
+    Init,
+    Yielding { next: usize },
+    Done,
+}
+
+impl Operator for Sort {
+    // TODO lol
+    fn next(&mut self, ctx: &mut Context, out: &mut GramRow) -> Result<bool> {
+        if let SortState::Init = self.state {
+            let mut rows = Vec::new();
+            while self.src.next(ctx, out)? {
+                rows.push(out.clone());
+            }
+
+            if rows.is_empty() {
+                self.state = SortState::Done;
+                return Ok(false);
+            }
+
+            rows.sort_by(|a, b| {
+                for e in &self.sort_by {
+                    let a_val = e.eval(ctx, a).unwrap();
+                    let b_val = e.eval(ctx, b).unwrap();
+                    let cmp = a_val.partial_cmp(&b_val);
+                    match cmp {
+                        Some(Ordering::Greater) => return Ordering::Greater,
+                        Some(Ordering::Less) => return Ordering::Less,
+                        // TODO: Val should probably implement Ord, because while we don't
+                        //       implement a full Eq, there *is* a total ordering. As it happens,
+                        //       things that aren't technically comparable (NULL > NULL et al)
+                        //       "are equal" when it comes to sorting and grouping.. so this works
+                        _ => (),
+                    }
+                }
+                return Ordering::Equal;
+            });
+            self.rows = rows;
+            self.state = SortState::Yielding { next: 0 };
+        }
+
+        if let SortState::Yielding { next } = self.state {
+            let row = &self.rows[next];
+            for i in 0..out.slots.len() {
+                out.slots[i] = row.slots[i].clone();
+            }
+            if self.rows.len() > next + 1 {
+                self.state = SortState::Yielding { next: next + 1 }
+            } else {
+                self.state = SortState::Done;
+            }
+            Ok(true)
+        } else {
+            Ok(false)
+        }
     }
 }
 
@@ -1334,12 +1492,9 @@ fn append_node(
     labels: HashSet<Token>,
     node_properties: HashMap<Token, Val>,
 ) -> Result<GramVal, Error> {
-    let mut tokens = tokens_in.borrow_mut();
-    let properties_gram_ready: HashMap<&str, String> = node_properties
-        .iter()
-        .map(|kvp| (tokens.lookup(*kvp.0).unwrap(), format!("{}", (*kvp.1))))
-        .collect();
+    let p = serialize_props(ctx, &node_properties);
     let gram_identifier = generate_uuid().to_hyphenated().to_string();
+    let mut tokens = tokens_in.borrow_mut();
     let gram_string = if !labels.is_empty() {
         let labels_gram_ready: Vec<&str> =
             labels.iter().map(|l| tokens.lookup(*l).unwrap()).collect();
@@ -1347,14 +1502,10 @@ fn append_node(
             "(`{}`:{} {})\n",
             gram_identifier,
             labels_gram_ready.join(":"),
-            json::stringify(properties_gram_ready)
+            p
         )
     } else {
-        format!(
-            "(`{}` {})\n",
-            gram_identifier,
-            json::stringify(properties_gram_ready)
-        )
+        format!("(`{}` {})\n", gram_identifier, p)
     };
 
     let out_node = Node {
@@ -1390,13 +1541,9 @@ fn append_rel(
     rel_type: Token,
     props: HashMap<Token, Val>,
 ) -> Result<GramVal, Error> {
-    let tokens = ctx.tokens.borrow();
+    let p = serialize_props(ctx, &props);
     let mut g = ctx.g.borrow_mut();
-
-    let properties_gram_ready: HashMap<&str, String> = props
-        .iter()
-        .map(|kvp| (tokens.lookup(*kvp.0).unwrap(), format!("{}", (*kvp.1))))
-        .collect();
+    let tokens = ctx.tokens.borrow();
 
     let startgid = tokens.lookup(g.nodes[start_node].gid).unwrap();
     let endgid = tokens.lookup(g.nodes[end_node].gid).unwrap();
@@ -1404,10 +1551,7 @@ fn append_rel(
 
     let gram_string = format!(
         "(`{}`)-[:`{}` {}]->(`{}`)\n",
-        startgid,
-        reltype_str,
-        json::stringify(properties_gram_ready),
-        endgid,
+        startgid, reltype_str, p, endgid,
     );
 
     println!("--- About to write ---");
@@ -1430,6 +1574,36 @@ fn append_rel(
     }
 }
 
+fn serialize_props(ctx: &mut Context, props: &HashMap<Token, Val>) -> String {
+    let mut out = String::new();
+    let mut first = true;
+    out.push_str("{");
+    for (k, v) in props {
+        if !first {
+            out.push_str(", ");
+        } else {
+            first = false;
+        }
+        {
+            let toks = ctx.tokens.borrow_mut();
+            let key = toks.lookup(*k).unwrap();
+            out.push_str(key);
+        }
+        out.push_str(": ");
+        out.push_str(&serialize_val(ctx, &v))
+    }
+    out.push_str("}");
+    return out;
+}
+
+fn serialize_val(_ctx: &mut Context, v: &Val) -> String {
+    match v {
+        Val::String(s) => format!("\'{}\'", s),
+        Val::Int(v) => format!("{}", v),
+        _ => panic!("Don't know how to serialize {:?}", v),
+    }
+}
+
 mod functions {
     use super::{Context, Expr, GramRow, GramVal, Val};
     use crate::backend::{FuncSignature, FuncType, Tokens};
@@ -1441,6 +1615,7 @@ mod functions {
         let mut out: Vec<Box<dyn AggregatingFuncSpec>> = Default::default();
         out.push(Box::new(MinSpec::new(tokens)));
         out.push(Box::new(MaxSpec::new(tokens)));
+        out.push(Box::new(CountSpec::new(tokens)));
         return out;
     }
 
@@ -1644,6 +1819,65 @@ mod functions {
                     "There were no input rows to the aggregation, cannot calculate min(..)"
                 ))
             }
+        }
+    }
+
+    #[derive(Debug)]
+    struct CountSpec {
+        sig: FuncSignature,
+    }
+
+    impl CountSpec {
+        pub fn new(tokens: &mut Tokens) -> CountSpec {
+            let fn_name = tokens.tokenize("count");
+            CountSpec {
+                sig: FuncSignature {
+                    func_type: FuncType::Aggregating,
+                    name: fn_name,
+                    returns: Type::Any,
+                    args: vec![],
+                },
+            }
+        }
+    }
+
+    impl AggregatingFuncSpec for CountSpec {
+        fn signature(&self) -> &FuncSignature {
+            return &self.sig;
+        }
+
+        fn init(&self, _args: Vec<Expr>) -> Box<dyn AggregatingFunc> {
+            Box::new(Count {})
+        }
+    }
+
+    #[derive(Debug)]
+    struct Count {}
+
+    impl AggregatingFunc for Count {
+        fn init(&mut self, _ctx: &mut Context) -> Box<dyn Aggregation> {
+            Box::new(CountAggregation {
+                counter: 0,
+                out: GramVal::Lit(Val::Int(0)),
+            })
+        }
+    }
+
+    #[derive(Debug)]
+    struct CountAggregation {
+        counter: i64,
+        out: GramVal,
+    }
+
+    impl Aggregation for CountAggregation {
+        fn apply(&mut self, _ctx: &mut Context, _row: &mut GramRow) -> Result<()> {
+            self.counter += 1;
+            Ok(())
+        }
+
+        fn complete(&mut self) -> Result<&GramVal> {
+            self.out = GramVal::Lit(Val::Int(self.counter));
+            return Ok(&self.out);
         }
     }
 }

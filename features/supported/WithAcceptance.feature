@@ -176,71 +176,71 @@ Feature: WithAcceptance
       | ({name: 'B'}) |
     And no side effects
 
-#  Scenario: WHERE after WITH can filter on top of an aggregation
-#    Given an empty graph
-#    And having executed:
-#      """
-#      CREATE (a {name: 'A'}),
-#             (b {name: 'B'})
-#      CREATE (a)-[:REL]->(),
-#             (a)-[:REL]->(),
-#             (a)-[:REL]->(),
-#             (b)-[:REL]->()
-#      """
-#    When executing query:
-#      """
-#      MATCH (a)-->()
-#      WITH a, count(*) AS relCount
-#      WHERE relCount > 1
-#      RETURN a
-#      """
-#    Then the result should be, in any order:
-#      | a             |
-#      | ({name: 'A'}) |
-#    And no side effects
-#
-#  Scenario: ORDER BY on an aggregating key
-#    Given an empty graph
-#    And having executed:
-#      """
-#      CREATE ({name: 'A'}),
-#             ({name: 'A'}),
-#             ({name: 'B'})
-#      """
-#    When executing query:
-#      """
-#      MATCH (a)
-#      WITH a.name AS bars, count(*) AS relCount
-#      ORDER BY a.name
-#      RETURN *
-#      """
-#    Then the result should be, in any order:
-#      | bars | relCount |
-#      | 'A'  | 2        |
-#      | 'B'  | 1        |
-#    And no side effects
-#
-#  Scenario: ORDER BY a DISTINCT column
-#    Given an empty graph
-#    And having executed:
-#      """
-#      CREATE ({name: 'A'}),
-#             ({name: 'A'}),
-#             ({name: 'B'})
-#      """
-#    When executing query:
-#      """
-#      MATCH (a)
-#      WITH DISTINCT a.name AS bars
-#      ORDER BY a.name
-#      RETURN *
-#      """
-#    Then the result should be, in any order:
-#      | bars |
-#      | 'A'  |
-#      | 'B'  |
-#    And no side effects
-#
+  Scenario: WHERE after WITH can filter on top of an aggregation
+    Given an empty graph
+    And having executed:
+      """
+      CREATE (a {name: 'A'}),
+             (b {name: 'B'})
+      CREATE (a)-[:REL]->(),
+             (a)-[:REL]->(),
+             (a)-[:REL]->(),
+             (b)-[:REL]->()
+      """
+    When executing query:
+      """
+      MATCH (a)-->()
+      WITH a, count(*) AS relCount
+      WHERE relCount > 1
+      RETURN a
+      """
+    Then the result should be, in any order:
+      | a             |
+      | ({name: 'A'}) |
+    And no side effects
+
+  Scenario: ORDER BY on an aggregating key
+    Given an empty graph
+    And having executed:
+      """
+      CREATE ({name: 'A'}),
+             ({name: 'A'}),
+             ({name: 'B'})
+      """
+    When executing query:
+      """
+      MATCH (a)
+      WITH a.name AS bars, count(*) AS relCount
+      ORDER BY a.name
+      RETURN *
+      """
+    Then the result should be, in any order:
+      | bars | relCount |
+      | 'A'  | 2        |
+      | 'B'  | 1        |
+    And no side effects
+
+  Scenario: ORDER BY a DISTINCT column
+    Given an empty graph
+    And having executed:
+      """
+      CREATE ({name: 'A'}),
+             ({name: 'A'}),
+             ({name: 'B'})
+      """
+    When executing query:
+      """
+      MATCH (a)
+      WITH DISTINCT a.name AS bars
+      ORDER BY a.name
+      RETURN *
+      """
+    Then the result should be, in any order:
+      | bars |
+      | 'A'  |
+      | 'B'  |
+    And no side effects
+
 #  Scenario: WHERE on a DISTINCT column
 #    Given an empty graph
 #    And having executed:
@@ -260,7 +260,7 @@ Feature: WithAcceptance
 #      | bars |
 #      | 'B'  |
 #    And no side effects
-
+#
 #  Scenario: A simple pattern with one bound endpoint
 #    Given an empty graph
 #    And having executed:
