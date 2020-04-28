@@ -11,23 +11,46 @@ pub fn plan_with(
     let projections: Projections = parse_projections(pc, parts)?;
 
     // Simple case, no need to do a bunch of introspection
-    if !projections.is_aggregating && !projections.is_distinct {
-        let proj = LogicalPlan::Project {
+    let mut plan = if !projections.is_aggregating && !projections.is_distinct {
+        LogicalPlan::Project {
             src: Box::new(src),
             projections: projections.projections,
-            skip: projections.skip,
-            limit: projections.limit,
-        };
-        return if let Some(e) = projections.selection {
-            Ok(LogicalPlan::Selection {
-                src: Box::new(proj),
-                predicate: e,
-            })
-        } else {
-            Ok(proj)
+        }
+    } else {
+        plan_aggregation(pc, src, projections.projections)?
+    };
+
+    if let Some(e) = projections.selection {
+        plan = LogicalPlan::Selection {
+            src: Box::new(plan),
+            predicate: e,
         };
     }
 
+    // TODO: The plan nodes should somehow track metadata about what they promise wrt order
+    //       and distinctness. If we know the source is sorted, we can skip this (like if we
+    //       are using an index). Likewise if you know there won't be repeats you can do
+    //       grouped aggregation rather than hash aggregation. And, if you know the result is
+    //       partially sorted (like by a prefix), you can do partial sort.. etc.
+    if let Some(e) = projections.sort {
+        plan = LogicalPlan::Sort {
+            src: Box::new(plan),
+            sort_by: e,
+        }
+    }
+
+    if projections.limit.is_some() || projections.skip.is_some() {
+        plan = LogicalPlan::Limit {
+            src: Box::new(plan),
+            skip: projections.skip,
+            limit: projections.limit,
+        }
+    }
+
+    return Ok(plan)
+}
+
+pub fn plan_aggregation(pc: &mut PlanningContext, src: LogicalPlan, projections: Vec<Projection>) -> Result<LogicalPlan> {
     // Deal with aggregation / distinct
 
     // So; multiple cases. If there are DISTINCT clauses, we, for now, emit a sort+uniq plan
@@ -46,7 +69,7 @@ pub fn plan_with(
     let mut post_aggregation_projections = Vec::new();
     let mut grouping = Vec::new();
     let mut aggregations = Vec::new();
-    for p in projections.projections {
+    for p in projections {
         if p.expr.is_aggregating(&pc.backend_desc.aggregates) {
             aggregations.push((p.expr, p.dst))
         } else {
@@ -61,26 +84,14 @@ pub fn plan_with(
         })
     }
 
-    let proj = LogicalPlan::Project {
+    return Ok(LogicalPlan::Project {
         src: Box::new(LogicalPlan::Aggregate {
             src: Box::new(src),
             grouping,
             aggregations,
         }),
         projections: post_aggregation_projections,
-        skip: projections.skip,
-        limit: projections.limit,
-    };
-
-    // TODO this is obviously wrong; skip/limit must be on the outside of the predicate
-    return if let Some(e) = projections.selection {
-        Ok(LogicalPlan::Selection {
-            src: Box::new(proj),
-            predicate: e,
-        })
-    } else {
-        Ok(proj)
-    };
+    })
 }
 
 pub fn plan_return(
@@ -92,8 +103,6 @@ pub fn plan_return(
     if let LogicalPlan::Project {
         src,
         projections,
-        skip: _,
-        limit: _,
     } = result
     {
         // TODO This is the same as plan_with; we should drop LogicalPlan::Return and instead have
@@ -112,17 +121,19 @@ struct Projections {
     // Does the projection include explicit aggregating expressions?
     is_aggregating: bool,
     selection: Option<Expr>,
+    sort: Option<Vec<Expr>>,
     skip: Option<Expr>,
     limit: Option<Expr>,
 }
 
 fn parse_projections(pc: &mut PlanningContext, parts: Pairs<Rule>) -> Result<Projections> {
-    let mut projections = None;
+    let mut projections = Vec::new();
     let mut is_distinct = false;
     let mut is_aggregating = false;
     let mut skip = None;
     let mut limit = None;
     let mut selection = None;
+    let mut sort = None;
     for part in parts {
         match part.as_rule() {
             Rule::distinct_clause => {
@@ -135,20 +146,17 @@ fn parse_projections(pc: &mut PlanningContext, parts: Pairs<Rule>) -> Result<Pro
                 // the TCK..
                 pc.named_identifiers.clear();
 
-                let mut out = Vec::new();
                 for projection in part.into_inner() {
                     let p = parse_projection(pc, projection)?;
                     is_aggregating =
                         is_aggregating || p.expr.is_aggregating(&pc.backend_desc.aggregates);
-                    out.push(p);
+                    projections.push(p);
                 }
-                projections = Some(out);
             }
             // WITH *
             Rule::project_all => {
-                let mut out = Vec::new();
                 for id in &pc.named_identifiers {
-                    out.push(Projection {
+                    projections.push(Projection {
                         expr: Expr::Slot(*pc.slots.get(id).unwrap()),
                         alias: *id,
                         // TODO note that this adds a bunch of unecessary copying in all RETURN clauses and
@@ -159,12 +167,11 @@ fn parse_projections(pc: &mut PlanningContext, parts: Pairs<Rule>) -> Result<Pro
                     });
                 }
                 let tokens = pc.tokens.borrow();
-                out.sort_by(|a, b| {
+                projections.sort_by(|a, b| {
                     let a_str = tokens.lookup(a.alias);
                     let b_str = tokens.lookup(b.alias);
                     a_str.cmp(&b_str)
                 });
-                projections = Some(out);
             }
             Rule::where_clause => {
                 let where_expr = part
@@ -190,18 +197,52 @@ fn parse_projections(pc: &mut PlanningContext, parts: Pairs<Rule>) -> Result<Pro
             Rule::order_clause => {
                 // Skip this for now; we don't support ORDER BY, but there are
                 // TCK specs that use ORDER BY where just ignoring it still passes the test
+                let mut out = Vec::new();
+                for sort_group in part.into_inner() {
+                    let sort_expr = sort_group
+                        .into_inner()
+                        .next()
+                        .ok_or(anyhow!("SORT contained unexpected part"))?;
+                    let planned_expr = plan_expr(pc, sort_expr)?;
+                    if is_aggregating || is_distinct {
+                        out.push(sort_expr_for_aggregation(&projections, planned_expr)?)
+                    } else {
+                        out.push(planned_expr);
+                    }
+                }
+                sort = Some(out);
             }
             _ => bail!("unexpected part of WITH or RETURN: {:?}", part),
         }
     }
     Ok(Projections {
-        projections: projections.unwrap(),
+        projections: projections,
         is_distinct,
         is_aggregating,
         selection,
+        sort,
         skip,
         limit,
     })
+}
+
+// Sort expressions are a bit painful; they can't refer to stuff that was made out-of-scope
+// by the preceding WITH/RETURN projection, if the projection contains aggregation.
+fn sort_expr_for_aggregation(projections: &Vec<Projection>, e: Expr) -> Result<Expr> {
+    match e {
+        Expr::Slot(_) => return Ok(e),
+        Expr::Prop(_, _) => {
+            // This is only allowed if the projections explicitly use this property,
+            // otherwise it won't be available (since it won't survive across the aggregation)
+            for proj in projections {
+                if e == proj.expr {
+                    return Ok(Expr::Slot(proj.dst))
+                }
+            }
+            bail!("Can't sort by {:?}, because it's not used in the DISTINCT or aggregation, so is not visible to the sorting step", e)
+        }
+        _ => bail!("Don't know how to sort by {:?} yet", e)
+    }
 }
 
 fn parse_projection(pc: &mut PlanningContext, projection: Pair<Rule>) -> Result<Projection> {
@@ -250,8 +291,6 @@ mod tests {
                     alias: id_n,
                     dst: p.slot(id_n),
                 }],
-                skip: None,
-                limit: None,
             }
         );
         Ok(())
@@ -276,8 +315,6 @@ mod tests {
                     alias: id_p,
                     dst: p.slot(id_p),
                 }],
-                skip: None,
-                limit: None,
             }
         );
         Ok(())
@@ -290,13 +327,18 @@ mod tests {
         let id_p = p.tokenize("p");
         assert_eq!(
             p.plan,
-            LogicalPlan::Project {
-                src: Box::new(LogicalPlan::Argument),
-                projections: vec![Projection {
-                    expr: Expr::Int(1),
-                    alias: id_p,
-                    dst: p.slot(id_p),
-                }],
+            LogicalPlan::Limit {
+                src: Box::new(LogicalPlan::Sort {
+                    src: Box::new(LogicalPlan::Project {
+                        src: Box::new(LogicalPlan::Argument),
+                        projections: vec![Projection {
+                            expr: Expr::Int(1),
+                            alias: id_p,
+                            dst: p.slot(id_p),
+                        }],
+                    }),
+                    sort_by: vec![Expr::Slot(p.slot(id_p))]
+                }),
                 skip: Some(Expr::Int(1)),
                 limit: None,
             }
@@ -304,6 +346,7 @@ mod tests {
         Ok(())
     }
 
+    // TODO technically the project is not needed here.. we're just renaming references..
     #[test]
     fn plan_with_limit() -> Result<(), Error> {
         let mut p = plan("MATCH (n) WITH n as p LIMIT 1")?;
@@ -312,19 +355,86 @@ mod tests {
         let id_p = p.tokenize("p");
         assert_eq!(
             p.plan,
-            LogicalPlan::Project {
-                src: Box::new(LogicalPlan::NodeScan {
-                    src: Box::new(LogicalPlan::Argument),
-                    slot: 0,
-                    labels: None,
+            LogicalPlan::Limit{
+                src: Box::new(LogicalPlan::Project {
+                    src: Box::new(LogicalPlan::NodeScan {
+                        src: Box::new(LogicalPlan::Argument),
+                        slot: 0,
+                        labels: None,
+                    }),
+                    projections: vec![Projection {
+                        expr: Expr::Slot(p.slot(id_n)),
+                        alias: id_p,
+                        dst: p.slot(id_p),
+                    }],
                 }),
-                projections: vec![Projection {
-                    expr: Expr::Slot(p.slot(id_n)),
-                    alias: id_p,
-                    dst: p.slot(id_p),
-                }],
                 skip: None,
                 limit: Some(Expr::Int(1)),
+            }
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn plan_with_order() -> Result<(), Error> {
+        let mut p = plan("MATCH (n) WITH n.name as name ORDER BY name")?;
+
+        let id_n = p.tokenize("n");
+        let key_name = p.tokenize("name");
+        assert_eq!(
+            p.plan,
+            LogicalPlan::Sort{
+                src: Box::new(LogicalPlan::Project {
+                    src: Box::new(LogicalPlan::NodeScan {
+                        src: Box::new(LogicalPlan::Argument),
+                        slot: 0,
+                        labels: None,
+                    }),
+                    projections: vec![Projection {
+                        expr: Expr::Prop(Box::new(Expr::Slot(p.slot(id_n))), vec![key_name]),
+                        alias: key_name,
+                        dst: p.slot(key_name),
+                    }],
+                }),
+                sort_by: vec![Expr::Slot(p.slot(key_name))]
+            }
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn plan_with_order_repeating_aliased_aggregated_expression() -> Result<(), Error> {
+        // Not sure at all that this is the right thing here, but basically:
+        // If you've got a query that does some aggregation, and the orders by the aggregate
+        // key, it is legal to use the expression you used in the aggregation in the order by
+        // rather than the alias. Eg. you can do the query in this test. But you can't do
+        // *other* expressions, like you couldn't do n.age here.
+        let mut p = plan("MATCH (n) WITH DISTINCT n.name as name ORDER BY n.name")?;
+
+        let id_n = p.tokenize("n");
+        let key_name = p.tokenize("name");
+        assert_eq!(
+            p.plan,
+            LogicalPlan::Sort{
+                src: Box::new(LogicalPlan::Project {
+                    src: Box::new(LogicalPlan::Aggregate {
+                        src: Box::new(LogicalPlan::NodeScan {
+                            src: Box::new(LogicalPlan::Argument),
+                            slot: 0,
+                            labels: None,
+                        }),
+                        grouping: vec![
+                            (Expr::Prop(Box::new(Expr::Slot(p.slot(id_n))), vec![key_name]), p.slot(key_name))
+                        ],
+                        aggregations: vec![]
+                    }),
+                    projections: vec![Projection {
+                        expr: Expr::Slot(p.slot(key_name)),
+                        alias: key_name,
+                        dst: p.slot(key_name),
+                    }],
+                }),
+                sort_by: vec![Expr::Slot(p.slot(key_name))]
             }
         );
         Ok(())
@@ -353,8 +463,6 @@ mod tests {
                         alias: id_n,
                         dst: p.slot(id_n),
                     }],
-                    skip: None,
-                    limit: None,
                 }),
                 predicate: Expr::BinaryOp {
                     left: Box::new(Expr::Prop(
@@ -397,8 +505,6 @@ mod tests {
                         alias: id_a,
                         dst: p.slot(id_a),
                     }],
-                    skip: None,
-                    limit: None,
                 }),
                 projections: vec![Projection {
                     expr: Expr::Slot(p.slot(id_a)),

@@ -142,17 +142,16 @@ pub enum LogicalPlan {
     Project {
         src: Box<Self>,
         projections: Vec<Projection>,
-        // Maybe it's better to put SKIP/LIMIT in it's own thing..
-        // but you can have WITH .. LIMIT and RETURN .. LIMIT without
-        // ORDER BY, so then you'd need a dedicated logical plan node for
-        // just "limit", which becomes a PITA because you'll eventually want
-        // the backends able to optimize for the super common TOP N case,
-        // "RETURN x ORDER BY x LIMIT 10".. so for now lets see how things
-        // flow if we just expose it like this; nothing stopping backends
-        // from converting this into whatever they like.
+    },
+    Sort {
+        src: Box<Self>,
+        sort_by: Vec<Expr>,
+    },
+    Limit {
+        src: Box<Self>,
         skip: Option<Expr>,
         limit: Option<Expr>,
-    },
+    }
 }
 
 impl LogicalPlan {
@@ -178,8 +177,6 @@ impl LogicalPlan {
             LogicalPlan::Project {
                 src,
                 projections,
-                skip,
-                limit,
             } => {
                 let next_indent = &format!("{}  ", ind);
                 let mut proj = String::new();
@@ -190,15 +187,11 @@ impl LogicalPlan {
                     proj.push_str(&p.fmt_pretty(next_indent, t))
                 }
                 format!(
-                    "Project(\n{}src={},\n{}projections=[{}],\n{}skip={:?},\n{}limit={:?})",
+                    "Project(\n{}src={},\n{}projections=[{}])",
                     next_indent,
                     src.fmt_pretty(&format!("{}  ", next_indent), t),
                     next_indent,
                     proj,
-                    next_indent,
-                    skip,
-                    next_indent,
-                    limit,
                 )
             }
             LogicalPlan::NodeScan { src, slot, labels } => {
@@ -261,6 +254,28 @@ impl LogicalPlan {
                     src.fmt_pretty(next_indent, t),
                     next_indent,
                     predicate,
+                )
+            }
+            LogicalPlan::Limit { src, skip, limit } => {
+                let next_indent = &format!("{}  ", ind);
+                format!(
+                    "Limit(\n{}src={}\n{}skip={:?},\n{}limit={:?})",
+                    next_indent,
+                    src.fmt_pretty(next_indent, t),
+                    next_indent,
+                    skip,
+                    next_indent,
+                    limit,
+                )
+            }
+            LogicalPlan::Sort { src, sort_by } => {
+                let next_indent = &format!("{}  ", ind);
+                format!(
+                    "Sort(\n{}src={}\n{}by={:?})",
+                    next_indent,
+                    src.fmt_pretty(next_indent, t),
+                    next_indent,
+                    sort_by,
                 )
             }
             LogicalPlan::Aggregate {

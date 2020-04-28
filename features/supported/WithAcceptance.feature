@@ -199,27 +199,27 @@ Feature: WithAcceptance
       | ({name: 'A'}) |
     And no side effects
 
-#  Scenario: ORDER BY on an aggregating key
-#    Given an empty graph
-#    And having executed:
-#      """
-#      CREATE ({name: 'A'}),
-#             ({name: 'A'}),
-#             ({name: 'B'})
-#      """
-#    When executing query:
-#      """
-#      MATCH (a)
-#      WITH a.name AS bars, count(*) AS relCount
-#      ORDER BY a.name
-#      RETURN *
-#      """
-#    Then the result should be, in any order:
-#      | bars | relCount |
-#      | 'A'  | 2        |
-#      | 'B'  | 1        |
-#    And no side effects
-#
+  Scenario: ORDER BY on an aggregating key
+    Given an empty graph
+    And having executed:
+      """
+      CREATE ({name: 'A'}),
+             ({name: 'A'}),
+             ({name: 'B'})
+      """
+    When executing query:
+      """
+      MATCH (a)
+      WITH a.name AS bars, count(*) AS relCount
+      ORDER BY a.name
+      RETURN *
+      """
+    Then the result should be, in any order:
+      | bars | relCount |
+      | 'A'  | 2        |
+      | 'B'  | 1        |
+    And no side effects
+
 #  Scenario: ORDER BY a DISTINCT column
 #    Given an empty graph
 #    And having executed:

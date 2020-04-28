@@ -182,8 +182,6 @@ impl GramBackend {
             LogicalPlan::Project {
                 src,
                 projections,
-                skip: _,
-                limit: _,
             } => {
                 let mut converted_projections = Vec::new();
                 for projection in projections {
@@ -197,6 +195,35 @@ impl GramBackend {
                 Ok(Box::new(Project {
                     src: self.convert(*src)?,
                     projections: converted_projections,
+                }))
+            }
+            LogicalPlan::Sort { src, sort_by } => {
+                let mut conv_sort_by = Vec::with_capacity(sort_by.len());
+                for s in sort_by {
+                    conv_sort_by.push(self.convert_expr(s));
+                }
+                Ok(Box::new(Sort{
+                    src: self.convert(*src)?,
+                    state: SortState::Init,
+                    rows: vec![],
+                    sort_by: conv_sort_by,
+                }))
+            }
+            LogicalPlan::Limit { src, skip, limit } => {
+                let mut conv_skip = None;
+                let mut conv_limit = None;
+                if let Some(skip_expr) = skip {
+                    conv_skip = Some(self.convert_expr(skip_expr));
+                }
+                if let Some(limit_expr) = limit {
+                    conv_limit = Some(self.convert_expr(limit_expr));
+                }
+                Ok(Box::new(Limit {
+                    src: self.convert(*src)?,
+                    skip: conv_skip,
+                    limit: conv_limit,
+                    initialized: false,
+                    limit_remaining: None
                 }))
             }
         }
@@ -410,7 +437,7 @@ enum Expr {
 impl Expr {
     fn eval_prop(
         ctx: &mut Context,
-        row: &mut GramRow,
+        row: &GramRow,
         expr: &Expr,
         prop: Token,
     ) -> Result<GramVal> {
@@ -426,7 +453,7 @@ impl Expr {
         Ok(GramVal::Lit(v))
     }
 
-    fn eval(&self, ctx: &mut Context, row: &mut GramRow) -> Result<GramVal> {
+    fn eval(&self, ctx: &mut Context, row: & GramRow) -> Result<GramVal> {
         match self {
             Expr::Prop(expr, props) => {
                 if props.len() != 1 {
@@ -912,6 +939,121 @@ impl Operator for Project {
             return Ok(true);
         }
         Ok(false)
+    }
+}
+
+
+#[derive(Debug)]
+struct Limit {
+    src: Box<dyn Operator>,
+    skip: Option<Expr>,
+    limit: Option<Expr>,
+
+    initialized: bool,
+    limit_remaining: Option<i64>,
+}
+
+impl Operator for Limit {
+    fn next(&mut self, ctx: &mut Context, out: &mut GramRow) -> Result<bool> {
+        if !self.initialized {
+            self.initialized = true;
+            if let Some(skip_expr) = &self.skip {
+                let skip_val = skip_expr.eval(ctx, out)?;
+                let mut skip = if let GramVal::Lit(Val::Int(i)) = skip_val {
+                    i
+                } else {
+                    bail!("SKIP expression must be an integer, got {:?}", skip_val)
+                };
+                while skip > 0 && self.src.next(ctx, out)? {
+                    skip -= 1
+                }
+            }
+            if let Some(limit_expr) = &self.limit {
+                let limit_val = limit_expr.eval(ctx, out)?;
+                self.limit_remaining = if let GramVal::Lit(Val::Int(i)) = limit_val {
+                    Some(i)
+                } else {
+                    bail!("LIMIT expression must be an integer, got {:?}", limit_val)
+                };
+            }
+        }
+
+        if let Some(limit_remaining) = self.limit_remaining {
+            if limit_remaining == 0 {
+                return Ok(false)
+            }
+            self.limit_remaining = Some(limit_remaining - 1);
+        }
+
+        self.src.next(ctx, out)
+    }
+}
+
+
+#[derive(Debug)]
+struct Sort {
+    src: Box<dyn Operator>,
+    state: SortState,
+    rows: Vec<GramRow>,
+    sort_by: Vec<Expr>,
+}
+
+#[derive(Debug)]
+enum SortState {
+    Init,
+    Yielding{next: usize},
+    Done
+}
+
+impl Operator for Sort {
+    // TODO lol
+    fn next(&mut self, ctx: &mut Context, out: &mut GramRow) -> Result<bool> {
+        if let SortState::Init = self.state {
+            let mut rows = Vec::new();
+            while self.src.next(ctx, out)? {
+                rows.push(out.clone());
+            }
+
+            if rows.is_empty() {
+                self.state = SortState::Done;
+                return Ok(false);
+            }
+
+            rows.sort_by(|a, b| {
+                for e in &self.sort_by {
+                    let a_val = e.eval(ctx, a).unwrap();
+                    let b_val = e.eval(ctx, b).unwrap();
+                    let cmp = a_val.partial_cmp(&b_val);
+                    match cmp {
+                        Some(Ordering::Greater) => return Ordering::Greater,
+                        Some(Ordering::Less) => return Ordering::Less,
+                        // TODO: Val should probably implement Ord, because while we don't
+                        //       implement a full Eq, there *is* a total ordering. As it happens,
+                        //       things that aren't technically comparable (NULL > NULL et al)
+                        //       "are equal" when it comes to sorting and grouping.. so this works
+                        _ => ()
+                    }
+                }
+                return Ordering::Equal;
+            });
+            self.rows = rows;
+            self.state = SortState::Yielding{next: 0};
+        }
+
+        if let SortState::Yielding { next } = self.state {
+            let row = &self.rows[next];
+            for i in 0..out.slots.len() {
+                out.slots[i] = row.slots[i].clone();
+            }
+            if self.rows.len() > next + 1 {
+                self.state = SortState::Yielding {next: next + 1}
+            } else {
+                self.state = SortState::Done;
+            }
+            Ok(true)
+        } else {
+            Ok(false)
+        }
     }
 }
 
