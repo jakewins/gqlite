@@ -220,27 +220,27 @@ Feature: WithAcceptance
       | 'B'  | 1        |
     And no side effects
 
-#  Scenario: ORDER BY a DISTINCT column
-#    Given an empty graph
-#    And having executed:
-#      """
-#      CREATE ({name: 'A'}),
-#             ({name: 'A'}),
-#             ({name: 'B'})
-#      """
-#    When executing query:
-#      """
-#      MATCH (a)
-#      WITH DISTINCT a.name AS bars
-#      ORDER BY a.name
-#      RETURN *
-#      """
-#    Then the result should be, in any order:
-#      | bars |
-#      | 'A'  |
-#      | 'B'  |
-#    And no side effects
-#
+  Scenario: ORDER BY a DISTINCT column
+    Given an empty graph
+    And having executed:
+      """
+      CREATE ({name: 'A'}),
+             ({name: 'A'}),
+             ({name: 'B'})
+      """
+    When executing query:
+      """
+      MATCH (a)
+      WITH DISTINCT a.name AS bars
+      ORDER BY a.name
+      RETURN *
+      """
+    Then the result should be, in any order:
+      | bars |
+      | 'A'  |
+      | 'B'  |
+    And no side effects
+
 #  Scenario: WHERE on a DISTINCT column
 #    Given an empty graph
 #    And having executed:
@@ -260,7 +260,7 @@ Feature: WithAcceptance
 #      | bars |
 #      | 'B'  |
 #    And no side effects
-
+#
 #  Scenario: A simple pattern with one bound endpoint
 #    Given an empty graph
 #    And having executed:

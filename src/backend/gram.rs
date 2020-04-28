@@ -179,10 +179,7 @@ impl GramBackend {
                     print_header: true,
                 }))
             }
-            LogicalPlan::Project {
-                src,
-                projections,
-            } => {
+            LogicalPlan::Project { src, projections } => {
                 let mut converted_projections = Vec::new();
                 for projection in projections {
                     converted_projections.push(Projection {
@@ -202,7 +199,7 @@ impl GramBackend {
                 for s in sort_by {
                     conv_sort_by.push(self.convert_expr(s));
                 }
-                Ok(Box::new(Sort{
+                Ok(Box::new(Sort {
                     src: self.convert(*src)?,
                     state: SortState::Init,
                     rows: vec![],
@@ -223,7 +220,7 @@ impl GramBackend {
                     skip: conv_skip,
                     limit: conv_limit,
                     initialized: false,
-                    limit_remaining: None
+                    limit_remaining: None,
                 }))
             }
         }
@@ -269,7 +266,7 @@ impl GramBackend {
                 frontend::Op::Gt => Expr::Gt(
                     Box::new(self.convert_expr(*left)),
                     Box::new(self.convert_expr(*right)),
-                )
+                ),
             },
 
             frontend::Expr::Prop(e, props) => Expr::Prop(Box::new(self.convert_expr(*e)), props),
@@ -435,12 +432,7 @@ enum Expr {
 }
 
 impl Expr {
-    fn eval_prop(
-        ctx: &mut Context,
-        row: &GramRow,
-        expr: &Expr,
-        prop: Token,
-    ) -> Result<GramVal> {
+    fn eval_prop(ctx: &mut Context, row: &GramRow, expr: &Expr, prop: Token) -> Result<GramVal> {
         let v = match expr.eval(ctx, row)? {
             GramVal::Node { id } => ctx.g.borrow().get_node_prop(id, prop).unwrap_or(Val::Null),
             GramVal::Rel { node_id, rel_index } => ctx
@@ -453,7 +445,7 @@ impl Expr {
         Ok(GramVal::Lit(v))
     }
 
-    fn eval(&self, ctx: &mut Context, row: & GramRow) -> Result<GramVal> {
+    fn eval(&self, ctx: &mut Context, row: &GramRow) -> Result<GramVal> {
         match self {
             Expr::Prop(expr, props) => {
                 if props.len() != 1 {
@@ -824,7 +816,7 @@ struct Create {
 impl Operator for Create {
     fn next(&mut self, ctx: &mut Context, out: &mut GramRow) -> Result<bool, Error> {
         if !self.src.next(ctx, out)? {
-            return Ok(false)
+            return Ok(false);
         }
         for node in &self.nodes {
             let node_properties = node
@@ -860,7 +852,10 @@ impl Operator for Create {
 
             let start_node = match &out.slots[rel.start_node_slot] {
                 GramVal::Node { id } => *id,
-                v => unreachable!("Start node for rel create must be a node value, got {:?} from Slot({})", v, rel.start_node_slot),
+                v => unreachable!(
+                    "Start node for rel create must be a node value, got {:?} from Slot({})",
+                    v, rel.start_node_slot
+                ),
             };
             let end_node = match out.slots[rel.end_node_slot] {
                 GramVal::Node { id } => id,
@@ -942,7 +937,6 @@ impl Operator for Project {
     }
 }
 
-
 #[derive(Debug)]
 struct Limit {
     src: Box<dyn Operator>,
@@ -980,7 +974,7 @@ impl Operator for Limit {
 
         if let Some(limit_remaining) = self.limit_remaining {
             if limit_remaining == 0 {
-                return Ok(false)
+                return Ok(false);
             }
             self.limit_remaining = Some(limit_remaining - 1);
         }
@@ -988,7 +982,6 @@ impl Operator for Limit {
         self.src.next(ctx, out)
     }
 }
-
 
 #[derive(Debug)]
 struct Sort {
@@ -1001,8 +994,8 @@ struct Sort {
 #[derive(Debug)]
 enum SortState {
     Init,
-    Yielding{next: usize},
-    Done
+    Yielding { next: usize },
+    Done,
 }
 
 impl Operator for Sort {
@@ -1031,13 +1024,13 @@ impl Operator for Sort {
                         //       implement a full Eq, there *is* a total ordering. As it happens,
                         //       things that aren't technically comparable (NULL > NULL et al)
                         //       "are equal" when it comes to sorting and grouping.. so this works
-                        _ => ()
+                        _ => (),
                     }
                 }
                 return Ordering::Equal;
             });
             self.rows = rows;
-            self.state = SortState::Yielding{next: 0};
+            self.state = SortState::Yielding { next: 0 };
         }
 
         if let SortState::Yielding { next } = self.state {
@@ -1046,7 +1039,7 @@ impl Operator for Sort {
                 out.slots[i] = row.slots[i].clone();
             }
             if self.rows.len() > next + 1 {
-                self.state = SortState::Yielding {next: next + 1}
+                self.state = SortState::Yielding { next: next + 1 }
             } else {
                 self.state = SortState::Done;
             }
@@ -1512,11 +1505,7 @@ fn append_node(
             p
         )
     } else {
-        format!(
-            "(`{}` {})\n",
-            gram_identifier,
-            p
-        )
+        format!("(`{}` {})\n", gram_identifier, p)
     };
 
     let out_node = Node {
@@ -1552,7 +1541,6 @@ fn append_rel(
     rel_type: Token,
     props: HashMap<Token, Val>,
 ) -> Result<GramVal, Error> {
-
     let p = serialize_props(ctx, &props);
     let mut g = ctx.g.borrow_mut();
     let tokens = ctx.tokens.borrow();
@@ -1563,10 +1551,7 @@ fn append_rel(
 
     let gram_string = format!(
         "(`{}`)-[:`{}` {}]->(`{}`)\n",
-        startgid,
-        reltype_str,
-        p,
-        endgid,
+        startgid, reltype_str, p, endgid,
     );
 
     println!("--- About to write ---");
@@ -1615,7 +1600,7 @@ fn serialize_val(_ctx: &mut Context, v: &Val) -> String {
     match v {
         Val::String(s) => format!("\'{}\'", s),
         Val::Int(v) => format!("{}", v),
-        _ => panic!("Don't know how to serialize {:?}", v)
+        _ => panic!("Don't know how to serialize {:?}", v),
     }
 }
 
@@ -1837,7 +1822,6 @@ mod functions {
         }
     }
 
-
     #[derive(Debug)]
     struct CountSpec {
         sig: FuncSignature,
@@ -1868,8 +1852,7 @@ mod functions {
     }
 
     #[derive(Debug)]
-    struct Count {
-    }
+    struct Count {}
 
     impl AggregatingFunc for Count {
         fn init(&mut self, _ctx: &mut Context) -> Box<dyn Aggregation> {

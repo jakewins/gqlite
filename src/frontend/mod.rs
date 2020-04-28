@@ -151,7 +151,7 @@ pub enum LogicalPlan {
         src: Box<Self>,
         skip: Option<Expr>,
         limit: Option<Expr>,
-    }
+    },
 }
 
 impl LogicalPlan {
@@ -174,10 +174,7 @@ impl LogicalPlan {
                     proj
                 )
             }
-            LogicalPlan::Project {
-                src,
-                projections,
-            } => {
+            LogicalPlan::Project { src, projections } => {
                 let next_indent = &format!("{}  ", ind);
                 let mut proj = String::new();
                 for (i, p) in projections.iter().enumerate() {

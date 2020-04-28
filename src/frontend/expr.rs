@@ -175,7 +175,10 @@ fn plan_term(pc: &mut PlanningContext, term: Pair<Rule>) -> Result<Expr> {
         }
         Rule::count_call => {
             let name = pc.tokenize("count");
-            return Ok(Expr::FuncCall { name, args: Vec::new() });
+            return Ok(Expr::FuncCall {
+                name,
+                args: Vec::new(),
+            });
         }
         Rule::list => {
             let mut items = Vec::new();
