@@ -499,7 +499,7 @@ mod tests {
                         rel_slot: 2,
                         dst_slot: p.slot(id_z),
                         rel_type: None,
-                        dir: Some(Dir::Out)
+                        dir: Some(Dir::Out),
                     }),
                     projections: vec![Projection {
                         expr: Expr::Slot(p.slot(id_a)),

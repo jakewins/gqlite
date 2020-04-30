@@ -281,19 +281,19 @@ Feature: WithAcceptance
       | (:A) | [:REL] | (:B) |
     And no side effects
 
-#  Scenario: Null handling
-#    Given an empty graph
-#    When executing query:
-#      """
-#      OPTIONAL MATCH (a:Start)
-#      WITH a
-#      MATCH (a)-->(b)
-#      RETURN *
-#      """
-#    Then the result should be, in any order:
-#      | a | b |
-#    And no side effects
-#
+  Scenario: Null handling
+    Given an empty graph
+    When executing query:
+      """
+      OPTIONAL MATCH (a:Start)
+      WITH a
+      MATCH (a)-->(b)
+      RETURN *
+      """
+    Then the result should be, in any order:
+      | a | b |
+    And no side effects
+
 #  Scenario: Nested maps
 #    Given an empty graph
 #    When executing query:

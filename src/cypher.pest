@@ -80,8 +80,10 @@ order_expr = { expr ~ (^"DESC")? }
 skip_clause = { ^"SKIP" ~ expr }
 limit_clause = { ^"LIMIT" ~ expr }
 
+optional_clause = { ^"OPTIONAL" }
+
 create_stmt = { ^"CREATE" ~ patterns }
-match_stmt = { ^"MATCH" ~ pattern ~ where_clause? }
+match_stmt = { optional_clause? ~ ^"MATCH" ~ pattern ~ where_clause? }
 with_stmt = { ^"WITH" ~ distinct_clause? ~ projections ~ where_clause? ~ order_clause? ~ skip_clause? ~ limit_clause? }
 unwind_stmt = { ^"UNWIND" ~ expr ~ ^"AS" ~ id }
 return_stmt = { ^"RETURN" ~ distinct_clause? ~ ( projections | project_all ) ~ order_clause? ~ skip_clause? ~ limit_clause? }

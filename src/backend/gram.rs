@@ -223,6 +223,13 @@ impl GramBackend {
                     limit_remaining: None,
                 }))
             }
+            LogicalPlan::Optional { src, slots } => {
+                Ok(Box::new(Optional{
+                    src: self.convert(*src)?,
+                    initialized: false,
+                    slots,
+                }))
+            }
         }
     }
 
@@ -705,6 +712,9 @@ impl Operator for Expand {
                     if !self.src.next(ctx, out)? {
                         return Ok(false);
                     }
+                    if let GramVal::Lit(Val::Null) = out.slots[self.src_slot] {
+                        continue
+                    }
                     println!("[expand]  in: {:?}", out);
                     self.state = ExpandState::InNode;
                 }
@@ -1023,6 +1033,31 @@ impl Operator for Limit {
         }
 
         self.src.next(ctx, out)
+    }
+}
+
+
+#[derive(Debug)]
+struct Optional {
+    src: Box<dyn Operator>,
+    initialized: bool,
+    slots: Vec<usize>,
+}
+
+impl Operator for Optional {
+    fn next(&mut self, ctx: &mut Context, out: &mut GramRow) -> Result<bool> {
+        if ! self.initialized {
+            self.initialized = true;
+            if self.src.next(ctx, out)? {
+                return Ok(true)
+            }
+            for s in &self.slots {
+                out.slots[*s] = GramVal::Lit(Val::Null);
+            }
+            Ok(true)
+        } else {
+            self.src.next(ctx, out)
+        }
     }
 }
 

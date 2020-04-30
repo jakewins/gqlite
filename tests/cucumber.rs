@@ -191,8 +191,23 @@ mod example_steps {
 
     fn assert_result(world: &mut MyWorld, step: &Step) {
         let table = step.table().unwrap().clone();
+
+        // So.. the rust cucumber parser treats one-row tables as having empty headers
+        // but the TCK uses headers in empty tables, to specify the column names.. so this
+        // is to detect that case
+        let mut empty = table.rows.len() == 1;
+        for c in &table.header {
+            empty = empty && c.is_empty();
+        }
+
+        if empty {
+            let row = world.result.next().unwrap();
+            assert_eq!(true, row.is_none(), "expected empty result");
+            return;
+        }
+
         for mut row in table.rows {
-            if let Ok(Some(actual)) = world.result.next() {
+            if let Some(actual) = world.result.next().unwrap() {
                 for slot in 0..row.len() {
                     str_to_val(&mut row[slot].chars().peekable())
                         .assert_eq(actual.slots[slot].clone());
