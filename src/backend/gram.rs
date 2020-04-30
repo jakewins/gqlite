@@ -294,6 +294,9 @@ impl GramBackend {
             frontend::Expr::And(terms) => {
                 Expr::And(terms.iter().map(|e| self.convert_expr(e.clone())).collect())
             }
+
+            frontend::Expr::HasLabel(slot, label) => Expr::HasLabel {slot, label},
+
             _ => panic!(
                 "The gram backend does not support this expression type yet: {:?}",
                 expr
@@ -429,6 +432,8 @@ enum Expr {
 
     Gt(Box<Expr>, Box<Expr>),
     Equal(Box<Expr>, Box<Expr>),
+
+    HasLabel{slot: usize, label: Token},
 }
 
 impl Expr {
@@ -494,6 +499,13 @@ impl Expr {
                 }
                 f.apply(&argv)
             }
+            Expr::HasLabel { slot, label } => {
+                let s: &GramVal = &row.slots[*slot];
+                let node_id = s.as_node_id();
+                let g = ctx.g.borrow();
+                let node = g.nodes.get(node_id).unwrap();
+                return Ok(GramVal::Lit(Val::Bool(node.labels.contains(label))))
+            }
         }
     }
 }
@@ -542,7 +554,38 @@ impl GramVal {
                     props,
                 });
             }
-            _ => panic!("don't know how to project: {:?}", self),
+            GramVal::Rel { node_id, rel_index } => {
+                let n = &ctx.g.borrow().nodes[*node_id];
+                let rel = &n.rels[*rel_index];
+
+                let rel_type = ctx.tokens.borrow().lookup(rel.rel_type).unwrap().to_string();
+                let mut props = crate::Map::new();
+                for (k, v) in rel.properties.iter() {
+                    props.push((
+                        ctx.tokens.borrow().lookup(*k).unwrap().to_string(),
+                        v.clone(),
+                    ));
+                }
+
+                let start;
+                let end;
+                match rel.dir {
+                    Dir::Out => {
+                        start = *node_id;
+                        end = rel.other_node;
+                    },
+                    Dir::In => {
+                        end = *node_id;
+                        start = rel.other_node;
+                    },
+                }
+                return Val::Rel(crate::Rel{
+                    start,
+                    end,
+                    rel_type,
+                    props
+                })
+            }
         }
     }
 
@@ -1633,7 +1676,7 @@ mod functions {
                         v => bail!("don't know how to do NOT({:?})", v),
                     },
                     v => bail!("don't know how to do NOT({:?})", v),
-                },
+                }
             }
         }
     }

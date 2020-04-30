@@ -60,6 +60,9 @@ mod example_steps {
             props: Vec<(String, ValMatcher)>,
             labels: Vec<String>,
         },
+        Rel {
+            reltype: String,
+        }
     }
 
     impl ValMatcher {
@@ -122,6 +125,13 @@ mod example_steps {
                         }
                     } else {
                         panic!("Expected a node, found {:?}", v);
+                    }
+                }
+                ValMatcher::Rel { reltype } => {
+                    if let Val::Rel(r) = v {
+                        assert_eq!(reltype, &r.rel_type)
+                    }  else {
+                        panic!("Expected a rel, found {:?}", v);
                     }
                 }
             }
@@ -235,6 +245,25 @@ mod example_steps {
             return id;
         }
 
+        fn parse_rel(chars: &mut Peekable<Chars>) -> ValMatcher {
+            let mut reltype = None;
+            loop {
+                match chars.peek() {
+                    Some(':') => {
+                        chars.next().unwrap();
+                        reltype = Some(parse_identifier(chars));
+                    }
+                    Some(']') => {
+                        chars.next().unwrap();
+                        return ValMatcher::Rel {
+                            reltype: reltype.unwrap(),
+                        }
+                    }
+                    _ => panic!("unknown rel part: {:?}", chars)
+                }
+            }
+        }
+
         loop {
             match chars.peek().unwrap() {
                 '0'..='9' => return parse_number(chars),
@@ -255,8 +284,19 @@ mod example_steps {
                     ()
                 }
                 '[' => {
-                    let mut items = Vec::new();
                     chars.next().unwrap();
+                    // this can either be a list, or a relationship
+                    // need to differentiate [:REL] from [1]..
+
+                    match chars.peek() {
+                        Some(':') => {
+                            return parse_rel(chars);
+                        }
+                        _ => ()
+                    }
+
+                    // List
+                    let mut items = Vec::new();
                     loop {
                         match chars.peek() {
                             Some(']') => return ValMatcher::List(items),

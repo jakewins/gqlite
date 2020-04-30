@@ -261,26 +261,26 @@ Feature: WithAcceptance
       | 'B'  |
     And no side effects
 
-#  Scenario: A simple pattern with one bound endpoint
-#    Given an empty graph
-#    And having executed:
-#      """
-#      CREATE (:A)-[:REL]->(:B)
-#      """
-#    When executing query:
-#      """
-#      MATCH (a:A)-[r:REL]->(b:B)
-#      WITH a AS b, b AS tmp, r AS r
-#      WITH b AS a, r
-#      LIMIT 1
-#      MATCH (a)-[r]->(b)
-#      RETURN a, r, b
-#      """
-#    Then the result should be, in any order:
-#      | a    | r      | b    |
-#      | (:A) | [:REL] | (:B) |
-#    And no side effects
-#
+  Scenario: A simple pattern with one bound endpoint
+    Given an empty graph
+    And having executed:
+      """
+      CREATE (:A)-[:REL]->(:B)
+      """
+    When executing query:
+      """
+      MATCH (a:A)-[r:REL]->(b:B)
+      WITH a AS b, b AS tmp, r AS r
+      WITH b AS a, r
+      LIMIT 1
+      MATCH (a)-[r]->(b)
+      RETURN a, r, b
+      """
+    Then the result should be, in any order:
+      | a    | r      | b    |
+      | (:A) | [:REL] | (:B) |
+    And no side effects
+
 #  Scenario: Null handling
 #    Given an empty graph
 #    When executing query:
