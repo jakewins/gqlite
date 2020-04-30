@@ -10,7 +10,7 @@ op = ${ "=" | ">" }
 
 atom = _{ bool | float | int | prop_lookup | count_call | func_call | string | id | list | "(" ~ expr ~ ")" }
 
-id = ${ ( ASCII_ALPHA | "_" | "-" ) + }
+id = ${ ( ASCII_ALPHA | "_" | "-" ) ~ ( ASCII_ALPHANUMERIC | "_" | "-" )* }
 
 prop_lookup = { id ~ ("." ~ id)+ }
 
