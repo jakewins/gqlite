@@ -631,7 +631,7 @@ fn parse_pattern_node(pc: &mut PlanningContext, pattern_node: Pair<Rule>) -> Res
                 }
             }
             Rule::map => {
-                props = parse_map_expression(pc, part)?;
+                props = expr::parse_map_expression(pc, part)?;
             }
             _ => panic!("don't know how to handle: {}", part),
         }
@@ -671,7 +671,7 @@ fn parse_pattern_rel(
                 dir = Some(Dir::Out)
             }
             Rule::map => {
-                props = parse_map_expression(pc, part)?;
+                props = expr::parse_map_expression(pc, part)?;
             }
             _ => unreachable!(),
         }
@@ -688,35 +688,6 @@ fn parse_pattern_rel(
         anonymous,
         solved: false,
     })
-}
-
-fn parse_map_expression(
-    pc: &mut PlanningContext,
-    map_expr: Pair<Rule>,
-) -> Result<Vec<MapEntryExpr>> {
-    let mut out = Vec::new();
-    for pair in map_expr.into_inner() {
-        match pair.as_rule() {
-            Rule::map_pair => {
-                let mut pair_iter = pair.into_inner();
-                let id_token = pair_iter
-                    .next()
-                    .expect("Map pair must contain an identifier");
-                let identifier = pc.tokenize(id_token.as_str());
-
-                let expr_token = pair_iter
-                    .next()
-                    .expect("Map pair must contain an expression");
-                let expr = plan_expr(pc, expr_token)?;
-                out.push(MapEntryExpr {
-                    key: identifier,
-                    val: expr,
-                })
-            }
-            _ => unreachable!(),
-        }
-    }
-    Ok(out)
 }
 
 #[cfg(test)]

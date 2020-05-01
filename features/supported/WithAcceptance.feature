@@ -294,18 +294,18 @@ Feature: WithAcceptance
       | a | b |
     And no side effects
 
-#  Scenario: Nested maps
-#    Given an empty graph
-#    When executing query:
-#      """
-#      WITH {name: {name2: 'baz'}} AS nestedMap
-#      RETURN nestedMap.name.name2
-#      """
-#    Then the result should be, in any order:
-#      | nestedMap.name.name2 |
-#      | 'baz'                |
-#    And no side effects
-#
+  Scenario: Nested maps
+    Given an empty graph
+    When executing query:
+      """
+      WITH {name: {name2: 'baz'}} AS nestedMap
+      RETURN nestedMap.name.name2
+      """
+    Then the result should be, in any order:
+      | nestedMap.name.name2 |
+      | 'baz'                |
+    And no side effects
+
 #  Scenario: Connected components succeeding WITH
 #    Given an empty graph
 #    And having executed:

@@ -286,6 +286,14 @@ impl GramBackend {
                 Expr::List(items)
             }
 
+            frontend::Expr::Map(es) => {
+                let mut items = Vec::with_capacity(es.len());
+                for e in es {
+                    items.push((e.key, self.convert_expr(e.val)));
+                }
+                Expr::Map(items)
+            }
+
             frontend::Expr::FuncCall { name, args } => {
                 // TODO lol
                 let mut tokens = self.tokens.borrow_mut();
@@ -406,8 +414,11 @@ impl BackendCursor for GramCursor {
             }
             if p.next(&mut self.ctx, &mut self.row)? {
                 for slot in 0..self.slots.len() {
+                    println!("Projecting {:?} ", self.row.slots);
                     self.projection.slots[slot] =
-                        self.row.slots[self.slots[slot].1].project(&mut self.ctx)
+                        self.row.slots[self.slots[slot].1].project(&mut self.ctx);
+                    println!("  - {:?} (Slot({}))", self.row.slots[self.slots[slot].1], self.slots[slot].1);
+                    println!("  -> {:?} ",  self.projection.slots[slot]);
                 }
                 Ok(Some(&self.projection))
             } else {
@@ -433,6 +444,7 @@ enum Expr {
     Prop(Box<Expr>, Vec<Token>),
     Slot(Slot),
     List(Vec<Expr>),
+    Map(Vec<(Token, Expr)>),
 
     Call(functions::Func, Vec<Expr>),
     And(Vec<Expr>),
@@ -444,26 +456,29 @@ enum Expr {
 }
 
 impl Expr {
-    fn eval_prop(ctx: &mut Context, row: &GramRow, expr: &Expr, prop: Token) -> Result<GramVal> {
-        let v = match expr.eval(ctx, row)? {
-            GramVal::Node { id } => ctx.g.borrow().get_node_prop(id, prop).unwrap_or(Val::Null),
-            GramVal::Rel { node_id, rel_index } => ctx
-                .g
-                .borrow()
-                .get_rel_prop(node_id, rel_index, prop)
-                .unwrap_or(Val::Null),
-            v => bail!("Gram backend does not yet support {:?}", v),
-        };
-        Ok(GramVal::Lit(v))
+    fn eval_prop(ctx: &mut Context, row: &GramRow, expr: &Expr, prop: &Vec<Token>) -> Result<GramVal> {
+        let mut v = expr.eval(ctx, row)?;
+        for key in prop {
+            v = match v {
+                GramVal::Node { id } => GramVal::Lit(ctx.g.borrow().get_node_prop(id, *key).unwrap_or(Val::Null)),
+                GramVal::Rel { node_id, rel_index } => GramVal::Lit(ctx
+                    .g
+                    .borrow()
+                    .get_rel_prop(node_id, rel_index, *key)
+                    .unwrap_or(Val::Null)),
+                GramVal::Map(es) => {
+                    es.iter().find(| (ek, _) | ek == key ).map(|e| e.1.clone() ).unwrap_or(GramVal::Lit(Val::Null))
+                }
+                v => bail!("Gram backend does not yet support {:?}", v),
+            };
+        }
+        Ok(v)
     }
 
     fn eval(&self, ctx: &mut Context, row: &GramRow) -> Result<GramVal> {
         match self {
             Expr::Prop(expr, props) => {
-                if props.len() != 1 {
-                    panic!("Can't handle property expressions referring to more than one key")
-                }
-                Expr::eval_prop(ctx, row, expr, props[0])
+                Expr::eval_prop(ctx, row, expr, props)
             }
             Expr::Slot(slot) => Ok(row.slots[*slot].clone()), // TODO not this
             Expr::Lit(v) => Ok(GramVal::Lit(v.clone())),      // TODO not this,
@@ -473,6 +488,13 @@ impl Expr {
                     out.push(v.eval(ctx, row)?);
                 }
                 Ok(GramVal::List(out))
+            }
+            Expr::Map(es) => {
+                let mut out = Vec::with_capacity(es.len());
+                for e in es {
+                    out.push((e.0, e.1.eval(ctx, row)?));
+                }
+                Ok(GramVal::Map(out))
             }
             Expr::Gt(a, b) => {
                 let a_val = a.eval(ctx, row)?;
@@ -526,6 +548,7 @@ impl Expr {
 enum GramVal {
     Lit(Val),
     List(Vec<GramVal>),
+    Map(Vec<(Token, GramVal)>),
     Node { id: usize },
     Rel { node_id: usize, rel_index: usize },
 }
@@ -541,6 +564,16 @@ impl GramVal {
                     out[i] = vs[i].project(ctx);
                 }
                 return Val::List(out);
+            }
+            GramVal::Map(es) => {
+                let mut out = Vec::with_capacity(es.len());
+                for i in 0..es.len() {
+                    let entry = &es[i];
+                    let key = ctx.tokens.borrow().lookup(entry.0).unwrap().to_string();
+                    let val = entry.1.project(ctx);
+                    out.push(( key, val ))
+                }
+                return Val::Map(out);
             }
             GramVal::Node { id } => {
                 let n = &ctx.g.borrow().nodes[*id];
@@ -666,6 +699,7 @@ impl Display for GramVal {
         match self {
             GramVal::Lit(v) => std::fmt::Display::fmt(&v, f),
             GramVal::List(vs) => f.write_str(&format!("{:?}", vs)),
+            GramVal::Map(es) => f.write_fmt(format_args!("{:?}", es)),
             GramVal::Node { id } => f.write_str(&format!("Node({})", id)),
             GramVal::Rel { node_id, rel_index } => {
                 f.write_str(&format!("Rel({}/{})", node_id, rel_index))
@@ -947,17 +981,9 @@ impl Operator for Return {
             self.print_header = false;
         }
         if self.src.next(ctx, out)? {
-            let mut first = true;
             for cell in &self.projections {
-                let v = cell.expr.eval(ctx, out)?;
-                if first {
-                    print!("{}", v);
-                    first = false
-                } else {
-                    print!(", {}", v)
-                }
+                out.slots[cell.slot] = cell.expr.eval(ctx, out)?;
             }
-            println!();
             // Do this to 'yield' one row at a time to the cursor
             return Ok(true);
         }

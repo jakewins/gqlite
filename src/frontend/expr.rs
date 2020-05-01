@@ -188,6 +188,9 @@ fn plan_term(pc: &mut PlanningContext, term: Pair<Rule>) -> Result<Expr> {
             }
             return Ok(Expr::List(items));
         }
+        Rule::map => {
+            return Ok(Expr::Map(parse_map_expression(pc, term)?))
+        }
         Rule::int => {
             let v = term.as_str().parse::<i64>()?;
             return Ok(Expr::Int(v));
@@ -222,6 +225,35 @@ fn plan_term(pc: &mut PlanningContext, term: Pair<Rule>) -> Result<Expr> {
         }
         _ => panic!("({:?}): {}", term.as_rule(), term.as_str()),
     }
+}
+
+pub fn parse_map_expression(
+    pc: &mut PlanningContext,
+    map_expr: Pair<Rule>,
+) -> Result<Vec<MapEntryExpr>> {
+    let mut out = Vec::new();
+    for pair in map_expr.into_inner() {
+        match pair.as_rule() {
+            Rule::map_pair => {
+                let mut pair_iter = pair.into_inner();
+                let id_token = pair_iter
+                    .next()
+                    .expect("Map pair must contain an identifier");
+                let identifier = pc.tokenize(id_token.as_str());
+
+                let expr_token = pair_iter
+                    .next()
+                    .expect("Map pair must contain an expression");
+                let expr = plan_expr(pc, expr_token)?;
+                out.push(MapEntryExpr {
+                    key: identifier,
+                    val: expr,
+                })
+            }
+            _ => unreachable!(),
+        }
+    }
+    Ok(out)
 }
 
 #[cfg(test)]
@@ -342,6 +374,22 @@ mod tests {
                 right: Box::new(Expr::Int(2)),
                 op: Op::Gt
             },
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn plan_maps() -> Result<()> {
+        let p = plan("{name: {name2: 'baz'}}")?;
+        let key_name = p.tokens.borrow_mut().tokenize("name");
+        let key_name2 = p.tokens.borrow_mut().tokenize("name2");
+        assert_eq!(
+            p.expr,
+            Expr::Map(vec![
+                MapEntryExpr{ key: key_name, val: Expr::Map(vec![
+                    MapEntryExpr{ key: key_name2, val: Expr::String("baz".to_string()) }
+                ])}
+            ]),
         );
         Ok(())
     }
