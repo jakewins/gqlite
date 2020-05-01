@@ -326,24 +326,24 @@ Feature: WithAcceptance
       | (:B) | (:A) | (:X) |
     And no side effects
 
-#  Scenario: Single WITH using a predicate and aggregation
-#    Given an empty graph
-#    And having executed:
-#      """
-#      CREATE ({num: 43}), ({num: 42})
-#      """
-#    When executing query:
-#      """
-#      MATCH (n)
-#      WITH n
-#      WHERE n.num = 42
-#      RETURN count(*)
-#      """
-#    Then the result should be, in any order:
-#      | count(*) |
-#      | 1        |
-#    And no side effects
-#
+  Scenario: Single WITH using a predicate and aggregation
+    Given an empty graph
+    And having executed:
+      """
+      CREATE ({num: 43}), ({num: 42})
+      """
+    When executing query:
+      """
+      MATCH (n)
+      WITH n
+      WHERE n.num = 42
+      RETURN count(*)
+      """
+    Then the result should be, in any order:
+      | count(*) |
+      | 1        |
+    And no side effects
+
 #  Scenario: Multiple WITHs using a predicate and aggregation
 #    Given an empty graph
 #    And having executed:
