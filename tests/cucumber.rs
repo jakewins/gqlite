@@ -62,7 +62,7 @@ mod example_steps {
         },
         Rel {
             reltype: String,
-        }
+        },
     }
 
     impl ValMatcher {
@@ -130,7 +130,7 @@ mod example_steps {
                 ValMatcher::Rel { reltype } => {
                     if let Val::Rel(r) = v {
                         assert_eq!(reltype, &r.rel_type)
-                    }  else {
+                    } else {
                         panic!("Expected a rel, found {:?}", v);
                     }
                 }
@@ -272,9 +272,9 @@ mod example_steps {
                         chars.next().unwrap();
                         return ValMatcher::Rel {
                             reltype: reltype.unwrap(),
-                        }
+                        };
                     }
-                    _ => panic!("unknown rel part: {:?}", chars)
+                    _ => panic!("unknown rel part: {:?}", chars),
                 }
             }
         }
@@ -307,7 +307,7 @@ mod example_steps {
                         Some(':') => {
                             return parse_rel(chars);
                         }
-                        _ => ()
+                        _ => (),
                     }
 
                     // List

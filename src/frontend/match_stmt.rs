@@ -1,8 +1,5 @@
-use super::{
-    parse_pattern_graph, Dir, LogicalPlan, Pair, PlanningContext, Result, Rule, Expr,
-};
+use super::{parse_pattern_graph, Dir, Expr, LogicalPlan, Pair, PlanningContext, Result, Rule};
 use crate::backend::Token;
-
 
 pub fn plan_match(
     pc: &mut PlanningContext,
@@ -51,8 +48,8 @@ pub fn plan_match(
                 slot: node_slot,
                 labels: node.labels.first().cloned(),
             }),
-            slots: vec![node_slot]
-        })
+            slots: vec![node_slot],
+        });
     }
 
     // Ok, now we have parsed the pattern into a full graph, time to start solving it
@@ -176,6 +173,37 @@ pub fn plan_match(
             }
         }
 
+        // If we didn't solve any rels, most likely we're just done.
+        // However, there is a chance we've got a disjoint pattern,
+        // eg. something like MATCH (a), (b) or MATCH (a), (b)-->(). So, go through the nodes
+        // and, if there are unsolved ones, this means there's a cartesian product we need to solve
+        if !solved_any {
+            for (_, v) in &mut pg.v {
+                if v.solved {
+                    continue;
+                }
+
+                // Found an unsolved node; for now just go with the first one we find
+                found_unsolved = true;
+                v.solved = true;
+
+                let inner = Box::new(LogicalPlan::NodeScan {
+                    src: Box::new(LogicalPlan::Argument),
+                    slot: pc.get_or_alloc_slot(v.identifier),
+                    labels: v.labels.first().cloned(),
+                });
+                plan = LogicalPlan::NestLoop {
+                    outer: Box::new(plan),
+                    inner,
+                    predicate: Expr::Bool(true),
+                };
+
+                // Just solve one and see if that's enough to expand the others
+                solved_any = true;
+                break;
+            }
+        }
+
         if !found_unsolved {
             break;
         }
@@ -202,7 +230,7 @@ pub fn plan_match(
 #[cfg(test)]
 mod tests {
     use crate::frontend::tests::plan;
-    use crate::frontend::{Expr, LogicalPlan, Dir, Op, Projection};
+    use crate::frontend::{Dir, Expr, LogicalPlan, Op, Projection};
     use crate::Error;
 
     #[test]
@@ -304,11 +332,50 @@ mod tests {
                     }),
                     slots: vec![p.slot(id_n)]
                 }),
+                projections: vec![Projection {
+                    expr: Expr::Slot(p.slot(id_n)),
+                    alias: id_n,
+                    dst: p.slot(id_n)
+                }]
+            }
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn plan_cartesian_product() -> Result<(), Error> {
+        let mut p = plan("MATCH (a), (b) RETURN a, b")?;
+        let id_a = p.tokenize("a");
+        let id_b = p.tokenize("b");
+
+        assert_eq!(
+            p.plan,
+            LogicalPlan::Return {
+                src: Box::new(LogicalPlan::NestLoop {
+                    outer: Box::new(LogicalPlan::NodeScan {
+                        src: Box::new(LogicalPlan::Argument),
+                        slot: p.slot(id_a),
+                        labels: None,
+                    }),
+                    inner: Box::new(LogicalPlan::NodeScan {
+                        src: Box::new(LogicalPlan::Argument),
+                        slot: p.slot(id_b),
+                        labels: None,
+                    }),
+                    // always-true predicate makes this a cartesian product, every row combo will
+                    // match the join condition
+                    predicate: Expr::Bool(true),
+                }),
                 projections: vec![
-                    Projection{
-                        expr: Expr::Slot(p.slot(id_n)),
-                        alias: id_n,
-                        dst: p.slot(id_n)
+                    Projection {
+                        expr: Expr::Slot(p.slot(id_a)),
+                        alias: id_a,
+                        dst: p.slot(id_a)
+                    },
+                    Projection {
+                        expr: Expr::Slot(p.slot(id_b)),
+                        alias: id_b,
+                        dst: p.slot(id_b)
                     }
                 ]
             }

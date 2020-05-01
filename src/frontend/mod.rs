@@ -17,8 +17,8 @@ use std::rc::Rc;
 
 mod expr;
 
-mod match_stmt;
 mod create_stmt;
+mod match_stmt;
 mod with_stmt;
 
 use expr::plan_expr;
@@ -139,6 +139,14 @@ pub enum LogicalPlan {
         src: Box<Self>,
         list_expr: Expr,
         alias: Slot,
+    },
+    // For each outer row, go through the inner and yield each row where the predicate matches.
+    // This can be used as a general JOIN mechanism - though in most cases we'll want a more
+    // specialized hash join. Still, this lets us do all kinds of joins as a broad fallback
+    NestLoop {
+        outer: Box<Self>,
+        inner: Box<Self>,
+        predicate: Expr,
     },
 
     // Return and Project can probably be combined?

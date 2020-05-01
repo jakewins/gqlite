@@ -306,26 +306,26 @@ Feature: WithAcceptance
       | 'baz'                |
     And no side effects
 
-#  Scenario: Connected components succeeding WITH
-#    Given an empty graph
-#    And having executed:
-#      """
-#      CREATE (:A)-[:REL]->(:X)
-#      CREATE (:B)
-#      """
-#    When executing query:
-#      """
-#      MATCH (n:A)
-#      WITH n
-#      LIMIT 1
-#      MATCH (m:B), (n)-->(x:X)
-#      RETURN *
-#      """
-#    Then the result should be, in any order:
-#      | m    | n    | x    |
-#      | (:B) | (:A) | (:X) |
-#    And no side effects
-#
+  Scenario: Connected components succeeding WITH
+    Given an empty graph
+    And having executed:
+      """
+      CREATE (:A)-[:REL]->(:X)
+      CREATE (:B)
+      """
+    When executing query:
+      """
+      MATCH (n:A)
+      WITH n
+      LIMIT 1
+      MATCH (m:B), (n)-->(x:X)
+      RETURN *
+      """
+    Then the result should be, in any order:
+      | m    | n    | x    |
+      | (:B) | (:A) | (:X) |
+    And no side effects
+
 #  Scenario: Single WITH using a predicate and aggregation
 #    Given an empty graph
 #    And having executed:

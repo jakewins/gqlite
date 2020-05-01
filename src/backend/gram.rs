@@ -223,13 +223,21 @@ impl GramBackend {
                     limit_remaining: None,
                 }))
             }
-            LogicalPlan::Optional { src, slots } => {
-                Ok(Box::new(Optional{
-                    src: self.convert(*src)?,
-                    initialized: false,
-                    slots,
-                }))
-            }
+            LogicalPlan::Optional { src, slots } => Ok(Box::new(Optional {
+                src: self.convert(*src)?,
+                initialized: false,
+                slots,
+            })),
+            LogicalPlan::NestLoop {
+                outer,
+                inner,
+                predicate,
+            } => Ok(Box::new(NestLoop {
+                outer: self.convert(*outer)?,
+                inner: self.convert(*inner)?,
+                predicate: self.convert_expr(predicate),
+                initialized: false,
+            })),
         }
     }
 
@@ -310,7 +318,7 @@ impl GramBackend {
                 Expr::And(terms.iter().map(|e| self.convert_expr(e.clone())).collect())
             }
 
-            frontend::Expr::HasLabel(slot, label) => Expr::HasLabel {slot, label},
+            frontend::Expr::HasLabel(slot, label) => Expr::HasLabel { slot, label },
 
             _ => panic!(
                 "The gram backend does not support this expression type yet: {:?}",
@@ -417,8 +425,11 @@ impl BackendCursor for GramCursor {
                     println!("Projecting {:?} ", self.row.slots);
                     self.projection.slots[slot] =
                         self.row.slots[self.slots[slot].1].project(&mut self.ctx);
-                    println!("  - {:?} (Slot({}))", self.row.slots[self.slots[slot].1], self.slots[slot].1);
-                    println!("  -> {:?} ",  self.projection.slots[slot]);
+                    println!(
+                        "  - {:?} (Slot({}))",
+                        self.row.slots[self.slots[slot].1], self.slots[slot].1
+                    );
+                    println!("  -> {:?} ", self.projection.slots[slot]);
                 }
                 Ok(Some(&self.projection))
             } else {
@@ -452,23 +463,33 @@ enum Expr {
     Gt(Box<Expr>, Box<Expr>),
     Equal(Box<Expr>, Box<Expr>),
 
-    HasLabel{slot: usize, label: Token},
+    HasLabel { slot: usize, label: Token },
 }
 
 impl Expr {
-    fn eval_prop(ctx: &mut Context, row: &GramRow, expr: &Expr, prop: &Vec<Token>) -> Result<GramVal> {
+    fn eval_prop(
+        ctx: &mut Context,
+        row: &GramRow,
+        expr: &Expr,
+        prop: &Vec<Token>,
+    ) -> Result<GramVal> {
         let mut v = expr.eval(ctx, row)?;
         for key in prop {
             v = match v {
-                GramVal::Node { id } => GramVal::Lit(ctx.g.borrow().get_node_prop(id, *key).unwrap_or(Val::Null)),
-                GramVal::Rel { node_id, rel_index } => GramVal::Lit(ctx
-                    .g
-                    .borrow()
-                    .get_rel_prop(node_id, rel_index, *key)
-                    .unwrap_or(Val::Null)),
-                GramVal::Map(es) => {
-                    es.iter().find(| (ek, _) | ek == key ).map(|e| e.1.clone() ).unwrap_or(GramVal::Lit(Val::Null))
+                GramVal::Node { id } => {
+                    GramVal::Lit(ctx.g.borrow().get_node_prop(id, *key).unwrap_or(Val::Null))
                 }
+                GramVal::Rel { node_id, rel_index } => GramVal::Lit(
+                    ctx.g
+                        .borrow()
+                        .get_rel_prop(node_id, rel_index, *key)
+                        .unwrap_or(Val::Null),
+                ),
+                GramVal::Map(es) => es
+                    .iter()
+                    .find(|(ek, _)| ek == key)
+                    .map(|e| e.1.clone())
+                    .unwrap_or(GramVal::Lit(Val::Null)),
                 v => bail!("Gram backend does not yet support {:?}", v),
             };
         }
@@ -477,9 +498,7 @@ impl Expr {
 
     fn eval(&self, ctx: &mut Context, row: &GramRow) -> Result<GramVal> {
         match self {
-            Expr::Prop(expr, props) => {
-                Expr::eval_prop(ctx, row, expr, props)
-            }
+            Expr::Prop(expr, props) => Expr::eval_prop(ctx, row, expr, props),
             Expr::Slot(slot) => Ok(row.slots[*slot].clone()), // TODO not this
             Expr::Lit(v) => Ok(GramVal::Lit(v.clone())),      // TODO not this,
             Expr::List(vs) => {
@@ -533,7 +552,7 @@ impl Expr {
                 let node_id = s.as_node_id();
                 let g = ctx.g.borrow();
                 let node = g.nodes.get(node_id).unwrap();
-                return Ok(GramVal::Lit(Val::Bool(node.labels.contains(label))))
+                return Ok(GramVal::Lit(Val::Bool(node.labels.contains(label))));
             }
         }
     }
@@ -571,7 +590,7 @@ impl GramVal {
                     let entry = &es[i];
                     let key = ctx.tokens.borrow().lookup(entry.0).unwrap().to_string();
                     let val = entry.1.project(ctx);
-                    out.push(( key, val ))
+                    out.push((key, val))
                 }
                 return Val::Map(out);
             }
@@ -598,7 +617,12 @@ impl GramVal {
                 let n = &ctx.g.borrow().nodes[*node_id];
                 let rel = &n.rels[*rel_index];
 
-                let rel_type = ctx.tokens.borrow().lookup(rel.rel_type).unwrap().to_string();
+                let rel_type = ctx
+                    .tokens
+                    .borrow()
+                    .lookup(rel.rel_type)
+                    .unwrap()
+                    .to_string();
                 let mut props = crate::Map::new();
                 for (k, v) in rel.properties.iter() {
                     props.push((
@@ -613,18 +637,18 @@ impl GramVal {
                     Dir::Out => {
                         start = *node_id;
                         end = rel.other_node;
-                    },
+                    }
                     Dir::In => {
                         end = *node_id;
                         start = rel.other_node;
-                    },
+                    }
                 }
-                return Val::Rel(crate::Rel{
+                return Val::Rel(crate::Rel {
                     start,
                     end,
                     rel_type,
-                    props
-                })
+                    props,
+                });
             }
         }
     }
@@ -633,6 +657,15 @@ impl GramVal {
         match self {
             GramVal::Node { id } => *id,
             _ => panic!(
+                "invalid execution plan, non-node value feeds into thing expecting node value"
+            ),
+        }
+    }
+
+    pub fn as_bool(&self) -> Result<bool> {
+        match self {
+            GramVal::Lit(Val::Bool(v)) => Ok(*v),
+            _ => bail!(
                 "invalid execution plan, non-node value feeds into thing expecting node value"
             ),
         }
@@ -747,7 +780,7 @@ impl Operator for Expand {
                         return Ok(false);
                     }
                     if let GramVal::Lit(Val::Null) = out.slots[self.src_slot] {
-                        continue
+                        continue;
                     }
                     println!("[expand]  in: {:?}", out);
                     self.state = ExpandState::InNode;
@@ -1062,7 +1095,6 @@ impl Operator for Limit {
     }
 }
 
-
 #[derive(Debug)]
 struct Optional {
     src: Box<dyn Operator>,
@@ -1072,10 +1104,10 @@ struct Optional {
 
 impl Operator for Optional {
     fn next(&mut self, ctx: &mut Context, out: &mut GramRow) -> Result<bool> {
-        if ! self.initialized {
+        if !self.initialized {
             self.initialized = true;
             if self.src.next(ctx, out)? {
-                return Ok(true)
+                return Ok(true);
             }
             for s in &self.slots {
                 out.slots[*s] = GramVal::Lit(Val::Null);
@@ -1083,6 +1115,43 @@ impl Operator for Optional {
             Ok(true)
         } else {
             self.src.next(ctx, out)
+        }
+    }
+}
+
+#[derive(Debug)]
+struct NestLoop {
+    outer: Box<dyn Operator>,
+    inner: Box<dyn Operator>,
+    predicate: Expr,
+    initialized: bool,
+}
+
+impl Operator for NestLoop {
+    fn next(&mut self, ctx: &mut Context, out: &mut GramRow) -> Result<bool> {
+        if !self.initialized {
+            if !self.outer.next(ctx, out)? {
+                // Well. That was easy
+                return Ok(false);
+            }
+            self.initialized = true;
+        }
+
+        loop {
+            if !self.inner.next(ctx, out)? {
+                // We need the ability to "reset" the inner operator here, which we don't
+                // yet have.. and the TCK does not as-of-yet test any cases where the outer
+                // is more than one row! So just ensure there's no more rows in the input and
+                // then bail.
+                if self.outer.next(ctx, out)? {
+                    panic!("gram backend can't do cartesian product when outer has N > 1 yet")
+                }
+                return Ok(false);
+            }
+
+            if self.predicate.eval(ctx, out)?.as_bool()? {
+                return Ok(true);
+            }
         }
     }
 }
@@ -1737,7 +1806,7 @@ mod functions {
                         v => bail!("don't know how to do NOT({:?})", v),
                     },
                     v => bail!("don't know how to do NOT({:?})", v),
-                }
+                },
             }
         }
     }

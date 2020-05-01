@@ -188,9 +188,7 @@ fn plan_term(pc: &mut PlanningContext, term: Pair<Rule>) -> Result<Expr> {
             }
             return Ok(Expr::List(items));
         }
-        Rule::map => {
-            return Ok(Expr::Map(parse_map_expression(pc, term)?))
-        }
+        Rule::map => return Ok(Expr::Map(parse_map_expression(pc, term)?)),
         Rule::int => {
             let v = term.as_str().parse::<i64>()?;
             return Ok(Expr::Int(v));
@@ -385,11 +383,13 @@ mod tests {
         let key_name2 = p.tokens.borrow_mut().tokenize("name2");
         assert_eq!(
             p.expr,
-            Expr::Map(vec![
-                MapEntryExpr{ key: key_name, val: Expr::Map(vec![
-                    MapEntryExpr{ key: key_name2, val: Expr::String("baz".to_string()) }
-                ])}
-            ]),
+            Expr::Map(vec![MapEntryExpr {
+                key: key_name,
+                val: Expr::Map(vec![MapEntryExpr {
+                    key: key_name2,
+                    val: Expr::String("baz".to_string())
+                }])
+            }]),
         );
         Ok(())
     }
