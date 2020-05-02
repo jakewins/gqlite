@@ -241,136 +241,136 @@ Feature: WithAcceptance
       | 'B'  |
     And no side effects
 
-#  Scenario: WHERE on a DISTINCT column
-#    Given an empty graph
-#    And having executed:
-#      """
-#      CREATE ({name2: 'A'}),
-#             ({name2: 'A'}),
-#             ({name2: 'B'})
-#      """
-#    When executing query:
-#      """
-#      MATCH (a)
-#      WITH DISTINCT a.name2 AS bars
-#      WHERE a.name2 = 'B'
-#      RETURN *
-#      """
-#    Then the result should be, in any order:
-#      | bars |
-#      | 'B'  |
-#    And no side effects
-#
-#  Scenario: A simple pattern with one bound endpoint
-#    Given an empty graph
-#    And having executed:
-#      """
-#      CREATE (:A)-[:REL]->(:B)
-#      """
-#    When executing query:
-#      """
-#      MATCH (a:A)-[r:REL]->(b:B)
-#      WITH a AS b, b AS tmp, r AS r
-#      WITH b AS a, r
-#      LIMIT 1
-#      MATCH (a)-[r]->(b)
-#      RETURN a, r, b
-#      """
-#    Then the result should be, in any order:
-#      | a    | r      | b    |
-#      | (:A) | [:REL] | (:B) |
-#    And no side effects
-#
-#  Scenario: Null handling
-#    Given an empty graph
-#    When executing query:
-#      """
-#      OPTIONAL MATCH (a:Start)
-#      WITH a
-#      MATCH (a)-->(b)
-#      RETURN *
-#      """
-#    Then the result should be, in any order:
-#      | a | b |
-#    And no side effects
-#
-#  Scenario: Nested maps
-#    Given an empty graph
-#    When executing query:
-#      """
-#      WITH {name: {name2: 'baz'}} AS nestedMap
-#      RETURN nestedMap.name.name2
-#      """
-#    Then the result should be, in any order:
-#      | nestedMap.name.name2 |
-#      | 'baz'                |
-#    And no side effects
-#
-#  Scenario: Connected components succeeding WITH
-#    Given an empty graph
-#    And having executed:
-#      """
-#      CREATE (:A)-[:REL]->(:X)
-#      CREATE (:B)
-#      """
-#    When executing query:
-#      """
-#      MATCH (n:A)
-#      WITH n
-#      LIMIT 1
-#      MATCH (m:B), (n)-->(x:X)
-#      RETURN *
-#      """
-#    Then the result should be, in any order:
-#      | m    | n    | x    |
-#      | (:B) | (:A) | (:X) |
-#    And no side effects
-#
-#  Scenario: Single WITH using a predicate and aggregation
-#    Given an empty graph
-#    And having executed:
-#      """
-#      CREATE ({num: 43}), ({num: 42})
-#      """
-#    When executing query:
-#      """
-#      MATCH (n)
-#      WITH n
-#      WHERE n.num = 42
-#      RETURN count(*)
-#      """
-#    Then the result should be, in any order:
-#      | count(*) |
-#      | 1        |
-#    And no side effects
-#
-#  Scenario: Multiple WITHs using a predicate and aggregation
-#    Given an empty graph
-#    And having executed:
-#      """
-#      CREATE (a {name: 'David'}),
-#             (b {name: 'Other'}),
-#             (c {name: 'NotOther'}),
-#             (d {name: 'NotOther2'}),
-#             (a)-[:REL]->(b),
-#             (a)-[:REL]->(c),
-#             (a)-[:REL]->(d),
-#             (b)-[:REL]->(),
-#             (b)-[:REL]->(),
-#             (c)-[:REL]->(),
-#             (c)-[:REL]->(),
-#             (d)-[:REL]->()
-#      """
-#    When executing query:
-#      """
-#      MATCH (david {name: 'David'})--(otherPerson)-->()
-#      WITH otherPerson, count(*) AS foaf
-#      WHERE foaf > 1
-#      WITH otherPerson
-#      WHERE otherPerson.name <> 'NotOther'
-#      RETURN count(*)
-#      """
-#    Then the result should be, in any order:
-#      | count(*) |
-#      | 1        |
-#    And no side effects
+  Scenario: WHERE on a DISTINCT column
+    Given an empty graph
+    And having executed:
+      """
+      CREATE ({name2: 'A'}),
+             ({name2: 'A'}),
+             ({name2: 'B'})
+      """
+    When executing query:
+      """
+      MATCH (a)
+      WITH DISTINCT a.name2 AS bars
+      WHERE a.name2 = 'B'
+      RETURN *
+      """
+    Then the result should be, in any order:
+      | bars |
+      | 'B'  |
+    And no side effects
+
+  Scenario: A simple pattern with one bound endpoint
+    Given an empty graph
+    And having executed:
+      """
+      CREATE (:A)-[:REL]->(:B)
+      """
+    When executing query:
+      """
+      MATCH (a:A)-[r:REL]->(b:B)
+      WITH a AS b, b AS tmp, r AS r
+      WITH b AS a, r
+      LIMIT 1
+      MATCH (a)-[r]->(b)
+      RETURN a, r, b
+      """
+    Then the result should be, in any order:
+      | a    | r      | b    |
+      | (:A) | [:REL] | (:B) |
+    And no side effects
+
+  Scenario: Null handling
+    Given an empty graph
+    When executing query:
+      """
+      OPTIONAL MATCH (a:Start)
+      WITH a
+      MATCH (a)-->(b)
+      RETURN *
+      """
+    Then the result should be, in any order:
+      | a | b |
+    And no side effects
+
+  Scenario: Nested maps
+    Given an empty graph
+    When executing query:
+      """
+      WITH {name: {name2: 'baz'}} AS nestedMap
+      RETURN nestedMap.name.name2
+      """
+    Then the result should be, in any order:
+      | nestedMap.name.name2 |
+      | 'baz'                |
+    And no side effects
+
+  Scenario: Connected components succeeding WITH
+    Given an empty graph
+    And having executed:
+      """
+      CREATE (:A)-[:REL]->(:X)
+      CREATE (:B)
+      """
+    When executing query:
+      """
+      MATCH (n:A)
+      WITH n
+      LIMIT 1
+      MATCH (m:B), (n)-->(x:X)
+      RETURN *
+      """
+    Then the result should be, in any order:
+      | m    | n    | x    |
+      | (:B) | (:A) | (:X) |
+    And no side effects
+
+  Scenario: Single WITH using a predicate and aggregation
+    Given an empty graph
+    And having executed:
+      """
+      CREATE ({num: 43}), ({num: 42})
+      """
+    When executing query:
+      """
+      MATCH (n)
+      WITH n
+      WHERE n.num = 42
+      RETURN count(*)
+      """
+    Then the result should be, in any order:
+      | count(*) |
+      | 1        |
+    And no side effects
+
+  Scenario: Multiple WITHs using a predicate and aggregation
+    Given an empty graph
+    And having executed:
+      """
+      CREATE (a {name: 'David'}),
+             (b {name: 'Other'}),
+             (c {name: 'NotOther'}),
+             (d {name: 'NotOther2'}),
+             (a)-[:REL]->(b),
+             (a)-[:REL]->(c),
+             (a)-[:REL]->(d),
+             (b)-[:REL]->(),
+             (b)-[:REL]->(),
+             (c)-[:REL]->(),
+             (c)-[:REL]->(),
+             (d)-[:REL]->()
+      """
+    When executing query:
+      """
+      MATCH (david {name: 'David'})--(otherPerson)-->()
+      WITH otherPerson, count(*) AS foaf
+      WHERE foaf > 1
+      WITH otherPerson
+      WHERE otherPerson.name <> 'NotOther'
+      RETURN count(*)
+      """
+    Then the result should be, in any order:
+      | count(*) |
+      | 1        |
+    And no side effects

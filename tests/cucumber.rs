@@ -60,6 +60,9 @@ mod example_steps {
             props: Vec<(String, ValMatcher)>,
             labels: Vec<String>,
         },
+        Rel {
+            reltype: String,
+        },
     }
 
     impl ValMatcher {
@@ -124,6 +127,13 @@ mod example_steps {
                         panic!("Expected a node, found {:?}", v);
                     }
                 }
+                ValMatcher::Rel { reltype } => {
+                    if let Val::Rel(r) = v {
+                        assert_eq!(reltype, &r.rel_type)
+                    } else {
+                        panic!("Expected a rel, found {:?}", v);
+                    }
+                }
             }
         }
     }
@@ -181,8 +191,23 @@ mod example_steps {
 
     fn assert_result(world: &mut MyWorld, step: &Step) {
         let table = step.table().unwrap().clone();
+
+        // So.. the rust cucumber parser treats one-row tables as having empty headers
+        // but the TCK uses headers in empty tables, to specify the column names.. so this
+        // is to detect that case
+        let mut empty = table.rows.len() == 1;
+        for c in &table.header {
+            empty = empty && c.is_empty();
+        }
+
+        if empty {
+            let row = world.result.next().unwrap();
+            assert_eq!(true, row.is_none(), "expected empty result");
+            return;
+        }
+
         for mut row in table.rows {
-            if let Ok(Some(actual)) = world.result.next() {
+            if let Some(actual) = world.result.next().unwrap() {
                 for slot in 0..row.len() {
                     str_to_val(&mut row[slot].chars().peekable())
                         .assert_eq(actual.slots[slot].clone());
@@ -235,6 +260,25 @@ mod example_steps {
             return id;
         }
 
+        fn parse_rel(chars: &mut Peekable<Chars>) -> ValMatcher {
+            let mut reltype = None;
+            loop {
+                match chars.peek() {
+                    Some(':') => {
+                        chars.next().unwrap();
+                        reltype = Some(parse_identifier(chars));
+                    }
+                    Some(']') => {
+                        chars.next().unwrap();
+                        return ValMatcher::Rel {
+                            reltype: reltype.unwrap(),
+                        };
+                    }
+                    _ => panic!("unknown rel part: {:?}", chars),
+                }
+            }
+        }
+
         loop {
             match chars.peek().unwrap() {
                 '0'..='9' => return parse_number(chars),
@@ -255,8 +299,19 @@ mod example_steps {
                     ()
                 }
                 '[' => {
-                    let mut items = Vec::new();
                     chars.next().unwrap();
+                    // this can either be a list, or a relationship
+                    // need to differentiate [:REL] from [1]..
+
+                    match chars.peek() {
+                        Some(':') => {
+                            return parse_rel(chars);
+                        }
+                        _ => (),
+                    }
+
+                    // List
+                    let mut items = Vec::new();
                     loop {
                         match chars.peek() {
                             Some(']') => return ValMatcher::List(items),

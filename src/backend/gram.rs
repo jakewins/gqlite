@@ -106,19 +106,20 @@ impl GramBackend {
                 rel_slot,
                 dst_slot,
                 rel_type,
-                ..
+                dir,
             } => Ok(Box::new(Expand {
                 src: self.convert(*src)?,
                 src_slot,
                 rel_slot,
                 dst_slot,
                 rel_type,
+                dir,
                 next_rel_index: 0,
                 state: ExpandState::NextNode,
             })),
             LogicalPlan::Selection { src, predicate } => {
                 // self.convert(*src)
-                Ok(Box::new(Select {
+                Ok(Box::new(Selection {
                     src: self.convert(*src)?,
                     predicate: self.convert_expr(predicate),
                 }))
@@ -223,6 +224,21 @@ impl GramBackend {
                     limit_remaining: None,
                 }))
             }
+            LogicalPlan::Optional { src, slots } => Ok(Box::new(Optional {
+                src: self.convert(*src)?,
+                initialized: false,
+                slots,
+            })),
+            LogicalPlan::NestLoop {
+                outer,
+                inner,
+                predicate,
+            } => Ok(Box::new(NestLoop {
+                outer: self.convert(*outer)?,
+                inner: self.convert(*inner)?,
+                predicate: self.convert_expr(predicate),
+                initialized: false,
+            })),
         }
     }
 
@@ -263,6 +279,13 @@ impl GramBackend {
                     Box::new(self.convert_expr(*left)),
                     Box::new(self.convert_expr(*right)),
                 ),
+                frontend::Op::NotEq => Expr::Call(
+                    functions::Func::Not,
+                    vec![Expr::Equal(
+                        Box::new(self.convert_expr(*left)),
+                        Box::new(self.convert_expr(*right)),
+                    )],
+                ),
                 frontend::Op::Gt => Expr::Gt(
                     Box::new(self.convert_expr(*left)),
                     Box::new(self.convert_expr(*right)),
@@ -277,6 +300,14 @@ impl GramBackend {
                     items.push(self.convert_expr(e));
                 }
                 Expr::List(items)
+            }
+
+            frontend::Expr::Map(es) => {
+                let mut items = Vec::with_capacity(es.len());
+                for e in es {
+                    items.push((e.key, self.convert_expr(e.val)));
+                }
+                Expr::Map(items)
             }
 
             frontend::Expr::FuncCall { name, args } => {
@@ -294,6 +325,9 @@ impl GramBackend {
             frontend::Expr::And(terms) => {
                 Expr::And(terms.iter().map(|e| self.convert_expr(e.clone())).collect())
             }
+
+            frontend::Expr::HasLabel(slot, label) => Expr::HasLabel { slot, label },
+
             _ => panic!(
                 "The gram backend does not support this expression type yet: {:?}",
                 expr
@@ -343,9 +377,9 @@ impl Backend for GramBackend {
         cursor.slots = slots;
         cursor.plan = Some(plan);
 
-        if cursor.row.slots.len() < 16 {
+        if cursor.row.slots.len() < 32 {
             // TODO derive this from the logical plan
-            cursor.row.slots.resize(16, GramVal::Lit(Val::Null));
+            cursor.row.slots.resize(32, GramVal::Lit(Val::Null));
         }
         Ok(())
     }
@@ -397,7 +431,7 @@ impl BackendCursor for GramCursor {
             if p.next(&mut self.ctx, &mut self.row)? {
                 for slot in 0..self.slots.len() {
                     self.projection.slots[slot] =
-                        self.row.slots[self.slots[slot].1].project(&mut self.ctx)
+                        self.row.slots[self.slots[slot].1].project(&mut self.ctx);
                 }
                 Ok(Some(&self.projection))
             } else {
@@ -423,36 +457,50 @@ enum Expr {
     Prop(Box<Expr>, Vec<Token>),
     Slot(Slot),
     List(Vec<Expr>),
+    Map(Vec<(Token, Expr)>),
 
     Call(functions::Func, Vec<Expr>),
     And(Vec<Expr>),
 
     Gt(Box<Expr>, Box<Expr>),
     Equal(Box<Expr>, Box<Expr>),
+
+    HasLabel { slot: usize, label: Token },
 }
 
 impl Expr {
-    fn eval_prop(ctx: &mut Context, row: &GramRow, expr: &Expr, prop: Token) -> Result<GramVal> {
-        let v = match expr.eval(ctx, row)? {
-            GramVal::Node { id } => ctx.g.borrow().get_node_prop(id, prop).unwrap_or(Val::Null),
-            GramVal::Rel { node_id, rel_index } => ctx
-                .g
-                .borrow()
-                .get_rel_prop(node_id, rel_index, prop)
-                .unwrap_or(Val::Null),
-            v => bail!("Gram backend does not yet support {:?}", v),
-        };
-        Ok(GramVal::Lit(v))
+    fn eval_prop(
+        ctx: &mut Context,
+        row: &GramRow,
+        expr: &Expr,
+        prop: &Vec<Token>,
+    ) -> Result<GramVal> {
+        let mut v = expr.eval(ctx, row)?;
+        for key in prop {
+            v = match v {
+                GramVal::Node { id } => {
+                    GramVal::Lit(ctx.g.borrow().get_node_prop(id, *key).unwrap_or(Val::Null))
+                }
+                GramVal::Rel { node_id, rel_index } => GramVal::Lit(
+                    ctx.g
+                        .borrow()
+                        .get_rel_prop(node_id, rel_index, *key)
+                        .unwrap_or(Val::Null),
+                ),
+                GramVal::Map(es) => es
+                    .iter()
+                    .find(|(ek, _)| ek == key)
+                    .map(|e| e.1.clone())
+                    .unwrap_or(GramVal::Lit(Val::Null)),
+                v => bail!("Gram backend does not yet support {:?}", v),
+            };
+        }
+        Ok(v)
     }
 
     fn eval(&self, ctx: &mut Context, row: &GramRow) -> Result<GramVal> {
         match self {
-            Expr::Prop(expr, props) => {
-                if props.len() != 1 {
-                    panic!("Can't handle property expressions referring to more than one key")
-                }
-                Expr::eval_prop(ctx, row, expr, props[0])
-            }
+            Expr::Prop(expr, props) => Expr::eval_prop(ctx, row, expr, props),
             Expr::Slot(slot) => Ok(row.slots[*slot].clone()), // TODO not this
             Expr::Lit(v) => Ok(GramVal::Lit(v.clone())),      // TODO not this,
             Expr::List(vs) => {
@@ -461,6 +509,13 @@ impl Expr {
                     out.push(v.eval(ctx, row)?);
                 }
                 Ok(GramVal::List(out))
+            }
+            Expr::Map(es) => {
+                let mut out = Vec::with_capacity(es.len());
+                for e in es {
+                    out.push((e.0, e.1.eval(ctx, row)?));
+                }
+                Ok(GramVal::Map(out))
             }
             Expr::Gt(a, b) => {
                 let a_val = a.eval(ctx, row)?;
@@ -494,6 +549,13 @@ impl Expr {
                 }
                 f.apply(&argv)
             }
+            Expr::HasLabel { slot, label } => {
+                let s: &GramVal = &row.slots[*slot];
+                let node_id = s.as_node_id();
+                let g = ctx.g.borrow();
+                let node = g.nodes.get(node_id).unwrap();
+                return Ok(GramVal::Lit(Val::Bool(node.labels.contains(label))));
+            }
         }
     }
 }
@@ -507,6 +569,7 @@ impl Expr {
 enum GramVal {
     Lit(Val),
     List(Vec<GramVal>),
+    Map(Vec<(Token, GramVal)>),
     Node { id: usize },
     Rel { node_id: usize, rel_index: usize },
 }
@@ -522,6 +585,16 @@ impl GramVal {
                     out[i] = vs[i].project(ctx);
                 }
                 return Val::List(out);
+            }
+            GramVal::Map(es) => {
+                let mut out = Vec::with_capacity(es.len());
+                for i in 0..es.len() {
+                    let entry = &es[i];
+                    let key = ctx.tokens.borrow().lookup(entry.0).unwrap().to_string();
+                    let val = entry.1.project(ctx);
+                    out.push((key, val))
+                }
+                return Val::Map(out);
             }
             GramVal::Node { id } => {
                 let n = &ctx.g.borrow().nodes[*id];
@@ -542,7 +615,43 @@ impl GramVal {
                     props,
                 });
             }
-            _ => panic!("don't know how to project: {:?}", self),
+            GramVal::Rel { node_id, rel_index } => {
+                let n = &ctx.g.borrow().nodes[*node_id];
+                let rel = &n.rels[*rel_index];
+
+                let rel_type = ctx
+                    .tokens
+                    .borrow()
+                    .lookup(rel.rel_type)
+                    .unwrap()
+                    .to_string();
+                let mut props = crate::Map::new();
+                for (k, v) in rel.properties.iter() {
+                    props.push((
+                        ctx.tokens.borrow().lookup(*k).unwrap().to_string(),
+                        v.clone(),
+                    ));
+                }
+
+                let start;
+                let end;
+                match rel.dir {
+                    Dir::Out => {
+                        start = *node_id;
+                        end = rel.other_node;
+                    }
+                    Dir::In => {
+                        end = *node_id;
+                        start = rel.other_node;
+                    }
+                }
+                return Val::Rel(crate::Rel {
+                    start,
+                    end,
+                    rel_type,
+                    props,
+                });
+            }
         }
     }
 
@@ -550,6 +659,15 @@ impl GramVal {
         match self {
             GramVal::Node { id } => *id,
             _ => panic!(
+                "invalid execution plan, non-node value feeds into thing expecting node value"
+            ),
+        }
+    }
+
+    pub fn as_bool(&self) -> Result<bool> {
+        match self {
+            GramVal::Lit(Val::Bool(v)) => Ok(*v),
+            _ => bail!(
                 "invalid execution plan, non-node value feeds into thing expecting node value"
             ),
         }
@@ -616,6 +734,7 @@ impl Display for GramVal {
         match self {
             GramVal::Lit(v) => std::fmt::Display::fmt(&v, f),
             GramVal::List(vs) => f.write_str(&format!("{:?}", vs)),
+            GramVal::Map(es) => f.write_fmt(format_args!("{:?}", es)),
             GramVal::Node { id } => f.write_str(&format!("Node({})", id)),
             GramVal::Rel { node_id, rel_index } => {
                 f.write_str(&format!("Rel({}/{})", node_id, rel_index))
@@ -647,6 +766,8 @@ struct Expand {
 
     pub rel_type: Option<Token>,
 
+    pub dir: Option<Dir>,
+
     // In the current adjacency list, what is the next index we should return?
     pub next_rel_index: usize,
 
@@ -662,17 +783,17 @@ impl Operator for Expand {
                     if !self.src.next(ctx, out)? {
                         return Ok(false);
                     }
-                    println!("[expand]  in: {:?}", out);
+                    if let GramVal::Lit(Val::Null) = out.slots[self.src_slot] {
+                        continue;
+                    }
                     self.state = ExpandState::InNode;
                 }
                 ExpandState::InNode => {
                     let node = out.slots[self.src_slot].as_node_id();
                     let g = ctx.g.borrow();
                     let rels = &g.nodes[node].rels;
-                    println!("[expand]  relcount={}", rels.len());
                     if self.next_rel_index >= rels.len() {
                         // No more rels on this node
-                        println!("[expand]  no mas");
                         self.state = ExpandState::NextNode;
                         self.next_rel_index = 0;
                         continue;
@@ -681,15 +802,24 @@ impl Operator for Expand {
                     let rel = &rels[self.next_rel_index];
                     self.next_rel_index += 1;
 
-                    if self.rel_type == None || rel.rel_type == self.rel_type.unwrap() {
-                        out.slots[self.rel_slot] = GramVal::Rel {
-                            node_id: node,
-                            rel_index: self.next_rel_index - 1,
-                        };
-                        out.slots[self.dst_slot] = GramVal::Node { id: rel.other_node };
-                        println!("[expand]  out: {:?}", out);
-                        return Ok(true);
+                    if self.rel_type.is_some() {
+                        if rel.rel_type != self.rel_type.unwrap() {
+                            continue;
+                        }
                     }
+
+                    if self.dir.is_some() && rel.other_node != node {
+                        if rel.dir != self.dir.unwrap() {
+                            continue;
+                        }
+                    }
+
+                    out.slots[self.rel_slot] = GramVal::Rel {
+                        node_id: node,
+                        rel_index: self.next_rel_index - 1,
+                    };
+                    out.slots[self.dst_slot] = GramVal::Node { id: rel.other_node };
+                    return Ok(true);
                 }
             }
         }
@@ -894,17 +1024,9 @@ impl Operator for Return {
             self.print_header = false;
         }
         if self.src.next(ctx, out)? {
-            let mut first = true;
             for cell in &self.projections {
-                let v = cell.expr.eval(ctx, out)?;
-                if first {
-                    print!("{}", v);
-                    first = false
-                } else {
-                    print!(", {}", v)
-                }
+                out.slots[cell.slot] = cell.expr.eval(ctx, out)?;
             }
-            println!();
             // Do this to 'yield' one row at a time to the cursor
             return Ok(true);
         }
@@ -984,6 +1106,67 @@ impl Operator for Limit {
 }
 
 #[derive(Debug)]
+struct Optional {
+    src: Box<dyn Operator>,
+    initialized: bool,
+    slots: Vec<usize>,
+}
+
+impl Operator for Optional {
+    fn next(&mut self, ctx: &mut Context, out: &mut GramRow) -> Result<bool> {
+        if !self.initialized {
+            self.initialized = true;
+            if self.src.next(ctx, out)? {
+                return Ok(true);
+            }
+            for s in &self.slots {
+                out.slots[*s] = GramVal::Lit(Val::Null);
+            }
+            Ok(true)
+        } else {
+            self.src.next(ctx, out)
+        }
+    }
+}
+
+#[derive(Debug)]
+struct NestLoop {
+    outer: Box<dyn Operator>,
+    inner: Box<dyn Operator>,
+    predicate: Expr,
+    initialized: bool,
+}
+
+impl Operator for NestLoop {
+    fn next(&mut self, ctx: &mut Context, out: &mut GramRow) -> Result<bool> {
+        if !self.initialized {
+            if !self.outer.next(ctx, out)? {
+                // Well. That was easy
+                return Ok(false);
+            }
+            self.initialized = true;
+        }
+
+        loop {
+            if !self.inner.next(ctx, out)? {
+                // We need the ability to "reset" the inner operator here, which we don't
+                // yet have.. and the TCK does not as-of-yet test any cases where the outer
+                // is more than one row! So just ensure there's no more rows in the input and
+                // then bail.
+                if self.outer.next(ctx, out)? {
+                    panic!("gram backend can't do cartesian product when outer has N > 1 yet")
+                }
+                return Ok(false);
+            }
+
+            if self.predicate.eval(ctx, out)?.as_bool()? {
+                return Ok(true);
+            }
+        }
+    }
+}
+
+#[derive(Debug)]
 struct Sort {
     src: Box<dyn Operator>,
     state: SortState,
@@ -1051,15 +1234,16 @@ impl Operator for Sort {
 }
 
 #[derive(Debug)]
-struct Select {
+struct Selection {
     pub src: Box<dyn Operator>,
     pub predicate: Expr,
 }
 
-impl Operator for Select {
+impl Operator for Selection {
     fn next(&mut self, ctx: &mut Context, out: &mut GramRow) -> Result<bool> {
         while self.src.next(ctx, out)? {
-            if let GramVal::Lit(Val::Bool(true)) = self.predicate.eval(ctx, out)? {
+            let ok = self.predicate.eval(ctx, out)?;
+            if let GramVal::Lit(Val::Bool(true)) = ok {
                 return Ok(true);
             }
         }
@@ -1252,6 +1436,7 @@ mod parser {
     use crate::backend::{Token, Tokens};
     use crate::pest::Parser;
     use anyhow::Result;
+    use pest::iterators::Pair;
     use std::collections::HashMap;
     use std::collections::HashSet;
     use std::fs::File;
@@ -1276,6 +1461,79 @@ mod parser {
         Ok(string)
     }
 
+    struct ParserContext<'a> {
+        anon_id_gen: u32,
+        node_ids: Tokens,
+        tokens: &'a mut Tokens,
+    }
+
+    fn parse_node(item: Pair<Rule>, ctx: &mut ParserContext) -> Result<Node> {
+        let mut identifier: Option<String> = None;
+        let mut props: HashMap<Token, Val> = HashMap::new();
+        let mut labels: HashSet<Token> = HashSet::new();
+
+        for part in item.into_inner() {
+            match part.as_rule() {
+                Rule::id => identifier = Some(part.as_str().to_string()),
+                Rule::label => {
+                    for label in part.into_inner() {
+                        labels.insert(ctx.tokens.tokenize(label.as_str()));
+                    }
+                }
+                Rule::map => {
+                    for pair in part.into_inner() {
+                        let mut key: Option<String> = None;
+                        let mut val = None;
+                        match pair.as_rule() {
+                            Rule::map_pair => {
+                                for pair_part in pair.into_inner() {
+                                    match pair_part.as_rule() {
+                                        Rule::id => key = Some(pair_part.as_str().to_string()),
+                                        Rule::expr => {
+                                            let stringval = pair_part.into_inner().next().unwrap();
+                                            let stringval_content =
+                                                stringval.into_inner().next().unwrap();
+                                            val = Some(stringval_content.as_str().to_string())
+                                        }
+                                        _ => panic!(
+                                            "what? {:?} / {}",
+                                            pair_part.as_rule(),
+                                            pair_part.as_str()
+                                        ),
+                                    }
+                                }
+                            }
+                            _ => panic!("what? {:?} / {}", pair.as_rule(), pair.as_str()),
+                        }
+                        let key_str = key.unwrap();
+                        props.insert(ctx.tokens.tokenize(&key_str), Val::String(val.unwrap()));
+                    }
+                }
+                _ => panic!("what? {:?} / {}", part.as_rule(), part.as_str()),
+            }
+        }
+
+        let gid_string = identifier.unwrap_or_else(|| {
+            // Entry with no identifier, generate one
+            loop {
+                let candidate = format!("anon#{}", ctx.anon_id_gen);
+                if !ctx.node_ids.table.contains_key(&candidate) {
+                    return candidate;
+                }
+                ctx.anon_id_gen += 1;
+            }
+        });
+        let gid = ctx.tokens.tokenize(&gid_string);
+        let id = ctx.node_ids.tokenize(&gid_string);
+        Ok(Node {
+            id,
+            gid,
+            labels,
+            properties: props,
+            rels: vec![],
+        })
+    }
+
     pub fn load(tokens: &mut Tokens, file: &mut File) -> Result<Graph> {
         let mut g = Graph { nodes: vec![] };
 
@@ -1284,10 +1542,14 @@ mod parser {
 
         let gram = parse_result.next().unwrap(); // get and unwrap the `file` rule; never fails
 
-        let mut anon_id_gen = 0;
-        //    let id_map = HashMap::new();
-        let mut node_ids = Tokens {
+        let node_ids = Tokens {
             table: Default::default(),
+        };
+
+        let mut pc = ParserContext {
+            anon_id_gen: 0,
+            node_ids,
+            tokens,
         };
 
         for item in gram.into_inner() {
@@ -1301,11 +1563,17 @@ mod parser {
                     for part in item.into_inner() {
                         match part.as_rule() {
                             Rule::node => {
-                                let identifier = part.into_inner().next().unwrap().as_str();
+                                let n = parse_node(part, &mut pc)?;
                                 if start_identifier == None {
-                                    start_identifier = Some(node_ids.tokenize(identifier));
+                                    start_identifier = Some(n.id);
                                 } else {
-                                    end_identifier = Some(node_ids.tokenize(identifier));
+                                    end_identifier = Some(n.id);
+                                }
+                                // need like a merge_node operation; but for now, insert the
+                                // first occurrence of a node, so subsequent ones won't clear out
+                                // properties
+                                if g.nodes.len() <= n.id {
+                                    g.add_node(n.id, n);
                                 }
                             }
                             Rule::rel => {
@@ -1314,7 +1582,7 @@ mod parser {
                                         Rule::map => {}
                                         Rule::rel_type => {
                                             let rt_id = rel_part.into_inner().next().unwrap();
-                                            rel_type = Some(node_ids.tokenize(
+                                            rel_type = Some(pc.node_ids.tokenize(
                                                 rt_id.into_inner().next().unwrap().as_str(),
                                             ));
                                         }
@@ -1333,79 +1601,12 @@ mod parser {
                     g.add_rel(
                         start_identifier.unwrap(),
                         end_identifier.unwrap(),
-                        rel_type.unwrap_or(tokens.tokenize("_")),
+                        rel_type.unwrap_or(pc.tokens.tokenize("_")),
                     );
                 }
                 Rule::node => {
-                    let mut identifier: Option<String> = None;
-                    let mut props: HashMap<Token, Val> = HashMap::new();
-                    let mut labels: HashSet<Token> = HashSet::new();
-
-                    for part in item.into_inner() {
-                        match part.as_rule() {
-                            Rule::id => identifier = Some(part.as_str().to_string()),
-                            Rule::label => {
-                                for label in part.into_inner() {
-                                    labels.insert(tokens.tokenize(label.as_str()));
-                                }
-                            }
-                            Rule::map => {
-                                for pair in part.into_inner() {
-                                    let mut key: Option<String> = None;
-                                    let mut val = None;
-                                    match pair.as_rule() {
-                                        Rule::map_pair => {
-                                            for pair_part in pair.into_inner() {
-                                                match pair_part.as_rule() {
-                                                    Rule::id => {
-                                                        key = Some(pair_part.as_str().to_string())
-                                                    }
-                                                    Rule::expr => {
-                                                        val = Some(pair_part.as_str().to_string())
-                                                    }
-                                                    _ => panic!(
-                                                        "what? {:?} / {}",
-                                                        pair_part.as_rule(),
-                                                        pair_part.as_str()
-                                                    ),
-                                                }
-                                            }
-                                        }
-                                        _ => {
-                                            panic!("what? {:?} / {}", pair.as_rule(), pair.as_str())
-                                        }
-                                    }
-                                    let key_str = key.unwrap();
-                                    props.insert(
-                                        tokens.tokenize(&key_str),
-                                        Val::String(val.unwrap()),
-                                    );
-                                }
-                            }
-                            _ => panic!("what? {:?} / {}", part.as_rule(), part.as_str()),
-                        }
-                    }
-
-                    let gid_string = identifier.unwrap_or_else(|| {
-                        // Entry with no identifier, generate one
-                        loop {
-                            let candidate = format!("anon#{}", anon_id_gen);
-                            if !node_ids.table.contains_key(&candidate) {
-                                return candidate;
-                            }
-                            anon_id_gen += 1;
-                        }
-                    });
-                    let gid = tokens.tokenize(&gid_string);
-                    g.add_node(
-                        node_ids.tokenize(&gid_string),
-                        Node {
-                            gid,
-                            labels,
-                            properties: props,
-                            rels: vec![],
-                        },
-                    );
+                    let n = parse_node(item, &mut pc)?;
+                    g.add_node(n.id, n)
                 }
                 _ => (),
             }
@@ -1417,6 +1618,8 @@ mod parser {
 
 #[derive(Debug)]
 pub struct Node {
+    // Identifier for this node, matches it's index into the node vector in g
+    id: usize,
     // Identifier assigned this node in the gram file
     gid: Token,
     labels: HashSet<Token>,
@@ -1450,7 +1653,17 @@ impl Graph {
     }
 
     fn add_node(&mut self, id: usize, n: Node) {
-        self.nodes.insert(id, n);
+        while self.nodes.len() <= id {
+            let filler_id = self.nodes.len();
+            self.nodes.push(Node {
+                id: filler_id,
+                gid: 0,
+                labels: Default::default(),
+                properties: Default::default(),
+                rels: vec![],
+            })
+        }
+        self.nodes[id] = n;
     }
 
     // Add a rel, return the index of the rel from the start nodes perspective
@@ -1508,15 +1721,16 @@ fn append_node(
         format!("(`{}` {})\n", gram_identifier, p)
     };
 
+    let id = ctx.g.borrow().nodes.len();
     let out_node = Node {
+        id,
         gid: tokens.tokenize(&gram_identifier),
         labels,
         properties: node_properties,
         rels: vec![],
     };
 
-    let node_id = ctx.g.borrow().nodes.len();
-    ctx.g.borrow_mut().add_node(node_id, out_node);
+    ctx.g.borrow_mut().add_node(id, out_node);
 
     println!("--- About to write ---");
     println!("{}", gram_string);
@@ -1529,7 +1743,7 @@ fn append_node(
         .expect("seek error");
 
     match ctx.file.borrow_mut().write_all(gram_string.as_bytes()) {
-        Ok(_) => Ok(GramVal::Node { id: node_id }),
+        Ok(_) => Ok(GramVal::Node { id }),
         Err(e) => Err(Error::new(e)),
     }
 }

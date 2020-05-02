@@ -6,11 +6,11 @@ and_expr = { term ~ (^"AND " ~ term)* }
 term = _{ binary_op | atom }
 
 binary_op = { atom ~ op ~ atom }
-op = ${ "=" | ">" }
+op = ${ "=" | ">" | "<>" }
 
-atom = _{ bool | float | int | prop_lookup | count_call | func_call | string | id | list | "(" ~ expr ~ ")" }
+atom = _{ bool | float | int | prop_lookup | count_call | func_call | string | id | list | map | "(" ~ expr ~ ")" }
 
-id = ${ ( ASCII_ALPHA | "_" | "-" ) + }
+id = ${ ( ASCII_ALPHA | "_" | "-" ) ~ ( ASCII_ALPHANUMERIC | "_" | "-" )* }
 
 prop_lookup = { id ~ ("." ~ id)+ }
 
@@ -80,8 +80,10 @@ order_expr = { expr ~ (^"DESC")? }
 skip_clause = { ^"SKIP" ~ expr }
 limit_clause = { ^"LIMIT" ~ expr }
 
+optional_clause = { ^"OPTIONAL" }
+
 create_stmt = { ^"CREATE" ~ patterns }
-match_stmt = { ^"MATCH" ~ pattern ~ where_clause? }
+match_stmt = { optional_clause? ~ ^"MATCH" ~ patterns ~ where_clause? }
 with_stmt = { ^"WITH" ~ distinct_clause? ~ projections ~ where_clause? ~ order_clause? ~ skip_clause? ~ limit_clause? }
 unwind_stmt = { ^"UNWIND" ~ expr ~ ^"AS" ~ id }
 return_stmt = { ^"RETURN" ~ distinct_clause? ~ ( projections | project_all ) ~ order_clause? ~ skip_clause? ~ limit_clause? }

@@ -28,7 +28,18 @@ fn main() -> anyhow::Result<()> {
         let mut cursor = db.new_cursor();
         db.run(query_str, &mut cursor)?;
 
-        while let Some(_) = cursor.next()? {}
+        while let Some(row) = cursor.next()? {
+            let mut first = true;
+            for v in &row.slots {
+                if first {
+                    print!("{}", v);
+                    first = false
+                } else {
+                    print!(", {}", v)
+                }
+            }
+            println!()
+        }
     }
 
     Ok(())
