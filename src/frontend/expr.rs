@@ -199,6 +199,10 @@ fn plan_term(pc: &mut PlanningContext, term: Pair<Rule>) -> Result<Expr> {
             let v = term.as_str().parse::<f64>()?;
             return Ok(Expr::Float(v));
         }
+        Rule::science => {
+            let v = term.as_str().parse::<f64>()?;
+            return Ok(Expr::Float(v));
+        }
         Rule::lit_true => return Ok(Expr::Bool(true)),
         Rule::lit_false => return Ok(Expr::Bool(false)),
         Rule::binary_op => {
@@ -306,6 +310,12 @@ mod tests {
         } else {
             return Err(anyhow!("Expected RETURN plan, got: {:?}", plan?));
         }
+    }
+
+    #[test]
+    fn plan_some_numbers() -> Result<()> {
+        assert_eq!(plan("-1e-9")?.expr, Expr::Float(-1e-9));
+        Ok(())
     }
 
     #[test]

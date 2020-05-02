@@ -5,7 +5,9 @@ use tempfile::tempfile;
 
 pub struct GraphProperties {
     node_count: i32,
-    _relationship_count: i32,
+    relationship_count: i32,
+    labels_count: i32,
+    properties_count: i32,
 }
 
 fn empty_db() -> GramDatabase {
@@ -31,7 +33,9 @@ impl std::default::Default for MyWorld {
             result: cursor,
             starting_graph_properties: GraphProperties {
                 node_count: 0,
-                _relationship_count: 0,
+                relationship_count: 0,
+                labels_count: 0,
+                properties_count: 0,
             },
         }
     }
@@ -52,6 +56,8 @@ mod example_steps {
     #[derive(Debug, PartialEq, Clone)]
     pub enum ValMatcher {
         String(String),
+        Bool(bool),
+        Null,
         List(Vec<ValMatcher>),
         Map(Vec<(String, ValMatcher)>),
         Int(i64),
@@ -70,8 +76,30 @@ mod example_steps {
             match self {
                 ValMatcher::Int(e) => assert_eq!(Val::Int(*e), v),
                 ValMatcher::Float(e) => assert_eq!(Val::Float(*e), v),
+                ValMatcher::Bool(b) => assert_eq!(Val::Bool(*b), v),
+                ValMatcher::Null => assert_eq!(Val::Null, v),
                 ValMatcher::String(e) => assert_eq!(Val::String(e.clone()), v),
-                ValMatcher::Map(_) => panic!(".."),
+                ValMatcher::Map(es) => {
+                    if let Val::Map(actual) = v {
+                        if es.len() != actual.len() {
+                            panic!("Expected {:?}, got {:?} (not same length)", es, actual)
+                        }
+                        for (k, ev) in es {
+                            let mut found = false;
+                            for (ak, av) in &actual {
+                                if ak == k {
+                                    found = true;
+                                    ev.assert_eq(av.clone());
+                                }
+                            }
+                            if !found {
+                                panic!("map has unspecified property {}", k);
+                            }
+                        }
+                    } else {
+                        panic!("Expected a map, found {:?}", v)
+                    }
+                }
                 ValMatcher::List(expected) => match v {
                     Val::List(actual) => {
                         if expected.len() != actual.len() {
@@ -145,6 +173,9 @@ mod example_steps {
             // consume
         }
         world.starting_graph_properties.node_count = count_nodes(world);
+        world.starting_graph_properties.relationship_count = count_rels(world);
+        world.starting_graph_properties.labels_count = count_labels(world);
+        world.starting_graph_properties.properties_count = count_properties(world);
         result
     }
 
@@ -163,6 +194,52 @@ mod example_steps {
         Ok(ct)
     }
 
+    fn count_labels(world: &mut MyWorld) -> i32 {
+        let mut cursor = world.graph.new_cursor();
+        world
+            .graph
+            .run("MATCH (n) RETURN n", &mut cursor)
+            .expect("should succeed");
+        let mut ct = 0;
+        while let Some(r) = cursor.next().unwrap() {
+            if let Val::Node(n) = &r.slots[0] {
+                ct += n.labels.len()
+            } else {
+                panic!("Query requesting nodes returned something else: {:?}", r)
+            }
+        }
+        ct as i32
+    }
+
+    fn count_properties(world: &mut MyWorld) -> i32 {
+        let mut cursor = world.graph.new_cursor();
+        world
+            .graph
+            .run("MATCH (n) RETURN n", &mut cursor)
+            .expect("should succeed");
+        let mut ct = 0;
+        while let Some(r) = cursor.next().unwrap() {
+            if let Val::Node(n) = &r.slots[0] {
+                ct += n.props.len()
+            } else {
+                panic!("Query requesting nodes returned something else: {:?}", r)
+            }
+        }
+
+        world
+            .graph
+            .run("MATCH ()-[r]->() RETURN r", &mut cursor)
+            .expect("should succeed");
+        while let Some(r) = cursor.next().unwrap() {
+            if let Val::Rel(n) = &r.slots[0] {
+                ct += n.props.len()
+            } else {
+                panic!("Query requesting rels returned something else: {:?}", r)
+            }
+        }
+        ct as i32
+    }
+
     fn count_nodes(world: &mut MyWorld) -> i32 {
         let mut cursor = world.graph.new_cursor();
         world
@@ -172,10 +249,31 @@ mod example_steps {
         count_rows(&mut cursor).unwrap()
     }
 
+    fn count_rels(world: &mut MyWorld) -> i32 {
+        let mut cursor = world.graph.new_cursor();
+        world
+            .graph
+            .run("MATCH (n)-->() RETURN n", &mut cursor)
+            .expect("should succeed");
+        count_rows(&mut cursor).unwrap()
+    }
+
     fn assert_side_effect(world: &mut MyWorld, kind: &str, val: &str) {
         match kind {
             "+nodes" => assert_eq!(
                 count_nodes(world) - world.starting_graph_properties.node_count,
+                val.parse::<i32>().unwrap()
+            ),
+            "+relationships" => assert_eq!(
+                count_rels(world) - world.starting_graph_properties.relationship_count,
+                val.parse::<i32>().unwrap()
+            ),
+            "+labels" => assert_eq!(
+                count_labels(world) - world.starting_graph_properties.labels_count,
+                val.parse::<i32>().unwrap()
+            ),
+            "+properties" => assert_eq!(
+                count_properties(world) - world.starting_graph_properties.properties_count,
                 val.parse::<i32>().unwrap()
             ),
             _ => panic!(format!("unknown side effect: '{}'", kind)),
@@ -292,6 +390,15 @@ mod example_steps {
                             None => return ValMatcher::String(val),
                             Some(v) => val.push(v),
                         }
+                    }
+                }
+                't' | 'f' | 'n' => {
+                    let literal = parse_identifier(chars);
+                    match literal.as_str() {
+                        "true" => return ValMatcher::Bool(true),
+                        "false" => return ValMatcher::Bool(false),
+                        "null" => return ValMatcher::Null,
+                        _ => panic!("Unknown literal: {:?}"),
                     }
                 }
                 ' ' => {

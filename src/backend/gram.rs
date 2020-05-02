@@ -1814,6 +1814,7 @@ fn serialize_val(_ctx: &mut Context, v: &Val) -> String {
     match v {
         Val::String(s) => format!("\'{}\'", s),
         Val::Int(v) => format!("{}", v),
+        Val::Bool(v) => format!("{}", v),
         _ => panic!("Don't know how to serialize {:?}", v),
     }
 }
