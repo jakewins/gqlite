@@ -56,6 +56,8 @@ mod example_steps {
     #[derive(Debug, PartialEq, Clone)]
     pub enum ValMatcher {
         String(String),
+        Bool(bool),
+        Null,
         List(Vec<ValMatcher>),
         Map(Vec<(String, ValMatcher)>),
         Int(i64),
@@ -74,8 +76,30 @@ mod example_steps {
             match self {
                 ValMatcher::Int(e) => assert_eq!(Val::Int(*e), v),
                 ValMatcher::Float(e) => assert_eq!(Val::Float(*e), v),
+                ValMatcher::Bool(b) => assert_eq!(Val::Bool(*b), v),
+                ValMatcher::Null => assert_eq!(Val::Null, v),
                 ValMatcher::String(e) => assert_eq!(Val::String(e.clone()), v),
-                ValMatcher::Map(_) => panic!(".."),
+                ValMatcher::Map(es) => {
+                    if let Val::Map(actual) = v {
+                        if es.len() != actual.len() {
+                            panic!("Expected {:?}, got {:?} (not same length)", es, actual)
+                        }
+                        for (k, ev) in es {
+                            let mut found = false;
+                            for (ak, av) in &actual {
+                                if ak == k {
+                                    found = true;
+                                    ev.assert_eq(av.clone());
+                                }
+                            }
+                            if !found {
+                                panic!("map has unspecified property {}", k);
+                            }
+                        }
+                    } else {
+                        panic!("Expected a map, found {:?}", v)
+                    }
+                }
                 ValMatcher::List(expected) => match v {
                     Val::List(actual) => {
                         if expected.len() != actual.len() {
@@ -366,6 +390,15 @@ mod example_steps {
                             None => return ValMatcher::String(val),
                             Some(v) => val.push(v),
                         }
+                    }
+                }
+                't' | 'f' | 'n' => {
+                    let literal = parse_identifier(chars);
+                    match literal.as_str() {
+                        "true" => return ValMatcher::Bool(true),
+                        "false" => return ValMatcher::Bool(false),
+                        "null" => return ValMatcher::Null,
+                        _ => panic!("Unknown literal: {:?}"),
                     }
                 }
                 ' ' => {
