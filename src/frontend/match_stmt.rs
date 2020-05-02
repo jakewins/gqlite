@@ -1,5 +1,6 @@
 use super::{parse_pattern_graph, Dir, Expr, LogicalPlan, Pair, PlanningContext, Result, Rule};
 use crate::backend::Token;
+use crate::frontend::{Op, PatternNode};
 
 pub fn plan_match(
     pc: &mut PlanningContext,
@@ -91,15 +92,8 @@ pub fn plan_match(
     if !pattern_has_bound_nodes {
         if let Some(candidate_id) = candidate_id {
             let candidate = pg.v.get_mut(candidate_id).unwrap();
-            if candidate.labels.len() > 1 {
-                panic!("Multiple label match not yet implemented")
-            }
-            plan = LogicalPlan::NodeScan {
-                src: Box::new(plan),
-                slot: pc.get_or_alloc_slot(*candidate_id),
-                labels: candidate.labels.first().cloned(),
-            };
             candidate.solved = true;
+            plan = plan_match_node(pc, candidate, plan)?;
         }
     }
 
@@ -187,11 +181,7 @@ pub fn plan_match(
                 found_unsolved = true;
                 v.solved = true;
 
-                let inner = Box::new(LogicalPlan::NodeScan {
-                    src: Box::new(LogicalPlan::Argument),
-                    slot: pc.get_or_alloc_slot(v.identifier),
-                    labels: v.labels.first().cloned(),
-                });
+                let inner = Box::new(plan_match_node(pc, v, LogicalPlan::Argument)?);
                 plan = LogicalPlan::NestLoop {
                     outer: Box::new(plan),
                     inner,
@@ -222,6 +212,47 @@ pub fn plan_match(
             src: Box::new(plan),
             predicate: pred,
         });
+    }
+
+    Ok(plan)
+}
+
+fn plan_match_node(
+    pc: &mut PlanningContext,
+    v: &mut PatternNode,
+    src: LogicalPlan,
+) -> Result<LogicalPlan> {
+    if v.labels.len() > 1 {
+        bail!("Multiple label match not yet implemented")
+    }
+    // Getting all possible nodes..
+    let node_slot = pc.get_or_alloc_slot(v.identifier);
+    let mut plan = LogicalPlan::NodeScan {
+        src: Box::new(src),
+        slot: node_slot,
+        labels: v.labels.first().cloned(),
+    };
+
+    if !v.props.is_empty() {
+        // Need to filter on props
+        let mut and_terms = Vec::new();
+        for e in &v.props {
+            and_terms.push(Expr::BinaryOp {
+                left: Box::new(Expr::Prop(Box::new(Expr::Slot(node_slot)), vec![e.key])),
+                right: Box::new(e.val.clone()),
+                op: Op::Eq,
+            })
+        }
+
+        let predicate = if and_terms.len() == 1 {
+            and_terms[0].clone()
+        } else {
+            Expr::And(and_terms)
+        };
+        plan = LogicalPlan::Selection {
+            src: Box::new(plan),
+            predicate,
+        }
     }
 
     Ok(plan)
@@ -311,6 +342,41 @@ mod tests {
                     }),
                     op: Op::Eq
                 }
+            }
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn plan_match_with_inline_predicate() -> Result<(), Error> {
+        let mut p = plan("MATCH (n {name: 'David'})-->(m)")?;
+        let id_n = p.tokenize("n");
+        let id_m = p.tokenize("m");
+        let key_name = p.tokenize("name");
+
+        assert_eq!(
+            p.plan,
+            LogicalPlan::Expand {
+                src: Box::new(LogicalPlan::Selection {
+                    src: Box::new(LogicalPlan::NodeScan {
+                        src: Box::new(LogicalPlan::Argument),
+                        slot: p.slot(id_n),
+                        labels: None,
+                    }),
+                    predicate: Expr::BinaryOp {
+                        left: Box::new(Expr::Prop(
+                            Box::new(Expr::Slot(p.slot(id_n))),
+                            vec![key_name]
+                        )),
+                        right: Box::new(Expr::String("David".to_string())),
+                        op: Op::Eq
+                    }
+                }),
+                src_slot: p.slot(id_n),
+                rel_slot: 2,
+                dst_slot: p.slot(id_m),
+                rel_type: None,
+                dir: Some(Dir::Out)
             }
         );
         Ok(())

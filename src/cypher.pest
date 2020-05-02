@@ -6,7 +6,7 @@ and_expr = { term ~ (^"AND " ~ term)* }
 term = _{ binary_op | atom }
 
 binary_op = { atom ~ op ~ atom }
-op = ${ "=" | ">" }
+op = ${ "=" | ">" | "<>" }
 
 atom = _{ bool | float | int | prop_lookup | count_call | func_call | string | id | list | map | "(" ~ expr ~ ")" }
 

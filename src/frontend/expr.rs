@@ -11,6 +11,7 @@ use std::str::FromStr;
 #[derive(Debug, PartialEq, Clone)]
 pub enum Op {
     Eq,
+    NotEq,
     Gt,
 }
 
@@ -20,6 +21,7 @@ impl FromStr for Op {
     fn from_str(s: &str) -> Result<Self> {
         match s {
             "=" => Ok(Op::Eq),
+            "<>" => Ok(Op::NotEq),
             ">" => Ok(Op::Gt),
             _ => bail!("Unknown operator: {}", s),
         }
@@ -371,6 +373,14 @@ mod tests {
                 left: Box::new(Expr::Int(1)),
                 right: Box::new(Expr::Int(2)),
                 op: Op::Gt
+            },
+        );
+        assert_eq!(
+            plan("1 <> 2")?.expr,
+            Expr::BinaryOp {
+                left: Box::new(Expr::Int(1)),
+                right: Box::new(Expr::Int(2)),
+                op: Op::NotEq
             },
         );
         Ok(())

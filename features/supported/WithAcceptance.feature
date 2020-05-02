@@ -344,33 +344,33 @@ Feature: WithAcceptance
       | 1        |
     And no side effects
 
-#  Scenario: Multiple WITHs using a predicate and aggregation
-#    Given an empty graph
-#    And having executed:
-#      """
-#      CREATE (a {name: 'David'}),
-#             (b {name: 'Other'}),
-#             (c {name: 'NotOther'}),
-#             (d {name: 'NotOther2'}),
-#             (a)-[:REL]->(b),
-#             (a)-[:REL]->(c),
-#             (a)-[:REL]->(d),
-#             (b)-[:REL]->(),
-#             (b)-[:REL]->(),
-#             (c)-[:REL]->(),
-#             (c)-[:REL]->(),
-#             (d)-[:REL]->()
-#      """
-#    When executing query:
-#      """
-#      MATCH (david {name: 'David'})--(otherPerson)-->()
-#      WITH otherPerson, count(*) AS foaf
-#      WHERE foaf > 1
-#      WITH otherPerson
-#      WHERE otherPerson.name <> 'NotOther'
-#      RETURN count(*)
-#      """
-#    Then the result should be, in any order:
-#      | count(*) |
-#      | 1        |
-#    And no side effects
+  Scenario: Multiple WITHs using a predicate and aggregation
+    Given an empty graph
+    And having executed:
+      """
+      CREATE (a {name: 'David'}),
+             (b {name: 'Other'}),
+             (c {name: 'NotOther'}),
+             (d {name: 'NotOther2'}),
+             (a)-[:REL]->(b),
+             (a)-[:REL]->(c),
+             (a)-[:REL]->(d),
+             (b)-[:REL]->(),
+             (b)-[:REL]->(),
+             (c)-[:REL]->(),
+             (c)-[:REL]->(),
+             (d)-[:REL]->()
+      """
+    When executing query:
+      """
+      MATCH (david {name: 'David'})--(otherPerson)-->()
+      WITH otherPerson, count(*) AS foaf
+      WHERE foaf > 1
+      WITH otherPerson
+      WHERE otherPerson.name <> 'NotOther'
+      RETURN count(*)
+      """
+    Then the result should be, in any order:
+      | count(*) |
+      | 1        |
+    And no side effects
