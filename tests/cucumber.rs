@@ -74,7 +74,16 @@ mod example_steps {
     impl ValMatcher {
         pub fn assert_eq(&self, v: Val) {
             match self {
-                ValMatcher::Int(e) => assert_eq!(Val::Int(*e), v),
+                ValMatcher::Int(e) => {
+                    // The TCK writes float results in a way that doesn't let us distinguish
+                    // them from int results.. so we allow ints that are strictly equal here
+                    // as well
+                    if let Val::Float(av) = v {
+                        assert_eq!(*e as f64, av)
+                    } else {
+                        assert_eq!(Val::Int(*e), v)
+                    }
+                }
                 ValMatcher::Float(e) => assert_eq!(Val::Float(*e), v),
                 ValMatcher::Bool(b) => assert_eq!(Val::Bool(*b), v),
                 ValMatcher::Null => assert_eq!(Val::Null, v),
@@ -528,6 +537,11 @@ mod example_steps {
         };
 
         then "the result should be, in any order:" |mut world, step| {
+            // TODO note that this currently *does* enforce order
+            assert_result(&mut world, &step)
+        };
+
+        then "the result should be, in order:" |mut world, step| {
             assert_result(&mut world, &step)
         };
 

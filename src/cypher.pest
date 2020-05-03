@@ -2,9 +2,17 @@
 WHITESPACE = _{ " " | "\t" | "\r" | "\n" }
 
 expr = { and_expr ~ (^"OR " ~ and_expr)* }
-and_expr = { term ~ (^"AND " ~ term)* }
+and_expr = { add_sub_expr ~ (^"AND " ~ add_sub_expr)* }
+
+add_sub_expr = { mult_div_expr ~ (add_sub_op ~ mult_div_expr)* }
+add_sub_op = ${ "-" | "+" }
+
+mult_div_expr = { term ~ (mult_div_op ~ term)* }
+mult_div_op = ${ "*" | "/" }
+
 term = _{ binary_op | atom }
 
+// Need something where like blah() * b.name / 12 + count(*) is handled right
 binary_op = { atom ~ op ~ atom }
 op = ${ "=" | ">" | "<>" }
 

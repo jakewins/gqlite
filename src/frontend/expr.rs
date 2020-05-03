@@ -13,6 +13,10 @@ pub enum Op {
     Eq,
     NotEq,
     Gt,
+    Div,
+    Mul,
+    Add,
+    Sub,
 }
 
 impl FromStr for Op {
@@ -23,6 +27,10 @@ impl FromStr for Op {
             "=" => Ok(Op::Eq),
             "<>" => Ok(Op::NotEq),
             ">" => Ok(Op::Gt),
+            "/" => Ok(Op::Div),
+            "*" => Ok(Op::Mul),
+            "+" => Ok(Op::Add),
+            "-" => Ok(Op::Sub),
             _ => bail!("Unknown operator: {}", s),
         }
     }
@@ -111,7 +119,7 @@ pub(super) fn plan_expr(pc: &mut PlanningContext, expression: Pair<Rule>) -> Res
             Rule::and_expr => {
                 let mut and_expressions: Vec<Expr> = Vec::new();
                 for term in inner.into_inner() {
-                    and_expressions.push(plan_term(pc, term)?)
+                    and_expressions.push(plan_add_sub(pc, term)?)
                 }
                 let and_expr = if and_expressions.len() == 1 {
                     and_expressions.remove(0)
@@ -127,6 +135,67 @@ pub(super) fn plan_expr(pc: &mut PlanningContext, expression: Pair<Rule>) -> Res
         Ok(or_expressions.remove(0))
     } else {
         Ok(Expr::Or(or_expressions))
+    }
+}
+
+fn plan_add_sub(pc: &mut PlanningContext, item: Pair<Rule>) -> Result<Expr> {
+    match item.as_rule() {
+        Rule::add_sub_expr => {
+            // let mut out = None;
+            let mut inners = item.into_inner();
+            let mut out = plan_mul_div(pc, inners.next().unwrap())?;
+
+            // The parser guarantees there is at least one term (eg. *every* expression
+            // is wrapped in mult_div for precedence reasons), but there may not actually
+            // be any multiplication or division. If so we'll just return the out expression
+            // above on its own. If there are multiplication / division parts, we'll get them
+            // as (op, expr) groups here in this loop, so we use that to build up the
+            // multiplication expressions we want..
+            while let Some(op) = inners.next() {
+                // Ok so this expression actually does involve some multiplication or division,
+                // then the current "out" expression is the left term, we've got the op, and the
+                // parser should guarantee us another expression to go on the right:
+                let right = plan_mul_div(
+                    pc,
+                    inners
+                        .next()
+                        .ok_or(anyhow!("parser error: add / sub without right term?"))?,
+                )?;
+                out = Expr::BinaryOp {
+                    left: Box::new(out),
+                    right: Box::new(right),
+                    op: Op::from_str(op.as_str())?,
+                }
+            }
+            Ok(out)
+        }
+        _ => panic!("({:?}): {}", item.as_rule(), item.as_str()),
+    }
+}
+
+// See plan_add_sub
+fn plan_mul_div(pc: &mut PlanningContext, item: Pair<Rule>) -> Result<Expr> {
+    match item.as_rule() {
+        Rule::mult_div_expr => {
+            let mut inners = item.into_inner();
+            let mut out = plan_term(pc, inners.next().unwrap())?;
+
+            while let Some(op) = inners.next() {
+                let right = plan_term(
+                    pc,
+                    inners.next().ok_or(anyhow!(
+                        "parser error: multiplication / division without right term?"
+                    ))?,
+                )?;
+                out = Expr::BinaryOp {
+                    left: Box::new(out),
+                    right: Box::new(right),
+                    op: Op::from_str(op.as_str())?,
+                }
+            }
+            Ok(out)
+        }
+        _ => panic!("({:?}): {}", item.as_rule(), item.as_str()),
     }
 }
 
@@ -315,6 +384,31 @@ mod tests {
     #[test]
     fn plan_some_numbers() -> Result<()> {
         assert_eq!(plan("-1e-9")?.expr, Expr::Float(-1e-9));
+        Ok(())
+    }
+
+    #[test]
+    fn plan_arithmetic() -> Result<()> {
+        assert_eq!(
+            plan("12 / 4 * (3 - 2 * 4)")?.expr,
+            Expr::BinaryOp {
+                left: Box::new(Expr::BinaryOp {
+                    left: Box::new(Expr::Int(12)),
+                    right: Box::new(Expr::Int(4)),
+                    op: Op::Div
+                }),
+                right: Box::new(Expr::BinaryOp {
+                    left: Box::new(Expr::Int(3)),
+                    right: Box::new(Expr::BinaryOp {
+                        left: Box::new(Expr::Int(2)),
+                        right: Box::new(Expr::Int(4)),
+                        op: Op::Mul
+                    }),
+                    op: Op::Sub
+                }),
+                op: Op::Mul
+            }
+        );
         Ok(())
     }
 

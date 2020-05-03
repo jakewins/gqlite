@@ -290,6 +290,22 @@ impl GramBackend {
                     Box::new(self.convert_expr(*left)),
                     Box::new(self.convert_expr(*right)),
                 ),
+                frontend::Op::Mul => Expr::Mul(
+                    Box::new(self.convert_expr(*left)),
+                    Box::new(self.convert_expr(*right)),
+                ),
+                frontend::Op::Div => Expr::Div(
+                    Box::new(self.convert_expr(*left)),
+                    Box::new(self.convert_expr(*right)),
+                ),
+                frontend::Op::Add => Expr::Add(
+                    Box::new(self.convert_expr(*left)),
+                    Box::new(self.convert_expr(*right)),
+                ),
+                frontend::Op::Sub => Expr::Sub(
+                    Box::new(self.convert_expr(*left)),
+                    Box::new(self.convert_expr(*right)),
+                ),
             },
 
             frontend::Expr::Prop(e, props) => Expr::Prop(Box::new(self.convert_expr(*e)), props),
@@ -316,6 +332,9 @@ impl GramBackend {
                 if name == tokens.tokenize("not") {
                     let convargs = args.iter().map(|i| self.convert_expr(i.clone())).collect();
                     return Expr::Call(functions::Func::Not, convargs);
+                } else if name == tokens.tokenize("abs") {
+                    let convargs = args.iter().map(|i| self.convert_expr(i.clone())).collect();
+                    return Expr::Call(functions::Func::Abs, convargs);
                 } else {
                     panic!("Unknown function: {:?}", tokens.lookup(name).unwrap(),)
                 }
@@ -465,6 +484,11 @@ enum Expr {
     Gt(Box<Expr>, Box<Expr>),
     Equal(Box<Expr>, Box<Expr>),
 
+    Mul(Box<Expr>, Box<Expr>),
+    Div(Box<Expr>, Box<Expr>),
+    Add(Box<Expr>, Box<Expr>),
+    Sub(Box<Expr>, Box<Expr>),
+
     HasLabel { slot: usize, label: Token },
 }
 
@@ -530,6 +554,71 @@ impl Expr {
                 let b_val = b.eval(ctx, row)?;
                 let eq = a_val.eq(&b_val);
                 Ok(GramVal::Lit(Val::Bool(eq)))
+            }
+            Expr::Mul(a, b) => {
+                let a_val = a.eval(ctx, row)?;
+                let b_val = b.eval(ctx, row)?;
+                match (&a_val, &b_val) {
+                    (GramVal::Lit(Val::Int(a_int)), GramVal::Lit(Val::Int(b_int))) => {
+                        Ok(GramVal::Lit(Val::Int(a_int * b_int)))
+                    }
+                    (GramVal::Lit(Val::Float(a_int)), GramVal::Lit(Val::Int(b_int))) => {
+                        Ok(GramVal::Lit(Val::Float(a_int * *b_int as f64)))
+                    }
+                    _ => bail!(
+                        "gram backend does not support multiplication of {:?} and {:?}",
+                        a_val,
+                        b_val
+                    ),
+                }
+            }
+            Expr::Div(a, b) => {
+                let a_val = a.eval(ctx, row)?;
+                let b_val = b.eval(ctx, row)?;
+                match (&a_val, &b_val) {
+                    (GramVal::Lit(Val::Int(a_int)), GramVal::Lit(Val::Int(b_int))) => {
+                        Ok(GramVal::Lit(Val::Float(*a_int as f64 / *b_int as f64)))
+                    }
+                    _ => bail!(
+                        "gram backend does not support division of {:?} and {:?}",
+                        a_val,
+                        b_val
+                    ),
+                }
+            }
+            Expr::Add(a, b) => {
+                let a_val = a.eval(ctx, row)?;
+                let b_val = b.eval(ctx, row)?;
+                match (&a_val, &b_val) {
+                    (GramVal::Lit(Val::Int(a_int)), GramVal::Lit(Val::Int(b_int))) => {
+                        Ok(GramVal::Lit(Val::Int(a_int + b_int)))
+                    }
+                    _ => bail!(
+                        "gram backend does not support addition of {:?} and {:?}",
+                        a_val,
+                        b_val
+                    ),
+                }
+            }
+            Expr::Sub(a, b) => {
+                let a_val = a.eval(ctx, row)?;
+                let b_val = b.eval(ctx, row)?;
+                match (&a_val, &b_val) {
+                    (GramVal::Lit(Val::Int(a_int)), GramVal::Lit(Val::Int(b_int))) => {
+                        Ok(GramVal::Lit(Val::Int(a_int - b_int)))
+                    }
+                    (GramVal::Lit(Val::Int(a_int)), GramVal::Lit(Val::Float(b_float))) => {
+                        Ok(GramVal::Lit(Val::Float(*a_int as f64 - *b_float)))
+                    }
+                    (GramVal::Lit(Val::Float(a_float)), GramVal::Lit(Val::Int(b_int))) => {
+                        Ok(GramVal::Lit(Val::Float(a_float - *b_int as f64)))
+                    }
+                    _ => bail!(
+                        "gram backend does not support subtraction of {:?} and {:?}",
+                        a_val,
+                        b_val
+                    ),
+                }
             }
             Expr::And(terms) => {
                 for t in terms {
@@ -1837,6 +1926,7 @@ mod functions {
     #[derive(Debug, Clone)]
     pub(super) enum Func {
         Not,
+        Abs,
     }
 
     impl Func {
@@ -1848,6 +1938,11 @@ mod functions {
                         v => bail!("don't know how to do NOT({:?})", v),
                     },
                     v => bail!("don't know how to do NOT({:?})", v),
+                },
+                Func::Abs => match args.get(0).ok_or(anyhow!("ABS takes one argument"))? {
+                    GramVal::Lit(Val::Int(v)) => Ok(GramVal::Lit(Val::Int(v.abs()))),
+                    GramVal::Lit(Val::Float(v)) => Ok(GramVal::Lit(Val::Float(v.abs()))),
+                    v => bail!("don't know how to take ABS({:?})", v),
                 },
             }
         }
