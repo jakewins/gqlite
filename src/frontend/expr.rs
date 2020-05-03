@@ -364,9 +364,9 @@ mod tests {
             backend_desc: BackendDesc::new(vec![]),
         };
         let mut pc = PlanningContext::new(Rc::clone(&tokens), &backend_desc);
-        let plan = frontend.plan_in_context(&format!("RETURN {}", q), &mut pc);
+        let plan = frontend.plan_in_context(&format!("WITH {}", q), &mut pc);
 
-        if let Ok(LogicalPlan::Return {
+        if let Ok(LogicalPlan::Project {
             src: _,
             projections,
         }) = plan

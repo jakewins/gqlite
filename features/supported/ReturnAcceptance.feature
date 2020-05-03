@@ -244,22 +244,22 @@ Feature: ReturnAcceptance
 #      | (:Singleton) |
 #    And no side effects
 
-#  Scenario: Support ordering by a property after being distinct-ified
-#    Given an empty graph
-#    And having executed:
-#      """
-#      CREATE (:A)-[:T]->(:B)
-#      """
-#    When executing query:
-#      """
-#      MATCH (a)-->(b)
-#      RETURN DISTINCT b
-#        ORDER BY b.name
-#      """
-#    Then the result should be, in order:
-#      | b    |
-#      | (:B) |
-#    And no side effects
+  Scenario: Support ordering by a property after being distinct-ified
+    Given an empty graph
+    And having executed:
+      """
+      CREATE (:A)-[:T]->(:B)
+      """
+    When executing query:
+      """
+      MATCH (a)-->(b)
+      RETURN DISTINCT b
+        ORDER BY b.name
+      """
+    Then the result should be, in order:
+      | b    |
+      | (:B) |
+    And no side effects
 
   Scenario: Arithmetic precedence test
     Given any graph

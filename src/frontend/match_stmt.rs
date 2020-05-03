@@ -389,20 +389,23 @@ mod tests {
 
         assert_eq!(
             p.plan,
-            LogicalPlan::Return {
-                src: Box::new(LogicalPlan::Optional {
-                    src: Box::new(LogicalPlan::NodeScan {
-                        src: Box::new(LogicalPlan::Argument),
-                        slot: p.slot(id_n),
-                        labels: None,
+            LogicalPlan::ProduceResult {
+                src: Box::new(LogicalPlan::Project {
+                    src: Box::new(LogicalPlan::Optional {
+                        src: Box::new(LogicalPlan::NodeScan {
+                            src: Box::new(LogicalPlan::Argument),
+                            slot: p.slot(id_n),
+                            labels: None,
+                        }),
+                        slots: vec![p.slot(id_n)]
                     }),
-                    slots: vec![p.slot(id_n)]
+                    projections: vec![Projection {
+                        expr: Expr::Slot(p.slot(id_n)),
+                        alias: id_n,
+                        dst: p.slot(id_n)
+                    }]
                 }),
-                projections: vec![Projection {
-                    expr: Expr::Slot(p.slot(id_n)),
-                    alias: id_n,
-                    dst: p.slot(id_n)
-                }]
+                fields: vec![(id_n, p.slot(id_n))]
             }
         );
         Ok(())
@@ -416,34 +419,37 @@ mod tests {
 
         assert_eq!(
             p.plan,
-            LogicalPlan::Return {
-                src: Box::new(LogicalPlan::NestLoop {
-                    outer: Box::new(LogicalPlan::NodeScan {
-                        src: Box::new(LogicalPlan::Argument),
-                        slot: p.slot(id_a),
-                        labels: None,
+            LogicalPlan::ProduceResult {
+                src: Box::new(LogicalPlan::Project {
+                    src: Box::new(LogicalPlan::NestLoop {
+                        outer: Box::new(LogicalPlan::NodeScan {
+                            src: Box::new(LogicalPlan::Argument),
+                            slot: p.slot(id_a),
+                            labels: None,
+                        }),
+                        inner: Box::new(LogicalPlan::NodeScan {
+                            src: Box::new(LogicalPlan::Argument),
+                            slot: p.slot(id_b),
+                            labels: None,
+                        }),
+                        // always-true predicate makes this a cartesian product, every row combo will
+                        // match the join condition
+                        predicate: Expr::Bool(true),
                     }),
-                    inner: Box::new(LogicalPlan::NodeScan {
-                        src: Box::new(LogicalPlan::Argument),
-                        slot: p.slot(id_b),
-                        labels: None,
-                    }),
-                    // always-true predicate makes this a cartesian product, every row combo will
-                    // match the join condition
-                    predicate: Expr::Bool(true),
+                    projections: vec![
+                        Projection {
+                            expr: Expr::Slot(p.slot(id_a)),
+                            alias: id_a,
+                            dst: p.slot(id_a)
+                        },
+                        Projection {
+                            expr: Expr::Slot(p.slot(id_b)),
+                            alias: id_b,
+                            dst: p.slot(id_b)
+                        }
+                    ]
                 }),
-                projections: vec![
-                    Projection {
-                        expr: Expr::Slot(p.slot(id_a)),
-                        alias: id_a,
-                        dst: p.slot(id_a)
-                    },
-                    Projection {
-                        expr: Expr::Slot(p.slot(id_b)),
-                        alias: id_b,
-                        dst: p.slot(id_b)
-                    }
-                ]
+                fields: vec![(id_a, p.slot(id_a)), (id_b, p.slot(id_b))]
             }
         );
         Ok(())

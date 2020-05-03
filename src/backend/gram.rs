@@ -164,22 +164,11 @@ impl GramBackend {
                 next_index: 0,
                 dst: alias,
             })),
-            LogicalPlan::Return { src, projections } => {
-                let mut converted_projections = Vec::new();
-                for projection in projections {
-                    converted_projections.push(Projection {
-                        expr: self.convert_expr(projection.expr),
-                        alias: projection.alias,
-                        slot: projection.dst,
-                    })
-                }
-
-                Ok(Box::new(Return {
-                    src: self.convert(*src)?,
-                    projections: converted_projections,
-                    print_header: true,
-                }))
-            }
+            LogicalPlan::ProduceResult { src, fields } => Ok(Box::new(ProduceResults {
+                src: self.convert(*src)?,
+                fields,
+                print_header: true,
+            })),
             LogicalPlan::Project { src, projections } => {
                 let mut converted_projections = Vec::new();
                 for projection in projections {
@@ -378,9 +367,7 @@ impl Backend for GramBackend {
 
     fn eval(&mut self, plan: LogicalPlan, cursor: &mut GramCursor) -> Result<(), Error> {
         let slots = match &plan {
-            LogicalPlan::Return { projections, .. } => {
-                projections.iter().map(|p| (p.alias, p.dst)).collect()
-            }
+            LogicalPlan::ProduceResult { fields, .. } => fields.clone(),
             _ => Vec::new(),
         };
         if cursor.projection.slots.len() < slots.len() {
@@ -1089,37 +1076,32 @@ impl Operator for Create {
 }
 
 #[derive(Debug)]
-struct Return {
+struct ProduceResults {
     pub src: Box<dyn Operator>,
-    pub projections: Vec<Projection>,
+    pub fields: Vec<(Token, usize)>,
     print_header: bool,
 }
 
-impl Operator for Return {
+impl Operator for ProduceResults {
     fn next(&mut self, ctx: &mut Context, out: &mut GramRow) -> Result<bool> {
         if self.print_header {
             println!("----");
             let mut first = true;
-            for cell in &self.projections {
+            for (token, _) in &self.fields {
+                let toks = ctx.tokens.borrow();
+                let field_name = toks.lookup(*token).unwrap();
                 if first {
-                    print!("{}", cell.alias);
+                    print!("{}", field_name);
                     first = false
                 } else {
-                    print!(", {}", cell.alias)
+                    print!(", {}", field_name)
                 }
             }
             println!();
             println!("----");
             self.print_header = false;
         }
-        if self.src.next(ctx, out)? {
-            for cell in &self.projections {
-                out.slots[cell.slot] = cell.expr.eval(ctx, out)?;
-            }
-            // Do this to 'yield' one row at a time to the cursor
-            return Ok(true);
-        }
-        Ok(false)
+        self.src.next(ctx, out)
     }
 }
 
