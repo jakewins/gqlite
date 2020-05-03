@@ -87,7 +87,7 @@ distinct_clause = { ^"DISTINCT" }
 where_clause = { ^"WHERE" ~ expr }
 
 order_clause = { ^"ORDER BY" ~ order_expr ~ ( "," ~ order_expr )* }
-order_expr = { expr ~ (^"DESC")? }
+order_expr = { expr ~ (^"DESC" | ^"ASC")? }
 
 skip_clause = { ^"SKIP" ~ expr }
 limit_clause = { ^"LIMIT" ~ expr }

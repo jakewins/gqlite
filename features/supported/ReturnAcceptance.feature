@@ -61,52 +61,52 @@ Feature: ReturnAcceptance
       | 1 |
     And no side effects
 
-#  Scenario: Limit to two hits with explicit order
-#    Given an empty graph
-#    And having executed:
-#      """
-#      CREATE ({name: 'A'}),
-#        ({name: 'B'}),
-#        ({name: 'C'}),
-#        ({name: 'D'}),
-#        ({name: 'E'})
-#      """
-#    When executing query:
-#      """
-#      MATCH (n)
-#      RETURN n
-#      ORDER BY n.name ASC
-#      LIMIT 2
-#      """
-#    Then the result should be, in any order:
-#      | n             |
-#      | ({name: 'A'}) |
-#      | ({name: 'B'}) |
-#    And no side effects
+  Scenario: Limit to two hits with explicit order
+    Given an empty graph
+    And having executed:
+      """
+      CREATE ({name: 'A'}),
+        ({name: 'B'}),
+        ({name: 'C'}),
+        ({name: 'D'}),
+        ({name: 'E'})
+      """
+    When executing query:
+      """
+      MATCH (n)
+      RETURN n
+      ORDER BY n.name ASC
+      LIMIT 2
+      """
+    Then the result should be, in any order:
+      | n             |
+      | ({name: 'A'}) |
+      | ({name: 'B'}) |
+    And no side effects
 
-#  Scenario: Start the result from the second row
-#    Given an empty graph
-#    And having executed:
-#      """
-#      CREATE ({name: 'A'}),
-#        ({name: 'B'}),
-#        ({name: 'C'}),
-#        ({name: 'D'}),
-#        ({name: 'E'})
-#      """
-#    When executing query:
-#      """
-#      MATCH (n)
-#      RETURN n
-#      ORDER BY n.name ASC
-#      SKIP 2
-#      """
-#    Then the result should be, in order:
-#      | n             |
-#      | ({name: 'C'}) |
-#      | ({name: 'D'}) |
-#      | ({name: 'E'}) |
-#    And no side effects
+  Scenario: Start the result from the second row
+    Given an empty graph
+    And having executed:
+      """
+      CREATE ({name: 'A'}),
+        ({name: 'B'}),
+        ({name: 'C'}),
+        ({name: 'D'}),
+        ({name: 'E'})
+      """
+    When executing query:
+      """
+      MATCH (n)
+      RETURN n
+      ORDER BY n.name ASC
+      SKIP 2
+      """
+    Then the result should be, in order:
+      | n             |
+      | ({name: 'C'}) |
+      | ({name: 'D'}) |
+      | ({name: 'E'}) |
+    And no side effects
 
 #  Scenario: Start the result from the second row by param
 #    Given an empty graph
@@ -134,29 +134,29 @@ Feature: ReturnAcceptance
 #      | ({name: 'E'}) |
 #    And no side effects
 
-#  Scenario: Get rows in the middle
-#    Given an empty graph
-#    And having executed:
-#      """
-#      CREATE ({name: 'A'}),
-#        ({name: 'B'}),
-#        ({name: 'C'}),
-#        ({name: 'D'}),
-#        ({name: 'E'})
-#      """
-#    When executing query:
-#      """
-#      MATCH (n)
-#      RETURN n
-#      ORDER BY n.name ASC
-#      SKIP 2
-#      LIMIT 2
-#      """
-#    Then the result should be, in order:
-#      | n             |
-#      | ({name: 'C'}) |
-#      | ({name: 'D'}) |
-#    And no side effects
+  Scenario: Get rows in the middle
+    Given an empty graph
+    And having executed:
+      """
+      CREATE ({name: 'A'}),
+        ({name: 'B'}),
+        ({name: 'C'}),
+        ({name: 'D'}),
+        ({name: 'E'})
+      """
+    When executing query:
+      """
+      MATCH (n)
+      RETURN n
+      ORDER BY n.name ASC
+      SKIP 2
+      LIMIT 2
+      """
+    Then the result should be, in order:
+      | n             |
+      | ({name: 'C'}) |
+      | ({name: 'D'}) |
+    And no side effects
 
 #  Scenario: Get rows in the middle by param
 #    Given an empty graph
