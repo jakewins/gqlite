@@ -47,19 +47,19 @@ Feature: ReturnAcceptance
       | 104           |
     And no side effects
 
-#  Scenario: Limit to two hits
-#    Given an empty graph
-#    When executing query:
-#      """
-#      UNWIND [1, 1, 1, 1, 1] AS i
-#      RETURN i
-#      LIMIT 2
-#      """
-#    Then the result should be, in any order:
-#      | i |
-#      | 1 |
-#      | 1 |
-#    And no side effects
+  Scenario: Limit to two hits
+    Given an empty graph
+    When executing query:
+      """
+      UNWIND [1, 1, 1, 1, 1] AS i
+      RETURN i
+      LIMIT 2
+      """
+    Then the result should be, in any order:
+      | i |
+      | 1 |
+      | 1 |
+    And no side effects
 
 #  Scenario: Limit to two hits with explicit order
 #    Given an empty graph
@@ -207,26 +207,26 @@ Feature: ReturnAcceptance
 #      | 'C'        | 55         |
 #    And no side effects
 
-#  Scenario: Support sort and distinct
-#    Given an empty graph
-#    And having executed:
-#      """
-#      CREATE ({name: 'A'}),
-#        ({name: 'B'}),
-#        ({name: 'C'})
-#      """
-#    When executing query:
-#      """
-#      MATCH (a)
-#      RETURN DISTINCT a
-#        ORDER BY a.name
-#      """
-#    Then the result should be, in order:
-#      | a             |
-#      | ({name: 'A'}) |
-#      | ({name: 'B'}) |
-#      | ({name: 'C'}) |
-#    And no side effects
+  Scenario: Support sort and distinct
+    Given an empty graph
+    And having executed:
+      """
+      CREATE ({name: 'A'}),
+        ({name: 'B'}),
+        ({name: 'C'})
+      """
+    When executing query:
+      """
+      MATCH (a)
+      RETURN DISTINCT a
+        ORDER BY a.name
+      """
+    Then the result should be, in order:
+      | a             |
+      | ({name: 'A'}) |
+      | ({name: 'B'}) |
+      | ({name: 'C'}) |
+    And no side effects
 
 #  Scenario: Support column renaming
 #    Given an empty graph
