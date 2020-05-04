@@ -228,21 +228,21 @@ Feature: ReturnAcceptance
       | ({name: 'C'}) |
     And no side effects
 
-#  Scenario: Support column renaming
-#    Given an empty graph
-#    And having executed:
-#      """
-#      CREATE (:Singleton)
-#      """
-#    When executing query:
-#      """
-#      MATCH (a)
-#      RETURN a AS ColumnName
-#      """
-#    Then the result should be, in any order:
-#      | ColumnName   |
-#      | (:Singleton) |
-#    And no side effects
+  Scenario: Support column renaming
+    Given an empty graph
+    And having executed:
+      """
+      CREATE (:Singleton)
+      """
+    When executing query:
+      """
+      MATCH (a)
+      RETURN a AS ColumnName
+      """
+    Then the result should be, in any order:
+      | ColumnName   |
+      | (:Singleton) |
+    And no side effects
 
   Scenario: Support ordering by a property after being distinct-ified
     Given an empty graph

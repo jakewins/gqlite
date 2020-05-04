@@ -37,6 +37,8 @@ pub trait Backend: Debug {
 // Like with the public API Cursor, this is almost equivalent to an iterator, except each
 // iteration can be done without allocation.
 pub trait BackendCursor {
+    // TODO is there a nice way to do this without copying out the strings?
+    fn fields(&self) -> Vec<String>;
     // TODO I think we'd want a try_fold implementation here, to allow an opt-in version
     //      of interior iteration, assuming benchmarking show that makes a difference.
 

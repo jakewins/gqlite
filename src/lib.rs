@@ -75,6 +75,10 @@ pub struct Cursor<B: Backend> {
 }
 
 impl<B: Backend> Cursor<B> {
+    pub fn fields(&self) -> Vec<String> {
+        self.inner.fields()
+    }
+
     pub fn next(&mut self) -> Result<Option<&Row>> {
         self.inner.next()
     }

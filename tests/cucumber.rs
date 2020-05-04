@@ -125,7 +125,7 @@ mod example_steps {
                             for (ak, av) in &actual {
                                 if ak == k {
                                     found = true;
-                                    ev.test_eq(av.clone());
+                                    ev.test_eq(av.clone())?;
                                 }
                             }
                             if !found {
@@ -342,7 +342,10 @@ mod example_steps {
         if empty {
             let row = world.result.next().unwrap();
             assert_eq!(true, row.is_none(), "expected empty result");
+            assert_eq!(world.result.fields(), table.rows[0]);
             return;
+        } else {
+            assert_eq!(world.result.fields(), table.header);
         }
 
         for mut row in table.rows {
@@ -372,7 +375,10 @@ mod example_steps {
         if empty {
             let row = world.result.next().unwrap();
             assert_eq!(true, row.is_none(), "expected empty result");
+            assert_eq!(world.result.fields(), table.rows[0]);
             return;
+        } else {
+            assert_eq!(world.result.fields(), table.header);
         }
 
         // It makes debugging way easier for the cases where there is just one result row

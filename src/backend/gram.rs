@@ -425,6 +425,15 @@ pub struct GramCursor {
 }
 
 impl BackendCursor for GramCursor {
+    fn fields(&self) -> Vec<String> {
+        let mut out = Vec::with_capacity(self.slots.len());
+        let toks = self.ctx.tokens.borrow();
+        for (tok, _) in &self.slots {
+            out.push(toks.lookup(*tok).unwrap().to_string());
+        }
+        return out;
+    }
+
     fn next(&mut self) -> Result<Option<&Row>> {
         if let Some(p) = &mut self.plan {
             // TODO hackety hack: If there are no slots to project, just spin through the tree
