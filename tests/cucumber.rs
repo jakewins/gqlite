@@ -3,6 +3,9 @@ use gqlite::gramdb::{GramCursor, GramDatabase};
 use gqlite::Database;
 use tempfile::tempfile;
 
+#[macro_use]
+extern crate anyhow;
+
 pub struct GraphProperties {
     node_count: i32,
     relationship_count: i32,
@@ -43,12 +46,36 @@ impl std::default::Default for MyWorld {
 
 mod example_steps {
     use super::{empty_db, MyWorld};
+    use anyhow::Result;
     use cucumber::{steps, Step};
     use gqlite::gramdb::GramCursor;
     use gqlite::{Error, Val};
 
     use std::iter::Peekable;
     use std::str::Chars;
+
+    macro_rules! ensure_eq {
+        ($left:expr, $right:expr) => {{
+            match (&$left, &$right) {
+                (left_val, right_val) => {
+                    if !(*left_val == *right_val) {
+                        bail!(
+                            r#"assertion failed: `(left == right)`
+      left: `{:?}`,
+     right: `{:?}`"#,
+                            &*left_val,
+                            &*right_val
+                        )
+                    } else {
+                        Ok(())
+                    }
+                }
+            }
+        }};
+        ($left:expr, $right:expr,) => {{
+            $crate::assert_eq!($left, $right)
+        }};
+    }
 
     // The OpenCypher spec contains an unspecified language to describe assertions;
     // we have an informal parser for that language which yields these matchers
@@ -72,61 +99,64 @@ mod example_steps {
     }
 
     impl ValMatcher {
-        pub fn assert_eq(&self, v: Val) {
+        pub fn test_eq(&self, v: Val) -> Result<()> {
             match self {
                 ValMatcher::Int(e) => {
                     // The TCK writes float results in a way that doesn't let us distinguish
                     // them from int results.. so we allow ints that are strictly equal here
                     // as well
                     if let Val::Float(av) = v {
-                        assert_eq!(*e as f64, av)
+                        ensure_eq!(*e as f64, av)
                     } else {
-                        assert_eq!(Val::Int(*e), v)
+                        ensure_eq!(Val::Int(*e), v)
                     }
                 }
-                ValMatcher::Float(e) => assert_eq!(Val::Float(*e), v),
-                ValMatcher::Bool(b) => assert_eq!(Val::Bool(*b), v),
-                ValMatcher::Null => assert_eq!(Val::Null, v),
-                ValMatcher::String(e) => assert_eq!(Val::String(e.clone()), v),
+                ValMatcher::Float(e) => ensure_eq!(Val::Float(*e), v),
+                ValMatcher::Bool(b) => ensure_eq!(Val::Bool(*b), v),
+                ValMatcher::Null => ensure_eq!(Val::Null, v),
+                ValMatcher::String(e) => ensure_eq!(Val::String(e.clone()), v),
                 ValMatcher::Map(es) => {
                     if let Val::Map(actual) = v {
                         if es.len() != actual.len() {
-                            panic!("Expected {:?}, got {:?} (not same length)", es, actual)
+                            bail!("Expected {:?}, got {:?} (not same length)", es, actual)
                         }
                         for (k, ev) in es {
                             let mut found = false;
                             for (ak, av) in &actual {
                                 if ak == k {
                                     found = true;
-                                    ev.assert_eq(av.clone());
+                                    ev.test_eq(av.clone());
                                 }
                             }
                             if !found {
-                                panic!("map has unspecified property {}", k);
+                                bail!("map has unspecified property {}", k);
                             }
                         }
+                        Ok(())
                     } else {
-                        panic!("Expected a map, found {:?}", v)
+                        bail!("Expected a map, found {:?}", v)
                     }
                 }
                 ValMatcher::List(expected) => match v {
                     Val::List(actual) => {
                         if expected.len() != actual.len() {
-                            panic!(
+                            bail!(
                                 "Expected {:?}, got {:?} (not same length)",
-                                expected, actual
+                                expected,
+                                actual
                             )
                         }
                         for i in 0..expected.len() {
-                            expected[i].assert_eq(actual[i].clone())
+                            expected[i].test_eq(actual[i].clone())?;
                         }
+                        Ok(())
                     }
-                    _ => panic!("Expected a list, found {:?}", v),
+                    _ => bail!("Expected a list, found {:?}", v),
                 },
                 ValMatcher::Node { props, labels } => {
                     if let Val::Node(n) = v {
                         if n.props.len() != props.len() {
-                            panic!("Node has different number of properties from spec, expected {:?}, got {:?}",
+                            bail!("Node has different number of properties from spec, expected {:?}, got {:?}",
                                    props, n.props);
                         }
                         for (k, prop_val) in &n.props {
@@ -134,16 +164,16 @@ mod example_steps {
                             for (ek, ev) in props {
                                 if ek == k {
                                     found = true;
-                                    ev.assert_eq(prop_val.clone());
+                                    ev.test_eq(prop_val.clone())?;
                                 }
                             }
                             if !found {
-                                panic!("Node has unspecified property {}", k);
+                                bail!("Node has unspecified property {}", k);
                             }
                         }
 
                         if n.labels.len() != labels.len() {
-                            panic!("Node has different number of labels from spec, expected {:?}, got {:?}", labels, n.labels);
+                            bail!("Node has different number of labels from spec, expected {:?}, got {:?}", labels, n.labels);
                         }
                         for l in labels {
                             let mut found = false;
@@ -154,21 +184,23 @@ mod example_steps {
                                 }
                             }
                             if !found {
-                                panic!(
+                                bail!(
                                     "Missing expected labels. Expected {:?}, got {:?}",
-                                    labels, n.labels
+                                    labels,
+                                    n.labels
                                 );
                             }
                         }
+                        Ok(())
                     } else {
-                        panic!("Expected a node, found {:?}", v);
+                        bail!("Expected a node, found {:?}", v);
                     }
                 }
                 ValMatcher::Rel { reltype } => {
                     if let Val::Rel(r) = v {
-                        assert_eq!(reltype, &r.rel_type)
+                        ensure_eq!(reltype, &r.rel_type)
                     } else {
-                        panic!("Expected a rel, found {:?}", v);
+                        bail!("Expected a rel, found {:?}", v);
                     }
                 }
             }
@@ -317,12 +349,78 @@ mod example_steps {
             if let Some(actual) = world.result.next().unwrap() {
                 for slot in 0..row.len() {
                     str_to_val(&mut row[slot].chars().peekable())
-                        .assert_eq(actual.slots[slot].clone());
+                        .test_eq(actual.slots[slot].clone())
+                        .unwrap();
                 }
             } else {
                 assert_eq!(false, true, "Expected more results");
             }
         }
+    }
+
+    fn assert_result_in_any_order(world: &mut MyWorld, step: &Step) {
+        let table = step.table().unwrap().clone();
+
+        // So.. the rust cucumber parser treats one-row tables as having empty headers
+        // but the TCK uses headers in empty tables, to specify the column names.. so this
+        // is to detect that case
+        let mut empty = table.rows.len() == 1;
+        for c in &table.header {
+            empty = empty && c.is_empty();
+        }
+
+        if empty {
+            let row = world.result.next().unwrap();
+            assert_eq!(true, row.is_none(), "expected empty result");
+            return;
+        }
+
+        // It makes debugging way easier for the cases where there is just one result row
+        // if we use the ordered assertion
+        if table.rows.len() == 1 {
+            assert_result(world, step);
+            return;
+        }
+
+        let mut expected_rows = table.rows;
+
+        while let Some(actual) = world.result.next().unwrap() {
+            // Find any row in the remaining result that matches
+            let mut matching_row = None;
+            let mut row_equal = Ok(());
+            for (index, row) in expected_rows.iter().enumerate() {
+                row_equal = Ok(());
+                let mut row_copy = row.clone();
+                for slot in 0..row.len() {
+                    let slot_equal = str_to_val(&mut row_copy[slot].chars().peekable())
+                        .test_eq(actual.slots[slot].clone());
+                    if slot_equal.is_err() {
+                        row_equal = slot_equal;
+                        break;
+                    }
+                }
+                if row_equal.is_ok() {
+                    // Found matching row
+                    matching_row = Some(index);
+                    break;
+                }
+            }
+
+            // If we found a row that matched, remove it from the set of expected rows..
+            if let Some(index) = matching_row {
+                expected_rows.remove(index);
+            } else {
+                // Found no matching row; are there any expected rows left?
+                if expected_rows.is_empty() {
+                    panic!("Expected no more rows, got {:?}", actual)
+                } else {
+                    panic!("Got row that does not match any expected rows: {:?}. Expected rows are: {:?}, last error was {:?}", actual, expected_rows, row_equal)
+                }
+            }
+        }
+
+        // And then there should be no desired rows left
+        assert_eq!(0, expected_rows.len(), "{:?}", expected_rows)
     }
 
     fn str_to_val(mut chars: &mut Peekable<Chars>) -> ValMatcher {
@@ -537,8 +635,7 @@ mod example_steps {
         };
 
         then "the result should be, in any order:" |mut world, step| {
-            // TODO note that this currently *does* enforce order
-            assert_result(&mut world, &step)
+            assert_result_in_any_order(&mut world, &step)
         };
 
         then "the result should be, in order:" |mut world, step| {

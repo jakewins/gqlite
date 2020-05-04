@@ -185,27 +185,27 @@ Feature: ReturnAcceptance
 #      | ({name: 'D'}) |
 #    And no side effects
 
-#  Scenario: Sort on aggregated function
-#    Given an empty graph
-#    And having executed:
-#      """
-#      CREATE ({division: 'A', age: 22}),
-#        ({division: 'B', age: 33}),
-#        ({division: 'B', age: 44}),
-#        ({division: 'C', age: 55})
-#      """
-#    When executing query:
-#      """
-#      MATCH (n)
-#      RETURN n.division, max(n.age)
-#        ORDER BY max(n.age)
-#      """
-#    Then the result should be, in order:
-#      | n.division | max(n.age) |
-#      | 'A'        | 22         |
-#      | 'B'        | 44         |
-#      | 'C'        | 55         |
-#    And no side effects
+  Scenario: Sort on aggregated function
+    Given an empty graph
+    And having executed:
+      """
+      CREATE ({division: 'A', age: 22}),
+        ({division: 'B', age: 33}),
+        ({division: 'B', age: 44}),
+        ({division: 'C', age: 55})
+      """
+    When executing query:
+      """
+      MATCH (n)
+      RETURN n.division, max(n.age)
+        ORDER BY max(n.age)
+      """
+    Then the result should be, in order:
+      | n.division | max(n.age) |
+      | 'A'        | 22         |
+      | 'B'        | 44         |
+      | 'C'        | 55         |
+    And no side effects
 
   Scenario: Support sort and distinct
     Given an empty graph
@@ -283,24 +283,24 @@ Feature: ReturnAcceptance
       | -15                  |
     And no side effects
 
-#  Scenario: Count star should count everything in scope
-#    Given an empty graph
-#    And having executed:
-#      """
-#      CREATE (:L1), (:L2), (:L3)
-#      """
-#    When executing query:
-#      """
-#      MATCH (a)
-#      RETURN a, count(*)
-#      ORDER BY count(*)
-#      """
-#    Then the result should be, in any order:
-#      | a     | count(*) |
-#      | (:L1) | 1        |
-#      | (:L2) | 1        |
-#      | (:L3) | 1        |
-#    And no side effects
+  Scenario: Count star should count everything in scope
+    Given an empty graph
+    And having executed:
+      """
+      CREATE (:L1), (:L2), (:L3)
+      """
+    When executing query:
+      """
+      MATCH (a)
+      RETURN a, count(*)
+      ORDER BY count(*)
+      """
+    Then the result should be, in any order:
+      | a     | count(*) |
+      | (:L1) | 1        |
+      | (:L2) | 1        |
+      | (:L3) | 1        |
+    And no side effects
 
   Scenario: Absolute function
     Given any graph

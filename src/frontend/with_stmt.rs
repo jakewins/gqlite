@@ -243,7 +243,7 @@ fn sort_expr_for_aggregation(projections: &Vec<Projection>, e: Expr) -> Result<E
                     return Ok(e);
                 }
             }
-            _ => bail!("Don't know how to sort by {:?} yet", e),
+            _ => (),
         }
     }
 
@@ -402,6 +402,51 @@ mod tests {
                     }],
                 }),
                 sort_by: vec![Expr::Slot(p.slot(key_name))]
+            }
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn plan_with_order_by_expression_from_aggregation() -> Result<(), Error> {
+        let mut p = plan("MATCH (n) WITH n, count(*) ORDER BY count(*)")?;
+
+        let id_n = p.tokenize("n");
+        let id_count_call = p.tokenize("count(*)");
+        let fn_count = p.tokenize("count");
+        assert_eq!(
+            p.plan,
+            LogicalPlan::Sort {
+                src: Box::new(LogicalPlan::Project {
+                    src: Box::new(LogicalPlan::Aggregate {
+                        src: Box::new(LogicalPlan::NodeScan {
+                            src: Box::new(LogicalPlan::Argument),
+                            slot: 0,
+                            labels: None,
+                        }),
+                        grouping: vec![(Expr::Slot(p.slot(id_n)), p.slot(id_n))],
+                        aggregations: vec![(
+                            Expr::FuncCall {
+                                name: fn_count,
+                                args: vec![]
+                            },
+                            p.slot(id_count_call)
+                        )]
+                    }),
+                    projections: vec![
+                        Projection {
+                            expr: Expr::Slot(p.slot(id_n)),
+                            alias: id_n,
+                            dst: p.slot(id_n),
+                        },
+                        Projection {
+                            expr: Expr::Slot(p.slot(id_count_call)),
+                            alias: id_count_call,
+                            dst: p.slot(id_count_call),
+                        }
+                    ],
+                }),
+                sort_by: vec![Expr::Slot(p.slot(id_count_call))]
             }
         );
         Ok(())

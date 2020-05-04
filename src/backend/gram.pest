@@ -5,7 +5,7 @@ expr = { string | id | num }
 
 id = { ("`" ~ id_inner ~ "`" ) | id_noticks }
 
-id_noticks = @{ (( ASCII_ALPHA | "_" | "-" ) +) }
+id_noticks = @{ ( ASCII_ALPHA | "_" | "-" )  ~ ( ASCII_ALPHANUMERIC | "_" | "-" )* }
 id_inner = @{ id_char* }
 id_char = {
     !("`" | "\\") ~ ANY
