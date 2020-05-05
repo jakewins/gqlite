@@ -16,9 +16,11 @@ term = _{ binary_op | atom }
 binary_op = { atom ~ op ~ atom }
 op = ${ "=" | ">" | "<>" }
 
-atom = _{ bool | science | float | int | prop_lookup | count_call | func_call | string | id | list | map | "(" ~ expr ~ ")" }
+atom = _{ bool | science | float | int | prop_lookup | count_call | func_call | string | param | id | list | map | "(" ~ expr ~ ")" }
 
 id = ${ ( ASCII_ALPHA | "_" | "-" ) ~ ( ASCII_ALPHANUMERIC | "_" | "-" )* }
+
+param = ${ "$" ~ id }
 
 prop_lookup = { id ~ ("." ~ id)+ }
 

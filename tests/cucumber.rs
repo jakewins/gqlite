@@ -1,6 +1,6 @@
 use cucumber::{after, before, cucumber};
 use gqlite::gramdb::{GramCursor, GramDatabase};
-use gqlite::Database;
+use gqlite::{Database, Val};
 use tempfile::tempfile;
 
 #[macro_use]
@@ -18,9 +18,9 @@ fn empty_db() -> GramDatabase {
 }
 
 pub struct MyWorld {
-    // You can use this struct for mutable context in scenarios.
     graph: GramDatabase,
     starting_graph_properties: GraphProperties,
+    parameters: Vec<(String, Val)>,
     result: GramCursor,
 }
 
@@ -34,6 +34,7 @@ impl std::default::Default for MyWorld {
         MyWorld {
             graph: db,
             result: cursor,
+            parameters: Vec::new(),
             starting_graph_properties: GraphProperties {
                 node_count: 0,
                 relationship_count: 0,
@@ -99,6 +100,12 @@ mod example_steps {
     }
 
     impl ValMatcher {
+        pub fn to_val(&self) -> Val {
+            match self {
+                ValMatcher::Int(v) => Val::Int(*v),
+                v => panic!("Don't know how to convert {:?} to val", v),
+            }
+        }
         pub fn test_eq(&self, v: Val) -> Result<()> {
             match self {
                 ValMatcher::Int(e) => {
@@ -218,6 +225,19 @@ mod example_steps {
         world.starting_graph_properties.labels_count = count_labels(world);
         world.starting_graph_properties.properties_count = count_properties(world);
         result
+    }
+
+    fn set_parameters(world: &mut MyWorld, step: &Step) -> Result<(), Error> {
+        let mut table = step.table().unwrap().clone();
+        let pkey = table.header[0].to_string();
+        let pval = str_to_val(&mut table.header[1].chars().peekable()).to_val();
+        world.parameters.push((pkey, pval));
+        for mut row in table.rows {
+            let pkey = row[0].to_string();
+            let pval = str_to_val(&mut row[1].chars().peekable()).to_val();
+            world.parameters.push((pkey, pval));
+        }
+        Ok(())
     }
 
     fn start_query(world: &mut MyWorld, step: &Step) {
@@ -628,6 +648,10 @@ mod example_steps {
 
         given "having executed:" |world, step| {
             run_preparatory_query(world, step).unwrap();
+        };
+
+        given "parameters are:" |world, step| {
+            set_parameters(world, step).unwrap();
         };
 
         when "executing query:" |world, step| {
