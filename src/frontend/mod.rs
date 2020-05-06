@@ -82,11 +82,13 @@ impl Frontend {
 }
 
 // The ultimate output of the frontend is a logical plan. The logical plan is a tree of operators.
-// The tree describes a stream processing pipeline starting at the leafs and ending at the root.
+// The tree describes a stream processing pipeline starting at the leaves and ending at the root.
 //
 // This enumeration is the complete list of supported operators that the planner can emit.
 //
-// The slots are indexes into the row being produced
+// The pipeline has a single logical "row" - a vector of value slots - that's shared
+// by all operators; the various things the operators do refer to slots in the row,
+// like registers in a CPU.
 #[derive(Debug, PartialEq)]
 pub enum LogicalPlan {
     Argument,
@@ -149,11 +151,6 @@ pub enum LogicalPlan {
         predicate: Expr,
     },
 
-    // Return and Project can probably be combined?
-    Return {
-        src: Box<Self>,
-        projections: Vec<Projection>,
-    },
     // Take the input and apply the specified projections
     Project {
         src: Box<Self>,
@@ -168,22 +165,28 @@ pub enum LogicalPlan {
         skip: Option<Expr>,
         limit: Option<Expr>,
     },
+    // For queries that end with RETURN, this describes the output fields
+    ProduceResult {
+        src: Box<Self>,
+        fields: Vec<(Token, Slot)>,
+    },
 }
 
 impl LogicalPlan {
     fn fmt_pretty(&self, ind: &str, t: &Tokens) -> String {
         match self {
-            LogicalPlan::Return { src, projections } => {
+            LogicalPlan::ProduceResult { src, fields } => {
                 let next_indent = &format!("{}  ", ind);
                 let mut proj = String::new();
-                for (i, p) in projections.iter().enumerate() {
+                for (i, (tok, _)) in fields.iter().enumerate() {
                     if i > 0 {
                         proj.push_str(", ");
                     }
-                    proj.push_str(&p.fmt_pretty(next_indent, t))
+                    let field_name = t.lookup(*tok).unwrap();
+                    proj.push_str(field_name)
                 }
                 format!(
-                    "Return(\n{}src={},\n{}projections=[{}])",
+                    "ProduceResult(\n{}src={},\n{}fields=[{}])",
                     next_indent,
                     src.fmt_pretty(&format!("{}  ", next_indent), t),
                     next_indent,
@@ -718,7 +721,14 @@ pub(crate) mod tests {
 
     impl PlanArtifacts {
         pub fn slot(&self, k: Token) -> usize {
-            self.slots[&k]
+            match self.slots.get(&k) {
+                Some(s) => *s,
+                None => {
+                    let toks = self.tokens.borrow();
+                    let tok = toks.lookup(k);
+                    panic!("No slot for token: {:?}", tok)
+                }
+            }
         }
 
         pub fn tokenize(&mut self, content: &str) -> Token {
@@ -754,148 +764,6 @@ pub(crate) mod tests {
                 println!("{}", e);
                 Err(e)
             }
-        }
-    }
-
-    #[cfg(test)]
-    mod aggregate {
-        use crate::frontend::tests::plan;
-        use crate::frontend::{Expr, LogicalPlan, Projection};
-        use crate::Error;
-
-        #[test]
-        fn plan_simple_count() -> Result<(), Error> {
-            let mut p = plan("MATCH (n:Person) RETURN count(n)")?;
-
-            let lbl_person = p.tokenize("Person");
-            let id_n = p.tokenize("n");
-            let fn_count = p.tokenize("count");
-            let col_count_n = p.tokenize("count(n)");
-            assert_eq!(
-                p.plan,
-                LogicalPlan::Return {
-                    src: Box::new(LogicalPlan::Aggregate {
-                        src: Box::new(LogicalPlan::NodeScan {
-                            src: Box::new(LogicalPlan::Argument),
-                            slot: 0,
-                            labels: Some(lbl_person)
-                        }),
-                        grouping: vec![],
-                        aggregations: vec![(
-                            Expr::FuncCall {
-                                name: fn_count,
-                                args: vec![Expr::Slot(p.slot(id_n))]
-                            },
-                            p.slot(col_count_n)
-                        )]
-                    }),
-                    projections: vec![Projection {
-                        expr: Expr::Slot(p.slot(col_count_n)),
-                        alias: col_count_n,
-                        dst: p.slot(col_count_n),
-                    }]
-                }
-            );
-            Ok(())
-        }
-
-        #[test]
-        fn plan_simple_count_no_label() -> Result<(), Error> {
-            let mut p = plan("MATCH (n) RETURN count(n)")?;
-
-            let id_n = p.tokenize("n");
-            let fn_count = p.tokenize("count");
-            let col_count_n = p.tokenize("count(n)");
-            assert_eq!(
-                p.plan,
-                LogicalPlan::Return {
-                    src: Box::new(LogicalPlan::Aggregate {
-                        src: Box::new(LogicalPlan::NodeScan {
-                            src: Box::new(LogicalPlan::Argument),
-                            slot: 0,
-                            labels: None
-                        }),
-                        grouping: vec![],
-                        aggregations: vec![(
-                            Expr::FuncCall {
-                                name: fn_count,
-                                args: vec![Expr::Slot(p.slot(id_n))]
-                            },
-                            p.slot(col_count_n)
-                        )]
-                    }),
-                    projections: vec![Projection {
-                        expr: Expr::Slot(p.slot(col_count_n)),
-                        alias: col_count_n,
-                        dst: p.slot(col_count_n),
-                    }]
-                }
-            );
-            Ok(())
-        }
-
-        #[test]
-        fn plan_grouped_count() -> Result<(), Error> {
-            let mut p = plan("MATCH (n:Person) RETURN n.age, n.occupation, count(n)")?;
-
-            let lbl_person = p.tokenize("Person");
-            let id_n = p.tokenize("n");
-            let key_age = p.tokenize("age");
-            let key_occupation = p.tokenize("occupation");
-            let fn_count = p.tokenize("count");
-            let col_count_n = p.tokenize("count(n)");
-            let col_n_age = p.tokenize("n.age");
-            let col_n_occupation = p.tokenize("n.occupation");
-            assert_eq!(
-                p.plan,
-                LogicalPlan::Return {
-                    src: Box::new(LogicalPlan::Aggregate {
-                        src: Box::new(LogicalPlan::NodeScan {
-                            src: Box::new(LogicalPlan::Argument),
-                            slot: 0,
-                            labels: Some(lbl_person)
-                        }),
-                        grouping: vec![
-                            (
-                                Expr::Prop(Box::new(Expr::Slot(p.slot(id_n))), vec![key_age]),
-                                p.slot(col_n_age)
-                            ),
-                            (
-                                Expr::Prop(
-                                    Box::new(Expr::Slot(p.slot(id_n))),
-                                    vec![key_occupation]
-                                ),
-                                p.slot(col_n_occupation)
-                            ),
-                        ],
-                        aggregations: vec![(
-                            Expr::FuncCall {
-                                name: fn_count,
-                                args: vec![Expr::Slot(p.slot(id_n))]
-                            },
-                            p.slot(col_count_n)
-                        )]
-                    }),
-                    projections: vec![
-                        Projection {
-                            expr: Expr::Slot(p.slot(col_n_age)),
-                            alias: col_n_age,
-                            dst: p.slot(col_n_age),
-                        },
-                        Projection {
-                            expr: Expr::Slot(p.slot(col_n_occupation)),
-                            alias: col_n_occupation,
-                            dst: p.slot(col_n_occupation),
-                        },
-                        Projection {
-                            expr: Expr::Slot(p.slot(col_count_n)),
-                            alias: col_count_n,
-                            dst: p.slot(col_count_n),
-                        },
-                    ]
-                }
-            );
-            Ok(())
         }
     }
 

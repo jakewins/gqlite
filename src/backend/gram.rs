@@ -164,22 +164,11 @@ impl GramBackend {
                 next_index: 0,
                 dst: alias,
             })),
-            LogicalPlan::Return { src, projections } => {
-                let mut converted_projections = Vec::new();
-                for projection in projections {
-                    converted_projections.push(Projection {
-                        expr: self.convert_expr(projection.expr),
-                        alias: projection.alias,
-                        slot: projection.dst,
-                    })
-                }
-
-                Ok(Box::new(Return {
-                    src: self.convert(*src)?,
-                    projections: converted_projections,
-                    print_header: true,
-                }))
-            }
+            LogicalPlan::ProduceResult { src, fields } => Ok(Box::new(ProduceResults {
+                src: self.convert(*src)?,
+                fields,
+                print_header: true,
+            })),
             LogicalPlan::Project { src, projections } => {
                 let mut converted_projections = Vec::new();
                 for projection in projections {
@@ -290,6 +279,22 @@ impl GramBackend {
                     Box::new(self.convert_expr(*left)),
                     Box::new(self.convert_expr(*right)),
                 ),
+                frontend::Op::Mul => Expr::Mul(
+                    Box::new(self.convert_expr(*left)),
+                    Box::new(self.convert_expr(*right)),
+                ),
+                frontend::Op::Div => Expr::Div(
+                    Box::new(self.convert_expr(*left)),
+                    Box::new(self.convert_expr(*right)),
+                ),
+                frontend::Op::Add => Expr::Add(
+                    Box::new(self.convert_expr(*left)),
+                    Box::new(self.convert_expr(*right)),
+                ),
+                frontend::Op::Sub => Expr::Sub(
+                    Box::new(self.convert_expr(*left)),
+                    Box::new(self.convert_expr(*right)),
+                ),
             },
 
             frontend::Expr::Prop(e, props) => Expr::Prop(Box::new(self.convert_expr(*e)), props),
@@ -316,6 +321,9 @@ impl GramBackend {
                 if name == tokens.tokenize("not") {
                     let convargs = args.iter().map(|i| self.convert_expr(i.clone())).collect();
                     return Expr::Call(functions::Func::Not, convargs);
+                } else if name == tokens.tokenize("abs") {
+                    let convargs = args.iter().map(|i| self.convert_expr(i.clone())).collect();
+                    return Expr::Call(functions::Func::Abs, convargs);
                 } else {
                     panic!("Unknown function: {:?}", tokens.lookup(name).unwrap(),)
                 }
@@ -359,9 +367,7 @@ impl Backend for GramBackend {
 
     fn eval(&mut self, plan: LogicalPlan, cursor: &mut GramCursor) -> Result<(), Error> {
         let slots = match &plan {
-            LogicalPlan::Return { projections, .. } => {
-                projections.iter().map(|p| (p.alias, p.dst)).collect()
-            }
+            LogicalPlan::ProduceResult { fields, .. } => fields.clone(),
             _ => Vec::new(),
         };
         if cursor.projection.slots.len() < slots.len() {
@@ -419,6 +425,15 @@ pub struct GramCursor {
 }
 
 impl BackendCursor for GramCursor {
+    fn fields(&self) -> Vec<String> {
+        let mut out = Vec::with_capacity(self.slots.len());
+        let toks = self.ctx.tokens.borrow();
+        for (tok, _) in &self.slots {
+            out.push(toks.lookup(*tok).unwrap().to_string());
+        }
+        return out;
+    }
+
     fn next(&mut self) -> Result<Option<&Row>> {
         if let Some(p) = &mut self.plan {
             // TODO hackety hack: If there are no slots to project, just spin through the tree
@@ -464,6 +479,11 @@ enum Expr {
 
     Gt(Box<Expr>, Box<Expr>),
     Equal(Box<Expr>, Box<Expr>),
+
+    Mul(Box<Expr>, Box<Expr>),
+    Div(Box<Expr>, Box<Expr>),
+    Add(Box<Expr>, Box<Expr>),
+    Sub(Box<Expr>, Box<Expr>),
 
     HasLabel { slot: usize, label: Token },
 }
@@ -530,6 +550,71 @@ impl Expr {
                 let b_val = b.eval(ctx, row)?;
                 let eq = a_val.eq(&b_val);
                 Ok(GramVal::Lit(Val::Bool(eq)))
+            }
+            Expr::Mul(a, b) => {
+                let a_val = a.eval(ctx, row)?;
+                let b_val = b.eval(ctx, row)?;
+                match (&a_val, &b_val) {
+                    (GramVal::Lit(Val::Int(a_int)), GramVal::Lit(Val::Int(b_int))) => {
+                        Ok(GramVal::Lit(Val::Int(a_int * b_int)))
+                    }
+                    (GramVal::Lit(Val::Float(a_int)), GramVal::Lit(Val::Int(b_int))) => {
+                        Ok(GramVal::Lit(Val::Float(a_int * *b_int as f64)))
+                    }
+                    _ => bail!(
+                        "gram backend does not support multiplication of {:?} and {:?}",
+                        a_val,
+                        b_val
+                    ),
+                }
+            }
+            Expr::Div(a, b) => {
+                let a_val = a.eval(ctx, row)?;
+                let b_val = b.eval(ctx, row)?;
+                match (&a_val, &b_val) {
+                    (GramVal::Lit(Val::Int(a_int)), GramVal::Lit(Val::Int(b_int))) => {
+                        Ok(GramVal::Lit(Val::Float(*a_int as f64 / *b_int as f64)))
+                    }
+                    _ => bail!(
+                        "gram backend does not support division of {:?} and {:?}",
+                        a_val,
+                        b_val
+                    ),
+                }
+            }
+            Expr::Add(a, b) => {
+                let a_val = a.eval(ctx, row)?;
+                let b_val = b.eval(ctx, row)?;
+                match (&a_val, &b_val) {
+                    (GramVal::Lit(Val::Int(a_int)), GramVal::Lit(Val::Int(b_int))) => {
+                        Ok(GramVal::Lit(Val::Int(a_int + b_int)))
+                    }
+                    _ => bail!(
+                        "gram backend does not support addition of {:?} and {:?}",
+                        a_val,
+                        b_val
+                    ),
+                }
+            }
+            Expr::Sub(a, b) => {
+                let a_val = a.eval(ctx, row)?;
+                let b_val = b.eval(ctx, row)?;
+                match (&a_val, &b_val) {
+                    (GramVal::Lit(Val::Int(a_int)), GramVal::Lit(Val::Int(b_int))) => {
+                        Ok(GramVal::Lit(Val::Int(a_int - b_int)))
+                    }
+                    (GramVal::Lit(Val::Int(a_int)), GramVal::Lit(Val::Float(b_float))) => {
+                        Ok(GramVal::Lit(Val::Float(*a_int as f64 - *b_float)))
+                    }
+                    (GramVal::Lit(Val::Float(a_float)), GramVal::Lit(Val::Int(b_int))) => {
+                        Ok(GramVal::Lit(Val::Float(a_float - *b_int as f64)))
+                    }
+                    _ => bail!(
+                        "gram backend does not support subtraction of {:?} and {:?}",
+                        a_val,
+                        b_val
+                    ),
+                }
             }
             Expr::And(terms) => {
                 for t in terms {
@@ -1000,37 +1085,32 @@ impl Operator for Create {
 }
 
 #[derive(Debug)]
-struct Return {
+struct ProduceResults {
     pub src: Box<dyn Operator>,
-    pub projections: Vec<Projection>,
+    pub fields: Vec<(Token, usize)>,
     print_header: bool,
 }
 
-impl Operator for Return {
+impl Operator for ProduceResults {
     fn next(&mut self, ctx: &mut Context, out: &mut GramRow) -> Result<bool> {
         if self.print_header {
             println!("----");
             let mut first = true;
-            for cell in &self.projections {
+            for (token, _) in &self.fields {
+                let toks = ctx.tokens.borrow();
+                let field_name = toks.lookup(*token).unwrap();
                 if first {
-                    print!("{}", cell.alias);
+                    print!("{}", field_name);
                     first = false
                 } else {
-                    print!(", {}", cell.alias)
+                    print!(", {}", field_name)
                 }
             }
             println!();
             println!("----");
             self.print_header = false;
         }
-        if self.src.next(ctx, out)? {
-            for cell in &self.projections {
-                out.slots[cell.slot] = cell.expr.eval(ctx, out)?;
-            }
-            // Do this to 'yield' one row at a time to the cursor
-            return Ok(true);
-        }
-        Ok(false)
+        self.src.next(ctx, out)
     }
 }
 
@@ -1837,6 +1917,7 @@ mod functions {
     #[derive(Debug, Clone)]
     pub(super) enum Func {
         Not,
+        Abs,
     }
 
     impl Func {
@@ -1848,6 +1929,11 @@ mod functions {
                         v => bail!("don't know how to do NOT({:?})", v),
                     },
                     v => bail!("don't know how to do NOT({:?})", v),
+                },
+                Func::Abs => match args.get(0).ok_or(anyhow!("ABS takes one argument"))? {
+                    GramVal::Lit(Val::Int(v)) => Ok(GramVal::Lit(Val::Int(v.abs()))),
+                    GramVal::Lit(Val::Float(v)) => Ok(GramVal::Lit(Val::Float(v.abs()))),
+                    v => bail!("don't know how to take ABS({:?})", v),
                 },
             }
         }

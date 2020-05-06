@@ -7,9 +7,16 @@ pub fn plan_with(
     stmt: Pair<Rule>,
 ) -> Result<LogicalPlan> {
     let parts = stmt.into_inner();
-
     let projections: Projections = parse_projections(pc, parts)?;
+    return plan_parsed_with(pc, src, projections);
+}
 
+// This is shared between the RETURN and WITH plan functions
+fn plan_parsed_with(
+    pc: &mut PlanningContext,
+    src: LogicalPlan,
+    projections: Projections,
+) -> Result<LogicalPlan> {
     // Simple case, no need to do a bunch of introspection
     let mut plan = if !projections.is_aggregating && !projections.is_distinct {
         LogicalPlan::Project {
@@ -55,18 +62,6 @@ pub fn plan_aggregation(
     src: LogicalPlan,
     projections: Vec<Projection>,
 ) -> Result<LogicalPlan> {
-    // Deal with aggregation / distinct
-
-    // So; multiple cases. If there are DISTINCT clauses, we, for now, emit a sort+uniq plan
-    // combo.. this becomes really interesting once you mix multiple DISTINCT projections,
-    // explicit ORDER_BY, aggregations, as well as index-backed order-by.
-    //
-    // There is also the fact that if you pick the right starting points, DISTINCT may
-    // be guaranteed by upstream plan entries. Eg. a node scan will return distinct nodes.
-    //
-    // If there are aggregations, then by definition the grouping keys are distinct, so that's
-    // a thing to be aware of.
-    //
     // This is a good thing to have read when thinking about aggregations:
     // https://github.com/postgres/postgres/blob/master/src/backend/executor/nodeAgg.c
 
@@ -101,24 +96,27 @@ pub fn plan_aggregation(
 pub fn plan_return(
     pc: &mut PlanningContext,
     src: LogicalPlan,
-    return_stmt: Pair<Rule>,
+    stmt: Pair<Rule>,
 ) -> Result<LogicalPlan> {
-    let result = plan_with(pc, src, return_stmt)?;
-    if let LogicalPlan::Project { src, projections } = result {
-        // TODO This is the same as plan_with; we should drop LogicalPlan::Return and instead have
-        //      RETURN represented as ProduceResult{src: Project{..}}, so return is just an embellishment
-        //      on WITH.
-        // For now, just map Project to Return
-        Ok(LogicalPlan::Return { src, projections })
-    } else {
-        unreachable!("plan_with emitted other plan than Project: {:?}", result)
+    let parts = stmt.into_inner();
+    let projections: Projections = parse_projections(pc, parts)?;
+
+    let mut fields = Vec::with_capacity(projections.projections.len());
+    for p in &projections.projections {
+        fields.push((p.alias, p.dst));
     }
+
+    let result = plan_parsed_with(pc, src, projections)?;
+    return Ok(LogicalPlan::ProduceResult {
+        src: Box::new(result),
+        fields,
+    });
 }
 
 struct Projections {
     projections: Vec<Projection>,
     is_distinct: bool,
-    // Does the projection include explicit aggregating expressions?
+    // Does the projection include explicit aggregating expressions, more than just "DISTINCT"?
     is_aggregating: bool,
     selection: Option<Expr>,
     sort: Option<Vec<Expr>>,
@@ -229,20 +227,27 @@ fn parse_projections(pc: &mut PlanningContext, parts: Pairs<Rule>) -> Result<Pro
 // Sort expressions are a bit painful; they can't refer to stuff that was made out-of-scope
 // by the preceding WITH/RETURN projection, if the projection contains aggregation.
 fn sort_expr_for_aggregation(projections: &Vec<Projection>, e: Expr) -> Result<Expr> {
-    match e {
-        Expr::Slot(_) => return Ok(e),
-        Expr::Prop(_, _) => {
-            // This is only allowed if the projections explicitly use this property,
-            // otherwise it won't be available (since it won't survive across the aggregation)
-            for proj in projections {
-                if e == proj.expr {
-                    return Ok(Expr::Slot(proj.dst));
+    // This is only allowed if the projections explicitly use this property,
+    // or the entity we're pulling the property off is an aggregate key
+    // otherwise it won't be available (since it won't survive across the aggregation)
+    for proj in projections {
+        // Sort expression is explicitly the exact same as expression used in aggregation
+        if e == proj.expr {
+            return Ok(Expr::Slot(proj.dst));
+        }
+
+        match &e {
+            Expr::Prop(entity, _) => {
+                // Sort expression is a property of a map or entity we're using as aggregate key
+                if **entity == proj.expr {
+                    return Ok(e);
                 }
             }
-            bail!("Can't sort by {:?}, because it's not used in the DISTINCT or aggregation, so is not visible to the sorting step", e)
+            _ => (),
         }
-        _ => bail!("Don't know how to sort by {:?} yet", e),
     }
+
+    bail!("Can't sort by {:?}, because the planner can't tell if it is used in DISTINCT or aggregation, so is not sure if it is visible to the sorting step", e)
 }
 
 fn parse_projection(pc: &mut PlanningContext, projection: Pair<Rule>) -> Result<Projection> {
@@ -403,6 +408,51 @@ mod tests {
     }
 
     #[test]
+    fn plan_with_order_by_expression_from_aggregation() -> Result<(), Error> {
+        let mut p = plan("MATCH (n) WITH n, count(*) ORDER BY count(*)")?;
+
+        let id_n = p.tokenize("n");
+        let id_count_call = p.tokenize("count(*)");
+        let fn_count = p.tokenize("count");
+        assert_eq!(
+            p.plan,
+            LogicalPlan::Sort {
+                src: Box::new(LogicalPlan::Project {
+                    src: Box::new(LogicalPlan::Aggregate {
+                        src: Box::new(LogicalPlan::NodeScan {
+                            src: Box::new(LogicalPlan::Argument),
+                            slot: 0,
+                            labels: None,
+                        }),
+                        grouping: vec![(Expr::Slot(p.slot(id_n)), p.slot(id_n))],
+                        aggregations: vec![(
+                            Expr::FuncCall {
+                                name: fn_count,
+                                args: vec![]
+                            },
+                            p.slot(id_count_call)
+                        )]
+                    }),
+                    projections: vec![
+                        Projection {
+                            expr: Expr::Slot(p.slot(id_n)),
+                            alias: id_n,
+                            dst: p.slot(id_n),
+                        },
+                        Projection {
+                            expr: Expr::Slot(p.slot(id_count_call)),
+                            alias: id_count_call,
+                            dst: p.slot(id_count_call),
+                        }
+                    ],
+                }),
+                sort_by: vec![Expr::Slot(p.slot(id_count_call))]
+            }
+        );
+        Ok(())
+    }
+
+    #[test]
     fn plan_with_order_repeating_aliased_aggregated_expression() -> Result<(), Error> {
         // Not sure at all that this is the right thing here, but basically:
         // If you've got a query that does some aggregation, and the orders by the aggregate
@@ -436,6 +486,41 @@ mod tests {
                     }],
                 }),
                 sort_by: vec![Expr::Slot(p.slot(key_name))]
+            }
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn plan_with_order_by_nested_property_of_aggregate() -> Result<(), Error> {
+        // Eg. we aggregate by "n" and then order by n.name, a nested property of the aggregate
+        let mut p = plan("MATCH (n) WITH DISTINCT n ORDER BY n.name")?;
+
+        let id_n = p.tokenize("n");
+        let key_name = p.tokenize("name");
+        assert_eq!(
+            p.plan,
+            LogicalPlan::Sort {
+                src: Box::new(LogicalPlan::Project {
+                    src: Box::new(LogicalPlan::Aggregate {
+                        src: Box::new(LogicalPlan::NodeScan {
+                            src: Box::new(LogicalPlan::Argument),
+                            slot: 0,
+                            labels: None,
+                        }),
+                        grouping: vec![(Expr::Slot(p.slot(id_n)), p.slot(id_n))],
+                        aggregations: vec![]
+                    }),
+                    projections: vec![Projection {
+                        expr: Expr::Slot(p.slot(id_n)),
+                        alias: id_n,
+                        dst: p.slot(id_n),
+                    }],
+                }),
+                sort_by: vec![Expr::Prop(
+                    Box::new(Expr::Slot(p.slot(id_n))),
+                    vec![key_name]
+                )]
             }
         );
         Ok(())
@@ -487,31 +572,34 @@ mod tests {
         let id_z = p.tokenize("z");
         assert_eq!(
             p.plan,
-            LogicalPlan::Return {
+            LogicalPlan::ProduceResult {
                 src: Box::new(LogicalPlan::Project {
-                    src: Box::new(LogicalPlan::Expand {
-                        src: Box::new(LogicalPlan::NodeScan {
-                            src: Box::new(LogicalPlan::Argument),
-                            slot: p.slot(id_a),
-                            labels: None,
+                    src: Box::new(LogicalPlan::Project {
+                        src: Box::new(LogicalPlan::Expand {
+                            src: Box::new(LogicalPlan::NodeScan {
+                                src: Box::new(LogicalPlan::Argument),
+                                slot: p.slot(id_a),
+                                labels: None,
+                            }),
+                            src_slot: p.slot(id_a),
+                            rel_slot: 2,
+                            dst_slot: p.slot(id_z),
+                            rel_type: None,
+                            dir: Some(Dir::Out),
                         }),
-                        src_slot: p.slot(id_a),
-                        rel_slot: 2,
-                        dst_slot: p.slot(id_z),
-                        rel_type: None,
-                        dir: Some(Dir::Out),
+                        projections: vec![Projection {
+                            expr: Expr::Slot(p.slot(id_a)),
+                            alias: id_a,
+                            dst: p.slot(id_a),
+                        }],
                     }),
                     projections: vec![Projection {
                         expr: Expr::Slot(p.slot(id_a)),
                         alias: id_a,
                         dst: p.slot(id_a),
-                    }],
+                    }]
                 }),
-                projections: vec![Projection {
-                    expr: Expr::Slot(p.slot(id_a)),
-                    alias: id_a,
-                    dst: p.slot(id_a),
-                }]
+                fields: vec![(id_a, p.slot(id_a))]
             }
         );
         Ok(())
@@ -524,17 +612,20 @@ mod tests {
         let id_n = p.tokenize("n");
         assert_eq!(
             p.plan,
-            LogicalPlan::Return {
-                src: Box::new(LogicalPlan::NodeScan {
-                    src: Box::new(LogicalPlan::Argument),
-                    slot: 0,
-                    labels: None,
+            LogicalPlan::ProduceResult {
+                src: Box::new(LogicalPlan::Project {
+                    src: Box::new(LogicalPlan::NodeScan {
+                        src: Box::new(LogicalPlan::Argument),
+                        slot: 0,
+                        labels: None,
+                    }),
+                    projections: vec![Projection {
+                        expr: Expr::Slot(p.slot(id_n)),
+                        alias: id_n,
+                        dst: p.slot(id_n),
+                    }]
                 }),
-                projections: vec![Projection {
-                    expr: Expr::Slot(p.slot(id_n)),
-                    alias: id_n,
-                    dst: p.slot(id_n),
-                }]
+                fields: vec![(id_n, p.slot(id_n))]
             }
         );
         Ok(())
@@ -547,27 +638,30 @@ mod tests {
         let fn_count = p.tokenize("count");
         assert_eq!(
             p.plan,
-            LogicalPlan::Return {
-                src: Box::new(LogicalPlan::Aggregate {
-                    src: Box::new(LogicalPlan::NodeScan {
-                        src: Box::new(LogicalPlan::Argument),
-                        slot: 0,
-                        labels: None,
+            LogicalPlan::ProduceResult {
+                src: Box::new(LogicalPlan::Project {
+                    src: Box::new(LogicalPlan::Aggregate {
+                        src: Box::new(LogicalPlan::NodeScan {
+                            src: Box::new(LogicalPlan::Argument),
+                            slot: 0,
+                            labels: None,
+                        }),
+                        grouping: vec![],
+                        aggregations: vec![(
+                            Expr::FuncCall {
+                                name: fn_count,
+                                args: vec![]
+                            },
+                            p.slot(alias)
+                        )]
                     }),
-                    grouping: vec![],
-                    aggregations: vec![(
-                        Expr::FuncCall {
-                            name: fn_count,
-                            args: vec![]
-                        },
-                        p.slot(alias)
-                    )]
+                    projections: vec![Projection {
+                        expr: Expr::Slot(p.slot(alias)),
+                        alias,
+                        dst: p.slot(alias),
+                    }]
                 }),
-                projections: vec![Projection {
-                    expr: Expr::Slot(p.slot(alias)),
-                    alias,
-                    dst: p.slot(alias),
-                }]
+                fields: vec![(alias, p.slot(alias))]
             }
         );
         Ok(())
@@ -581,24 +675,175 @@ mod tests {
         let prop_name = p.tokenize("name");
         assert_eq!(
             p.plan,
-            LogicalPlan::Return {
-                src: Box::new(LogicalPlan::Aggregate {
-                    src: Box::new(LogicalPlan::NodeScan {
-                        src: Box::new(LogicalPlan::Argument),
-                        slot: 0,
-                        labels: None,
+            LogicalPlan::ProduceResult {
+                src: Box::new(LogicalPlan::Project {
+                    src: Box::new(LogicalPlan::Aggregate {
+                        src: Box::new(LogicalPlan::NodeScan {
+                            src: Box::new(LogicalPlan::Argument),
+                            slot: 0,
+                            labels: None,
+                        }),
+                        grouping: vec![(
+                            Expr::Prop(Box::new(Expr::Slot(p.slot(id_n))), vec![prop_name]),
+                            1
+                        ),],
+                        aggregations: vec![]
                     }),
-                    grouping: vec![(
-                        Expr::Prop(Box::new(Expr::Slot(p.slot(id_n))), vec![prop_name]),
-                        1
-                    ),],
-                    aggregations: vec![]
+                    projections: vec![Projection {
+                        expr: Expr::Slot(p.slot(alias)),
+                        alias,
+                        dst: p.slot(alias),
+                    }]
                 }),
-                projections: vec![Projection {
-                    expr: Expr::Slot(p.slot(alias)),
-                    alias,
-                    dst: p.slot(alias),
-                }]
+                fields: vec![(alias, p.slot(alias))],
+            }
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn plan_simple_count() -> Result<(), Error> {
+        let mut p = plan("MATCH (n:Person) RETURN count(n)")?;
+
+        let lbl_person = p.tokenize("Person");
+        let id_n = p.tokenize("n");
+        let fn_count = p.tokenize("count");
+        let col_count_n = p.tokenize("count(n)");
+        assert_eq!(
+            p.plan,
+            LogicalPlan::ProduceResult {
+                src: Box::new(LogicalPlan::Project {
+                    src: Box::new(LogicalPlan::Aggregate {
+                        src: Box::new(LogicalPlan::NodeScan {
+                            src: Box::new(LogicalPlan::Argument),
+                            slot: 0,
+                            labels: Some(lbl_person)
+                        }),
+                        grouping: vec![],
+                        aggregations: vec![(
+                            Expr::FuncCall {
+                                name: fn_count,
+                                args: vec![Expr::Slot(p.slot(id_n))]
+                            },
+                            p.slot(col_count_n)
+                        )]
+                    }),
+                    projections: vec![Projection {
+                        expr: Expr::Slot(p.slot(col_count_n)),
+                        alias: col_count_n,
+                        dst: p.slot(col_count_n),
+                    }]
+                }),
+                fields: vec![(col_count_n, p.slot(col_count_n))]
+            }
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn plan_simple_count_no_label() -> Result<(), Error> {
+        let mut p = plan("MATCH (n) RETURN count(n)")?;
+
+        let id_n = p.tokenize("n");
+        let fn_count = p.tokenize("count");
+        let col_count_n = p.tokenize("count(n)");
+        assert_eq!(
+            p.plan,
+            LogicalPlan::ProduceResult {
+                src: Box::new(LogicalPlan::Project {
+                    src: Box::new(LogicalPlan::Aggregate {
+                        src: Box::new(LogicalPlan::NodeScan {
+                            src: Box::new(LogicalPlan::Argument),
+                            slot: 0,
+                            labels: None
+                        }),
+                        grouping: vec![],
+                        aggregations: vec![(
+                            Expr::FuncCall {
+                                name: fn_count,
+                                args: vec![Expr::Slot(p.slot(id_n))]
+                            },
+                            p.slot(col_count_n)
+                        )]
+                    }),
+                    projections: vec![Projection {
+                        expr: Expr::Slot(p.slot(col_count_n)),
+                        alias: col_count_n,
+                        dst: p.slot(col_count_n),
+                    }]
+                }),
+                fields: vec![(col_count_n, p.slot(col_count_n))]
+            }
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn plan_grouped_count() -> Result<(), Error> {
+        let mut p = plan("MATCH (n:Person) RETURN n.age, n.occupation, count(n)")?;
+
+        let lbl_person = p.tokenize("Person");
+        let id_n = p.tokenize("n");
+        let key_age = p.tokenize("age");
+        let key_occupation = p.tokenize("occupation");
+        let fn_count = p.tokenize("count");
+        let col_count_n = p.tokenize("count(n)");
+        let col_n_age = p.tokenize("n.age");
+        let col_n_occupation = p.tokenize("n.occupation");
+        assert_eq!(
+            p.plan,
+            LogicalPlan::ProduceResult {
+                src: Box::new(LogicalPlan::Project {
+                    src: Box::new(LogicalPlan::Aggregate {
+                        src: Box::new(LogicalPlan::NodeScan {
+                            src: Box::new(LogicalPlan::Argument),
+                            slot: 0,
+                            labels: Some(lbl_person)
+                        }),
+                        grouping: vec![
+                            (
+                                Expr::Prop(Box::new(Expr::Slot(p.slot(id_n))), vec![key_age]),
+                                p.slot(col_n_age)
+                            ),
+                            (
+                                Expr::Prop(
+                                    Box::new(Expr::Slot(p.slot(id_n))),
+                                    vec![key_occupation]
+                                ),
+                                p.slot(col_n_occupation)
+                            ),
+                        ],
+                        aggregations: vec![(
+                            Expr::FuncCall {
+                                name: fn_count,
+                                args: vec![Expr::Slot(p.slot(id_n))]
+                            },
+                            p.slot(col_count_n)
+                        )]
+                    }),
+                    projections: vec![
+                        Projection {
+                            expr: Expr::Slot(p.slot(col_n_age)),
+                            alias: col_n_age,
+                            dst: p.slot(col_n_age),
+                        },
+                        Projection {
+                            expr: Expr::Slot(p.slot(col_n_occupation)),
+                            alias: col_n_occupation,
+                            dst: p.slot(col_n_occupation),
+                        },
+                        Projection {
+                            expr: Expr::Slot(p.slot(col_count_n)),
+                            alias: col_count_n,
+                            dst: p.slot(col_count_n),
+                        },
+                    ]
+                }),
+                fields: vec![
+                    (col_n_age, p.slot(col_n_age)),
+                    (col_n_occupation, p.slot(col_n_occupation)),
+                    (col_count_n, p.slot(col_count_n))
+                ]
             }
         );
         Ok(())

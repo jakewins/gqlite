@@ -2,15 +2,25 @@
 WHITESPACE = _{ " " | "\t" | "\r" | "\n" }
 
 expr = { and_expr ~ (^"OR " ~ and_expr)* }
-and_expr = { term ~ (^"AND " ~ term)* }
+and_expr = { add_sub_expr ~ (^"AND " ~ add_sub_expr)* }
+
+add_sub_expr = { mult_div_expr ~ (add_sub_op ~ mult_div_expr)* }
+add_sub_op = ${ "-" | "+" }
+
+mult_div_expr = { term ~ (mult_div_op ~ term)* }
+mult_div_op = ${ "*" | "/" }
+
 term = _{ binary_op | atom }
 
+// Need something where like blah() * b.name / 12 + count(*) is handled right
 binary_op = { atom ~ op ~ atom }
 op = ${ "=" | ">" | "<>" }
 
-atom = _{ bool | science | float | int | prop_lookup | count_call | func_call | string | id | list | map | "(" ~ expr ~ ")" }
+atom = _{ bool | science | float | int | prop_lookup | count_call | func_call | string | param | id | list | map | "(" ~ expr ~ ")" }
 
 id = ${ ( ASCII_ALPHA | "_" | "-" ) ~ ( ASCII_ALPHANUMERIC | "_" | "-" )* }
+
+param = ${ "$" ~ id }
 
 prop_lookup = { id ~ ("." ~ id)+ }
 
@@ -79,7 +89,7 @@ distinct_clause = { ^"DISTINCT" }
 where_clause = { ^"WHERE" ~ expr }
 
 order_clause = { ^"ORDER BY" ~ order_expr ~ ( "," ~ order_expr )* }
-order_expr = { expr ~ (^"DESC")? }
+order_expr = { expr ~ (^"DESC" | ^"ASC")? }
 
 skip_clause = { ^"SKIP" ~ expr }
 limit_clause = { ^"LIMIT" ~ expr }
