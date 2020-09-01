@@ -62,6 +62,7 @@ pub enum Expr {
     // Lookup a property by id
     Prop(Box<Self>, Vec<Token>),
     Slot(Slot),
+    Param(Token),
     FuncCall {
         name: Token,
         args: Vec<Expr>,
@@ -94,6 +95,7 @@ impl Expr {
             Expr::BinaryOp { left, right, op: _ } => {
                 left.is_aggregating(aggregating_funcs) | right.is_aggregating(aggregating_funcs)
             }
+            Expr::Param(_) => false,
             Expr::HasLabel(_, _) => false,
         }
     }
@@ -295,6 +297,9 @@ fn plan_term(pc: &mut PlanningContext, term: Pair<Rule>) -> Result<Expr> {
         Rule::expr => {
             // this happens when there are parenthetises forcing "full" expressions down here
             return plan_expr(pc, term);
+        }
+        Rule::param => {
+            return Ok(Expr::Param(pc.tokenize(term.as_str())))
         }
         _ => panic!("({:?}): {}", term.as_rule(), term.as_str()),
     }

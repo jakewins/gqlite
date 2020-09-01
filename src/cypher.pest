@@ -24,8 +24,12 @@ param = ${ "$" ~ id }
 
 prop_lookup = { id ~ ("." ~ id)+ }
 
+// TODO: Use function_id and arglist here
 func_call = { id ~ "(" ~ (expr ~ ("," ~ expr)*)? ~ ")" }
 count_call = { ^"COUNT" ~ "(" ~ "*" ~ ")" }
+
+function_id = { id ~ ("." ~ id)+ }
+arglist = { expr ~ ("," ~ expr)* }
 
 string = ${
   "\"" ~ dblq_str_inner ~ "\"" |
@@ -100,7 +104,8 @@ create_stmt = { ^"CREATE" ~ patterns }
 match_stmt = { optional_clause? ~ ^"MATCH" ~ patterns ~ where_clause? }
 with_stmt = { ^"WITH" ~ distinct_clause? ~ projections ~ where_clause? ~ order_clause? ~ skip_clause? ~ limit_clause? }
 unwind_stmt = { ^"UNWIND" ~ expr ~ ^"AS" ~ id }
+call_stmt = { ^"CALL" ~ function_id ~  "(" ~ arglist? ~ ")" }
 return_stmt = { ^"RETURN" ~ distinct_clause? ~ ( projections | project_all ) ~ order_clause? ~ skip_clause? ~ limit_clause? }
 
-statement = _{ create_stmt | match_stmt | unwind_stmt | with_stmt }
+statement = _{ create_stmt | match_stmt | unwind_stmt | call_stmt | with_stmt }
 query = { SOI ~ ( statement )* ~ return_stmt? ~ EOI }

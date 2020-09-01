@@ -20,6 +20,7 @@ mod expr;
 mod create_stmt;
 mod match_stmt;
 mod with_stmt;
+mod call_stmt;
 
 use expr::plan_expr;
 pub use expr::{Expr, MapEntryExpr, Op};
@@ -66,6 +67,9 @@ impl Frontend {
                 }
                 Rule::return_stmt => {
                     plan = with_stmt::plan_return(pc, plan, stmt)?;
+                }
+                Rule::call_stmt => {
+                    plan = call_stmt::plan_call(pc, plan, stmt)?;
                 }
                 Rule::with_stmt => {
                     plan = with_stmt::plan_with(pc, plan, stmt)?;
@@ -142,6 +146,13 @@ pub enum LogicalPlan {
         list_expr: Expr,
         alias: Slot,
     },
+
+    Call {
+        src: Box<Self>,
+        name: Token,
+        args: Vec<Expr>,
+    },
+
     // For each outer row, go through the inner and yield each row where the predicate matches.
     // This can be used as a general JOIN mechanism - though in most cases we'll want a more
     // specialized hash join. Still, this lets us do all kinds of joins as a broad fallback
