@@ -19,6 +19,7 @@ mod expr;
 
 mod create_stmt;
 mod match_stmt;
+mod merge_stmt;
 mod with_stmt;
 mod call_stmt;
 
@@ -64,6 +65,9 @@ impl Frontend {
                 }
                 Rule::create_stmt => {
                     plan = create_stmt::plan_create(pc, plan, stmt)?;
+                }
+                Rule::merge_stmt => {
+                    plan = merge_stmt::plan_merge(pc, plan, stmt)?;
                 }
                 Rule::return_stmt => {
                     plan = with_stmt::plan_return(pc, plan, stmt)?;
@@ -124,6 +128,26 @@ pub enum LogicalPlan {
         src: Box<Self>,
         nodes: Vec<NodeSpec>,
         rels: Vec<RelSpec>,
+    },
+    SetProperties {
+        src: Box<Self>,
+        updates: Vec<PropertyUpdate>,
+    },
+    // For each entry in lhs, execute rhs iff all specified slots are non-null; otherwise
+    // just yield the output of lhs
+    ConditionalApply {
+        lhs: Box<Self>,
+        rhs: Box<Self>,
+        // Iff all these slots are non-null after executing lhs, execute rhs
+        conditions: Vec<Slot>,
+    },
+    // For each entry in lhs, execute rhs iff all specified slots ARE null; otherwise
+    // just yield the output of lhs
+    AntiConditionalApply {
+        lhs: Box<Self>,
+        rhs: Box<Self>,
+        // Iff all these slots are null after executing lhs, execute rhs
+        conditions: Vec<Slot>,
     },
     Aggregate {
         src: Box<Self>,
@@ -321,9 +345,81 @@ impl LogicalPlan {
                     aggregations,
                 )
             }
+            LogicalPlan::ConditionalApply { lhs, rhs, conditions } => {
+                let next_indent = &format!("{}  ", ind);
+                format!(
+                    "ConditionalApply(\n{}lhs={}\n{}rhs={}\n{}conditions=[{:?}])",
+                    ind,
+                    lhs.fmt_pretty(next_indent, t),
+                    ind,
+                    rhs.fmt_pretty(next_indent, t),
+                    ind,
+                    conditions,
+                )
+            }
+            LogicalPlan::AntiConditionalApply { lhs, rhs, conditions } => {
+                let next_indent = &format!("{}  ", ind);
+                format!(
+                    "AntiConditionalApply(\n{}lhs={}\n{}rhs={}\n{}conditions=[{:?}])",
+                    ind,
+                    lhs.fmt_pretty(next_indent, t),
+                    ind,
+                    rhs.fmt_pretty(next_indent, t),
+                    ind,
+                    conditions,
+                )
+            }
+            LogicalPlan::Optional { src, slots } => {
+                let next_indent = &format!("{}  ", ind);
+                format!(
+                    "Optional(\n{}src={}\n{}slots=[{:?}])",
+                    ind,
+                    src.fmt_pretty(next_indent, t),
+                    ind,
+                    slots,
+                )
+            }
+            LogicalPlan::SetProperties { src, updates } => {
+                let next_indent = &format!("{}  ", ind);
+                format!(
+                    "SetProperties(\n{}src={}\n{}updates=[{:?}])",
+                    ind,
+                    src.fmt_pretty(next_indent, t),
+                    ind,
+                    updates,
+                )
+            }
+            LogicalPlan::NestLoop { outer, inner, predicate } => {
+                let next_indent = &format!("{}  ", ind);
+                format!(
+                    "NestLoop(\n{}outer={}\n{}inner={}\n{}predicate={:?})",
+                    ind,
+                    outer.fmt_pretty(next_indent, t),
+                    ind,
+                    inner.fmt_pretty(next_indent, t),
+                    ind,
+                    predicate,
+                )
+            }
             _ => format!("NoPretty({:?})", self),
         }
     }
+}
+
+// Specification for changing a property
+#[derive(Debug, PartialEq)]
+pub enum PropertyAction {
+    // Set the property to the result of the expression
+    Set(Expr),
+    // Delete,
+}
+
+// Spec for modifying a property on some entity
+#[derive(Debug, PartialEq)]
+pub struct PropertyUpdate {
+    entity: Slot,
+    key: Token,
+    action: PropertyAction
 }
 
 // Specification of a node to create
@@ -379,7 +475,7 @@ pub enum Predicate {
     HasLabel(Token),
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Clone)]
 pub struct Projection {
     pub expr: Expr,
     pub alias: Token,
@@ -397,49 +493,50 @@ impl Projection {
     }
 }
 
-#[derive(Debug)]
-pub struct PlanningContext<'i> {
+// Variable scopes, like lexical scopes in most programming languages.
+// New scopes are introduced by WITH statements, which describe a projection
+// from the prior scope to the new one.
+#[derive(Debug, Clone)]
+pub struct Scope {
     // Mapping of names used in the query string to slots in the row being processed
     slots: HashMap<Token, usize>,
+    // Next slot id to assign
+    next_slot: usize,
     // Identifiers that the user has explictly declared. Eg in MATCH "(a)-->(b)" there are
     // three identifiers: a, b and an anonymous rel identifier. "a" and "b" are "named" here.
     named_identifiers: HashSet<Token>,
-
-    // TODO is there some nicer way to do this than Rc+RefCell?
+    // Tokens are shared across scopes, but we ship them with each scope for programmer convenience
     tokens: Rc<RefCell<Tokens>>,
-
-    // Description of the backend this query is being planned for; intention is that this will
-    // eventually contain things like listings of indexes etc. Once it does, it'll also need to
-    // include a digest or a version that gets embedded with the planned query, because the query
-    // plan may become invalid if indexes or constraints are added and removed.
-    backend_desc: &'i BackendDesc,
-
-    anon_rel_seq: u32,
-    anon_node_seq: u32,
 }
 
-impl<'i> PlanningContext<'i> {
-    fn new(tokens: Rc<RefCell<Tokens>>, bd: &'i BackendDesc) -> Self {
-        PlanningContext {
+impl Scope {
+    fn new(tokens: Rc<RefCell<Tokens>>) -> Scope {
+        Scope {
             slots: Default::default(),
+            next_slot: 0,
             named_identifiers: Default::default(),
-            tokens,
-            backend_desc: bd,
-            anon_rel_seq: 0,
-            anon_node_seq: 0,
+            tokens
         }
     }
 
-    // Note: See declare() if you are declaring a named identifier that should be subject to
-    // operations that refer to "all named identifiers", like RETURN *
+    // Not equal to slots in the `slots` mapping table, tread with caution
+    fn num_slots(&self) -> usize {
+        self.next_slot
+    }
+
+    fn reserve_slots(&mut self, num_to_reserve: usize) {
+        self.next_slot += num_to_reserve
+    }
+
     fn tokenize(&mut self, contents: &str) -> Token {
         self.tokens.borrow_mut().tokenize(contents)
     }
 
     // Declare a named identifier in the current scope if it isn't already;
     // the identifier becomes visible to operations like RETURN * and WITH *, et cetera.
-    fn declare_tok(&mut self, tok: Token) {
-        self.named_identifiers.insert(tok);
+    // Returns true if the token was not already declared
+    fn declare_tok(&mut self, tok: Token) -> bool {
+        self.named_identifiers.insert(tok)
     }
 
     // Shorthand for tokenize + declare_tok
@@ -460,11 +557,108 @@ impl<'i> PlanningContext<'i> {
         match self.slots.get(&tok) {
             Some(slot) => *slot,
             None => {
-                let slot = self.slots.len();
+                let slot = self.next_slot;
+                self.next_slot += 1;
                 self.slots.insert(tok, slot);
                 slot
             }
         }
+    }
+}
+
+#[derive(Debug)]
+pub struct PlanningContext<'i> {
+    // For reference/debugging/helptext: Scope history, parse_projections attaches old scopes here
+    scope_history: Vec<Scope>,
+    // Currently active scope; should always be Some(), except when parse_projections
+    // is juggling the scope swap that happens during a projection
+    scope: Option<Scope>,
+
+    tokens: Rc<RefCell<Tokens>>,
+
+    // Description of the backend this query is being planned for; intention is that this will
+    // eventually contain things like listings of indexes etc. Once it does, it'll also need to
+    // include a digest or a version that gets embedded with the planned query, because the query
+    // plan may become invalid if indexes or constraints are added and removed.
+    backend_desc: &'i BackendDesc,
+
+    anon_rel_seq: u32,
+    anon_node_seq: u32,
+}
+
+impl<'i> PlanningContext<'i> {
+    fn new(tokens: Rc<RefCell<Tokens>>, bd: &'i BackendDesc) -> Self {
+        PlanningContext {
+            scope_history: Default::default(),
+            scope: Some(Scope::new(Rc::clone(&tokens ))),
+            tokens,
+            backend_desc: bd,
+            anon_rel_seq: 0,
+            anon_node_seq: 0,
+        }
+    }
+
+    // Creates a new scope and returns it; does *not* store it as the current scope!
+    fn create_scope(&mut self) -> Scope {
+        Scope::new(self.tokens.clone())
+    }
+
+    // Gives you the current scope or panics if there is no current scope
+    // Panic rationale: The only time there is no scope should be during the planning
+    // or a WITH projection, and that code should be responsible enough to not call this.
+    fn scope(&self) -> &Scope {
+        match self.scope {
+            Some(ref v) => v,
+            _ => panic!("there is no scope attached to the planning context; this is a programming bug. Program crashing for safety.")
+        }
+    }
+
+    fn scope_mut(&mut self) -> &mut Scope {
+        match self.scope {
+            Some(ref mut v) => v,
+            _ => panic!("there is no scope attached to the planning context; this is a programming bug. Program crashing for safety.")
+        }
+    }
+
+    // Takes the current active scope, disconnects it from this context and gives you ownership
+    // of it. This is used for stuff like planning WITH statements, where the planner takes
+    // detailed control of the old and new scopes, juggles them and then sets the new scope
+    // on the context.
+    fn detach_scope(&mut self) -> Scope {
+        self.scope.take().unwrap()
+    }
+
+    // Set the current active scope
+    fn attach_scope(&mut self, s: Scope) {
+        self.scope = Some(s)
+    }
+
+    // Note: See declare() if you are declaring a named identifier that should be subject to
+    // operations that refer to "all named identifiers", like RETURN *
+    fn tokenize(&mut self, contents: &str) -> Token {
+        self.tokens.borrow_mut().tokenize(contents)
+    }
+
+    // See Scope
+    fn declare(&mut self, contents: &str) -> Token {
+        let tok = self.tokenize(contents);
+        self.declare_tok(tok);
+        return tok;
+    }
+
+    // See Scope
+    fn declare_tok(&mut self, tok: Token) -> bool {
+        self.scope_mut().declare_tok(tok)
+    }
+
+    // See Scope
+    pub fn is_declared(&self, tok: Token) -> bool {
+        self.scope().is_declared(tok)
+    }
+
+    // See Scope
+    pub fn get_or_alloc_slot(&mut self, tok: Token) -> usize {
+        self.scope_mut().get_or_alloc_slot(tok)
     }
 
     pub fn new_anon_rel(&mut self) -> Token {
@@ -488,7 +682,7 @@ fn plan_unwind(
     let mut parts = unwind_stmt.into_inner();
 
     let list_item = parts.next().expect("UNWIND must contain a list expression");
-    let list_expr = plan_expr(pc, list_item)?;
+    let list_expr = plan_expr(pc.scope_mut(), list_item)?;
     let alias_token = pc.declare(
         parts
             .next()
@@ -504,7 +698,7 @@ fn plan_unwind(
     });
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Clone)]
 pub struct PatternNode {
     identifier: Token,
     labels: Vec<Token>,
@@ -513,6 +707,9 @@ pub struct PatternNode {
     // eg. in "MATCH (a)-->()", the second node is anonymous; it will have
     // been assigned an anonymous identifier
     anonymous: bool,
+    // In the pattern, is this node referring to one we already know about?
+    // eg. in "MATCH (a) WITH a MATCH (a)-->(b)", "a" is a bound node in the second MATCH clause
+    bound: bool,
     solved: bool,
 }
 
@@ -520,7 +717,7 @@ impl PatternNode {
     fn merge(&mut self, _other: &PatternNode) {}
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Clone)]
 pub struct PatternRel {
     identifier: Token,
     rel_type: Option<Token>,
@@ -533,16 +730,26 @@ pub struct PatternRel {
     // eg. in "MATCH (a)-[r]->(b)-->(c)", the second rel is anonymous; it will have
     // been assigned an auto-generated identifier
     anonymous: bool,
+    // In the pattern, is this node referring to one we already know about?
+    // eg. in "MATCH ()-[r]-() WITH r MATCH (a)-[r]->(b)", "r" is a bound rel in the second MATCH
+    bound: bool,
     solved: bool,
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub struct PatternGraph {
     v: HashMap<Token, PatternNode>,
     v_order: Vec<Token>,
     e: Vec<PatternRel>,
 
-    // If this pattern is an OPTIONAL MATCH patterh
+    // Nodes and rels introduced in this pattern; eg for
+    //
+    //   MATCH (n) WITH n MATCH (n)-[r]->(p)
+    //
+    // In MATCH (n)-[r]->(p), `r` and `p` are new identifiers and would show up in this list.
+    unbound_identifiers: Vec<Token>,
+
+    // If this pattern is an OPTIONAL MATCH
     optional: bool,
 
     // The following expression must be true for the pattern to match; this can be a
@@ -603,9 +810,15 @@ fn parse_pattern_graph(pc: &mut PlanningContext, patterns: Pair<Rule>) -> Result
                 for segment in part.into_inner() {
                     match segment.as_rule() {
                         Rule::node => {
-                            let prior_node = parse_pattern_node(pc, segment)?;
-                            prior_node_id = Some(prior_node.identifier);
-                            pg.merge_node(prior_node);
+                            let current_node = parse_pattern_node(pc, segment)?;
+                            if !current_node.anonymous && !current_node.bound {
+                                let is_new = pc.declare_tok(current_node.identifier);
+                                if is_new {
+                                    pg.unbound_identifiers.push(current_node.identifier)
+                                }
+                            }
+                            prior_node_id = Some(current_node.identifier);
+                            pg.merge_node(current_node);
                             if let Some(mut rel) = prior_rel {
                                 rel.right_node = prior_node_id;
                                 pg.merge_rel(rel);
@@ -613,11 +826,18 @@ fn parse_pattern_graph(pc: &mut PlanningContext, patterns: Pair<Rule>) -> Result
                             }
                         }
                         Rule::rel => {
-                            prior_rel = Some(parse_pattern_rel(
+                            let current_rel = parse_pattern_rel(
                                 pc,
                                 prior_node_id.expect("pattern rel must be preceded by node"),
                                 segment,
-                            )?);
+                            )?;
+                            if !current_rel.anonymous && !current_rel.bound {
+                                let is_new = pc.declare_tok(current_rel.identifier);
+                                if is_new {
+                                    pg.unbound_identifiers.push(current_rel.identifier)
+                                }
+                            }
+                            prior_rel = Some(current_rel);
                             prior_node_id = None
                         }
                         _ => unreachable!(),
@@ -626,7 +846,7 @@ fn parse_pattern_graph(pc: &mut PlanningContext, patterns: Pair<Rule>) -> Result
             }
             Rule::where_clause => {
                 pg.predicate = Some(plan_expr(
-                    pc,
+                    pc.scope_mut(),
                     part.into_inner()
                         .next()
                         .expect("where clause must contain a predicate"),
@@ -653,7 +873,7 @@ fn parse_pattern_node(pc: &mut PlanningContext, pattern_node: Pair<Rule>) -> Res
                 }
             }
             Rule::map => {
-                props = expr::parse_map_expression(pc, part)?;
+                props = expr::parse_map_expression(pc.scope_mut(), part)?;
             }
             _ => panic!("don't know how to handle: {}", part),
         }
@@ -663,12 +883,14 @@ fn parse_pattern_node(pc: &mut PlanningContext, pattern_node: Pair<Rule>) -> Res
     let id = identifier.unwrap_or_else(|| pc.new_anon_node());
     labels.sort_unstable();
     labels.dedup();
+    let is_bound = pc.is_declared(id);
     Ok(PatternNode {
         identifier: id,
         labels,
         props,
         anonymous,
-        solved: false,
+        bound: is_bound,
+        solved: is_bound,
     })
 }
 
@@ -693,13 +915,14 @@ fn parse_pattern_rel(
                 dir = Some(Dir::Out)
             }
             Rule::map => {
-                props = expr::parse_map_expression(pc, part)?;
+                props = expr::parse_map_expression(pc.scope_mut(), part)?;
             }
             _ => unreachable!(),
         }
     }
     let anonymous = identifier.is_none();
     let id = identifier.unwrap_or_else(|| pc.new_anon_rel());
+    let is_bound = pc.is_declared(id);
     Ok(PatternRel {
         left_node,
         right_node: None,
@@ -708,7 +931,8 @@ fn parse_pattern_rel(
         dir,
         props,
         anonymous,
-        solved: false,
+        bound: is_bound,
+        solved: is_bound,
     })
 }
 
@@ -726,20 +950,21 @@ pub(crate) mod tests {
     #[derive(Debug)]
     pub struct PlanArtifacts {
         pub plan: LogicalPlan,
-        pub slots: HashMap<Token, usize>,
+        pub scopes: Vec<Scope>,
         pub tokens: Rc<RefCell<Tokens>>,
     }
 
     impl PlanArtifacts {
         pub fn slot(&self, k: Token) -> usize {
-            match self.slots.get(&k) {
-                Some(s) => *s,
-                None => {
-                    let toks = self.tokens.borrow();
-                    let tok = toks.lookup(k);
-                    panic!("No slot for token: {:?}", tok)
+            for scope in &self.scopes {
+                match scope.slots.get(&k) {
+                    Some(s) => return *s,
+                    _ => ()
                 }
             }
+            let toks = self.tokens.borrow();
+            let tok = toks.lookup(k);
+            panic!("No slot for token: {:?}", tok)
         }
 
         pub fn tokenize(&mut self, content: &str) -> Token {
@@ -765,10 +990,15 @@ pub(crate) mod tests {
         let mut pc = PlanningContext::new(Rc::clone(&tokens), &backend_desc);
         let plan = frontend.plan_in_context(q, &mut pc);
 
+        let last_scope = pc.scope().clone();
+        let mut scopes= pc.scope_history.clone();
+        scopes.push(last_scope);
+        // Gotta learn linked lists in rust..
+        scopes.reverse();
         match plan {
             Ok(plan) => Ok(PlanArtifacts {
                 plan,
-                slots: pc.slots,
+                scopes,
                 tokens: Rc::clone(&tokens),
             }),
             Err(e) => {

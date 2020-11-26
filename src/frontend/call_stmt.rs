@@ -36,7 +36,7 @@ fn plan_args(pc: &mut PlanningContext, arglist: Pair<Rule>) -> Result<Vec<Expr>>
     for part in arglist.into_inner() {
         match part.as_rule() {
             Rule::expr => {
-                out.push(plan_expr(pc, part)?)
+                out.push(plan_expr(pc.scope_mut(), part)?)
             }
             _ => unreachable!(),
         }
@@ -47,7 +47,7 @@ fn plan_args(pc: &mut PlanningContext, arglist: Pair<Rule>) -> Result<Vec<Expr>>
 #[cfg(test)]
 mod tests {
     use crate::frontend::tests::plan;
-    use crate::frontend::{Dir, Expr, LogicalPlan, Op, Projection};
+    use crate::frontend::{Expr, LogicalPlan};
     use crate::Error;
 
     #[test]

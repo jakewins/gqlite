@@ -76,7 +76,7 @@ list = {
 node = { "(" ~ id? ~ ( ":" ~ label )* ~ map? ~ ")" }
 label = { id }
 
-rel = { left_arrow? ~ "-" ~ ( "[" ~ id? ~ ( ":" ~ rel_type )? ~ map? ~ "]" )? ~ "-" ~ right_arrow? }
+rel = { left_arrow? ~ ( ( "-[" ~ id? ~ ( ":" ~ rel_type )? ~ map? ~ "]-" ) | "--" | "-" ) ~ right_arrow? }
 rel_type = { id }
 left_arrow = { "<" }
 right_arrow = { ">" }
@@ -88,9 +88,17 @@ projection = { expr ~ (^"AS" ~ id)? }
 projections = { projection ~ ( "," ~ projection )* }
 project_all = { "*" }
 
+assignment = { id ~ "." ~ id ~ "=" ~ expr }
+assignments = _{ assignment ~ ("," ~ assignment)* }
+
 distinct_clause = { ^"DISTINCT" }
 
 where_clause = { ^"WHERE" ~ expr }
+
+merge_patterns = { patterns }
+
+on_create_clause = { ^"ON" ~ ^"CREATE" ~ ^"SET" ~ assignments }
+on_match_clause = { ^"ON" ~ ^"MATCH" ~ ^"SET" ~ assignments }
 
 order_clause = { ^"ORDER BY" ~ order_expr ~ ( "," ~ order_expr )* }
 order_expr = { expr ~ (^"DESC" | ^"ASC")? }
@@ -101,11 +109,12 @@ limit_clause = { ^"LIMIT" ~ expr }
 optional_clause = { ^"OPTIONAL" }
 
 create_stmt = { ^"CREATE" ~ patterns }
+merge_stmt = { ^"MERGE" ~ merge_patterns ~ (on_create_clause | on_match_clause)* }
 match_stmt = { optional_clause? ~ ^"MATCH" ~ patterns ~ where_clause? }
 with_stmt = { ^"WITH" ~ distinct_clause? ~ projections ~ where_clause? ~ order_clause? ~ skip_clause? ~ limit_clause? }
 unwind_stmt = { ^"UNWIND" ~ expr ~ ^"AS" ~ id }
 call_stmt = { ^"CALL" ~ function_id ~  "(" ~ arglist? ~ ")" }
 return_stmt = { ^"RETURN" ~ distinct_clause? ~ ( projections | project_all ) ~ order_clause? ~ skip_clause? ~ limit_clause? }
 
-statement = _{ create_stmt | match_stmt | unwind_stmt | call_stmt | with_stmt }
+statement = _{ create_stmt | merge_stmt | match_stmt | unwind_stmt | call_stmt | with_stmt }
 query = { SOI ~ ( statement )* ~ return_stmt? ~ EOI }

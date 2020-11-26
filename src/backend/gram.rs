@@ -164,9 +164,6 @@ impl GramBackend {
                 next_index: 0,
                 dst: alias,
             })),
-            LogicalPlan::Call {
-                src: _, name: _, args: _,
-            } => Err(anyhow!("gram backend does not support CALL yet")),
             LogicalPlan::ProduceResult { src, fields } => Ok(Box::new(ProduceResults {
                 src: self.convert(*src)?,
                 fields,
@@ -231,6 +228,7 @@ impl GramBackend {
                 predicate: self.convert_expr(predicate),
                 initialized: false,
             })),
+            other => Err(anyhow!("gram backend does not support {:?} yet", other)),
         }
     }
 

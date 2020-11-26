@@ -1,5 +1,6 @@
 use super::{plan_expr, Expr, LogicalPlan, Pair, PlanningContext, Projection, Result, Rule};
 use pest::iterators::Pairs;
+use crate::frontend::Scope;
 
 pub fn plan_with(
     pc: &mut PlanningContext,
@@ -132,6 +133,20 @@ fn parse_projections(pc: &mut PlanningContext, parts: Pairs<Rule>) -> Result<Pro
     let mut limit = None;
     let mut selection = None;
     let mut sort = None;
+
+    let mut prior_scope = pc.detach_scope();
+    let mut new_scope = pc.create_scope();
+
+    // We don't know which slots in the prior scope could feasibly be re-used until we're all the
+    // way at the end of parsing, so we start off reserving all the slots in the row the prior
+    // scope is using. For straight aliasing, we'll immediately reuse the slot, but for anything
+    // more involved, we'll keep growing the row.
+    //
+    // We should then move to try to compress slot assignments, but that is likely best done
+    // once we have the entire plan in hand? Look into register assignment at that point.
+    // It also becomes like.. that kind of optimization is likely more fitting to do in the backend.
+    new_scope.reserve_slots(prior_scope.num_slots());
+
     for part in parts {
         match part.as_rule() {
             Rule::distinct_clause => {
@@ -139,13 +154,8 @@ fn parse_projections(pc: &mut PlanningContext, parts: Pairs<Rule>) -> Result<Pro
             }
             // WITH a as b, count(c); aka normal explicit projection
             Rule::projections => {
-                // This projection clears out all named identifiers that existed previously;
-                // what we need here is scopes, but for now we're doing the bare minimum to pass
-                // the TCK..
-                pc.named_identifiers.clear();
-
                 for projection in part.into_inner() {
-                    let p = parse_projection(pc, projection)?;
+                    let p = parse_projection(projection, &mut prior_scope, &mut new_scope)?;
                     is_aggregating =
                         is_aggregating || p.expr.is_aggregating(&pc.backend_desc.aggregates);
                     projections.push(p);
@@ -153,15 +163,17 @@ fn parse_projections(pc: &mut PlanningContext, parts: Pairs<Rule>) -> Result<Pro
             }
             // WITH *
             Rule::project_all => {
-                for id in &pc.named_identifiers {
+                for id in &prior_scope.named_identifiers {
+                    let slot = *prior_scope.slots.get(id).unwrap();
+                    new_scope.slots.insert(*id, slot);
                     projections.push(Projection {
-                        expr: Expr::Slot(*pc.slots.get(id).unwrap()),
+                        expr: Expr::Slot(slot),
                         alias: *id,
                         // TODO note that this adds a bunch of unecessary copying in all RETURN clauses and
                         //      in cases where we use projections that just rename stuff (eg. WITH blah as
                         //      x); we should consider making expr in Projection Optional, so it can be
                         //      used for pure renaming, if benchmarking shows that's helpful.
-                        dst: *pc.slots.get(id).unwrap(),
+                        dst: slot,
                     });
                 }
                 let tokens = pc.tokens.borrow();
@@ -176,21 +188,21 @@ fn parse_projections(pc: &mut PlanningContext, parts: Pairs<Rule>) -> Result<Pro
                     .into_inner()
                     .next()
                     .ok_or(anyhow!("WHERE contained unexpected part"))?;
-                selection = Some(plan_expr(pc, where_expr)?);
+                selection = Some(plan_expr(&mut prior_scope, where_expr)?);
             }
             Rule::skip_clause => {
                 let skip_expr = part
                     .into_inner()
                     .next()
                     .ok_or(anyhow!("SKIP contained unexpected part"))?;
-                skip = Some(plan_expr(pc, skip_expr)?);
+                skip = Some(plan_expr(&mut prior_scope, skip_expr)?);
             }
             Rule::limit_clause => {
                 let limit_expr = part
                     .into_inner()
                     .next()
                     .ok_or(anyhow!("LIMIT contained unexpected part"))?;
-                limit = Some(plan_expr(pc, limit_expr)?);
+                limit = Some(plan_expr(&mut prior_scope, limit_expr)?);
             }
             Rule::order_clause => {
                 // Skip this for now; we don't support ORDER BY, but there are
@@ -201,7 +213,7 @@ fn parse_projections(pc: &mut PlanningContext, parts: Pairs<Rule>) -> Result<Pro
                         .into_inner()
                         .next()
                         .ok_or(anyhow!("SORT contained unexpected part"))?;
-                    let planned_expr = plan_expr(pc, sort_expr)?;
+                    let planned_expr = plan_expr(&mut prior_scope, sort_expr)?;
                     if is_aggregating || is_distinct {
                         out.push(sort_expr_for_aggregation(&projections, planned_expr)?)
                     } else {
@@ -213,6 +225,10 @@ fn parse_projections(pc: &mut PlanningContext, parts: Pairs<Rule>) -> Result<Pro
             _ => bail!("unexpected part of WITH or RETURN: {:?}", part),
         }
     }
+
+    pc.attach_scope(new_scope);
+    pc.scope_history.push(prior_scope);
+
     Ok(Projections {
         projections: projections,
         is_distinct,
@@ -250,25 +266,28 @@ fn sort_expr_for_aggregation(projections: &Vec<Projection>, e: Expr) -> Result<E
     bail!("Can't sort by {:?}, because the planner can't tell if it is used in DISTINCT or aggregation, so is not sure if it is visible to the sorting step", e)
 }
 
-fn parse_projection(pc: &mut PlanningContext, projection: Pair<Rule>) -> Result<Projection> {
+fn parse_projection(projection: Pair<Rule>, prior_scope: &mut Scope, new_scope: &mut Scope) -> Result<Projection> {
     let default_alias = projection.as_str();
     let mut parts = projection.into_inner();
-    let expr = parts.next().map(|p| plan_expr(pc, p)).unwrap()?;
+    let expr = parts.next().map(|p| plan_expr(prior_scope, p)).unwrap()?;
+
     let alias = parts
         .next()
         .and_then(|p| match p.as_rule() {
-            Rule::id => Some(pc.declare(p.as_str())),
+            Rule::id => Some(new_scope.declare(p.as_str())),
             _ => None,
         })
-        .unwrap_or_else(|| pc.declare(default_alias.trim_end()));
+        .unwrap_or_else(|| new_scope.declare(default_alias.trim_end()));
+
+    // If we're just renaming stuff, don't bother assigning new slots, just rename the existing one
+    if let Expr::Slot(slot) = expr {
+        new_scope.slots.insert(alias, slot);
+    };
+
     Ok(Projection {
         expr,
         alias,
-        // TODO note that this adds a bunch of unecessary copying in all RETURN clauses and
-        //      in cases where we use projections that just rename stuff (eg. WITH blah as
-        //      x); we should consider making expr in Projection Optional, so it can be
-        //      used for pure renaming, if benchmarking shows that's helpful.
-        dst: pc.get_or_alloc_slot(alias),
+        dst: new_scope.get_or_alloc_slot(alias),
     })
 }
 
@@ -377,6 +396,82 @@ mod tests {
                 limit: Some(Expr::Int(1)),
             }
         );
+        Ok(())
+    }
+
+    #[test]
+    fn plan_with_swap_identifiers() -> Result<(), Error> {
+        // Eg. a as b, b as tmp should not cause the slot holding `b` to be overwritten by `a`
+        let mut p = plan("MATCH (a:A)-[r:REL]->(b:B) WITH a AS b, b AS tmp, r AS r")?;
+
+        let id_a = p.tokenize("a");
+        let id_b = p.tokenize("b");
+        let id_tmp = p.tokenize("tmp");
+        let id_r = p.tokenize("r");
+
+        let projections = if let LogicalPlan::Project { src, projections } = & p.plan {
+            projections.clone().to_vec()
+        } else {
+            panic!("Expected plan to be a projection, got {:?}", p.plan)
+        };
+
+        assert_eq!(
+            projections,
+            vec![
+                Projection {
+                    expr: Expr::Slot(p.slot(id_b)),
+                    alias: id_b,
+                    dst: p.slot(id_b),
+                },
+                Projection {
+                    expr: Expr::Slot(p.slot(id_tmp)),
+                    alias: id_tmp,
+                    dst: p.slot(id_tmp),
+                },
+                Projection {
+                    expr: Expr::Slot(p.slot(id_r)),
+                    alias: id_r,
+                    dst: p.slot(id_r),
+                }
+            ]);
+        Ok(())
+    }
+
+    #[test]
+    fn plan_with_swap_and_introduce_identifiers() -> Result<(), Error> {
+        // see plan_with_swap_identifiers; trick here is that we're also introducing new stuff,
+        // and the planner needs to tiptoe a bit to not accidentally re-use in-use slots
+        let mut p = plan("MATCH (a:A)-[r:REL]->(b:B) WITH a AS b, 1 AS one, r AS r")?;
+
+        let id_b = p.tokenize("b");
+        let id_one = p.tokenize("one");
+        let id_r = p.tokenize("r");
+
+        let projections = if let LogicalPlan::Project { src, projections } = & p.plan {
+            projections.clone().to_vec()
+        } else {
+            panic!("Expected plan to be a projection, got {:?}", p.plan)
+        };
+
+        assert_eq!(
+            projections,
+            vec![
+                Projection {
+                    expr: Expr::Slot(p.slot(id_b)),
+                    alias: id_b,
+                    dst: p.slot(id_b),
+                },
+                Projection {
+                    expr: Expr::Int(1),
+                    alias: id_one,
+                    dst: p.slot(id_one),
+                },
+                Projection {
+                    expr: Expr::Slot(p.slot(id_r)),
+                    alias: id_r,
+                    dst: p.slot(id_r),
+                }
+            ]);
         Ok(())
     }
 

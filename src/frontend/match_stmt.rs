@@ -1,12 +1,43 @@
 use super::{parse_pattern_graph, Dir, Expr, LogicalPlan, Pair, PlanningContext, Result, Rule};
 use crate::backend::Token;
-use crate::frontend::{Op, PatternNode};
+use crate::frontend::{Op, PatternNode, PatternGraph};
 
 pub fn plan_match(
     pc: &mut PlanningContext,
     src: LogicalPlan,
     match_stmt: Pair<Rule>,
 ) -> Result<LogicalPlan> {
+    let mut pg = parse_pattern_graph(pc, match_stmt)?;
+
+    println!("PG: {:?}", pg);
+
+    if pg.optional {
+        // We currently only handle a singular case here, OPTIONAL MATCH with a single unbound node:
+        if pg.e.len() > 0 {
+            bail!("gqlite does not yet support OPTIONAL MATCH with relationships, sorry")
+        }
+
+        if pg.predicate.is_some() {
+            bail!("gqlite does not yet support OPTIONAL MATCH with WHERE clause, sorry")
+        }
+
+        let (_, node) = pg.v.iter().next().unwrap();
+
+        let node_slot = pc.get_or_alloc_slot(node.identifier);
+        return Ok(LogicalPlan::Optional {
+            src: Box::new(LogicalPlan::NodeScan {
+                src: Box::new(src),
+                slot: node_slot,
+                labels: node.labels.first().cloned(),
+            }),
+            slots: vec![node_slot],
+        });
+    }
+
+    return plan_match_patterngraph(pc, src, pg)
+}
+
+pub fn plan_match_patterngraph(pc: &mut PlanningContext, src: LogicalPlan, mut pg: PatternGraph) -> Result<LogicalPlan> {
     fn filter_expand(expand: LogicalPlan, slot: Token, labels: &[Token]) -> LogicalPlan {
         let labels = labels
             .iter()
@@ -28,33 +59,6 @@ pub fn plan_match(
     }
 
     let mut plan = src;
-    let mut pg = parse_pattern_graph(pc, match_stmt)?;
-
-    if pg.optional {
-        // We currently only handle a singular case here, OPTIONAL MATCH with a single unbound node:
-        if pg.e.len() > 0 {
-            bail!("gqlite does not yet support OPTIONAL MATCH entirely, sorry")
-        }
-
-        if pg.predicate.is_some() {
-            bail!("gqlite does not yet support OPTIONAL MATCH entirely, sorry")
-        }
-
-        let (_, node) = pg.v.iter().next().unwrap();
-
-        let node_slot = pc.get_or_alloc_slot(node.identifier);
-        return Ok(LogicalPlan::Optional {
-            src: Box::new(LogicalPlan::NodeScan {
-                src: Box::new(plan),
-                slot: node_slot,
-                labels: node.labels.first().cloned(),
-            }),
-            slots: vec![node_slot],
-        });
-    }
-
-    // Ok, now we have parsed the pattern into a full graph, time to start solving it
-    println!("built pg: {:?}", pg);
 
     // 1: Loop through all nodes in the pattern and..
     //    - Find any pre-existing bound nodes we could start from
@@ -68,15 +72,8 @@ pub fn plan_match(
         }
         let candidate = pg.v.get_mut(id).unwrap();
 
-        if pc.is_declared(candidate.identifier) {
-            // MATCH (n) WITH n MATCH (n)-->(b); "n" is already a bound value, so we start there
+        if candidate.bound {
             pattern_has_bound_nodes = true;
-            candidate.solved = true;
-        }
-
-        // If the node is not anonymous, make sure its identifier is declared
-        if !candidate.anonymous {
-            pc.declare_tok(candidate.identifier)
         }
 
         // Prefer a candidate with labels since that has higher selectivity
@@ -125,12 +122,6 @@ pub fn plan_match(
                 rel.solved = true;
                 solved_any = true;
 
-                // Annoying to have to do this here, maybe move this
-                // back up into parse_pattern_graph..
-                if !rel.anonymous {
-                    pc.declare_tok(rel.identifier);
-                }
-
                 let dst = pc.get_or_alloc_slot(right_id);
                 let expand = LogicalPlan::Expand {
                     src: Box::new(plan),
@@ -147,12 +138,6 @@ pub fn plan_match(
                 left_node.solved = true;
                 rel.solved = true;
                 solved_any = true;
-
-                // Annoying to have to do this here, maybe move this
-                // back up into parse_pattern_graph..
-                if !rel.anonymous {
-                    pc.declare_tok(rel.identifier);
-                }
 
                 let dst = pc.get_or_alloc_slot(left_id);
                 let expand = LogicalPlan::Expand {
@@ -207,10 +192,10 @@ pub fn plan_match(
 
     // Finally, add the pattern-wide predicate to filter the result of the pattern match
     // see the note on PatternGraph about issues with this "late filter" approach
-    if let Some(pred) = pg.predicate {
+    if let Some(pred) = &pg.predicate {
         return Ok(LogicalPlan::Selection {
             src: Box::new(plan),
-            predicate: pred,
+            predicate: pred.clone(),
         });
     }
 
@@ -323,6 +308,34 @@ mod tests {
     #[test]
     fn plan_match_with_unhoistable_where() -> Result<(), Error> {
         let mut p = plan("MATCH (n) WHERE true = opaque()")?;
+        let id_n = p.tokenize("n");
+        let id_opaque = p.tokenize("opaque");
+
+        assert_eq!(
+            p.plan,
+            LogicalPlan::Selection {
+                src: Box::new(LogicalPlan::NodeScan {
+                    src: Box::new(LogicalPlan::Argument),
+                    slot: p.slot(id_n),
+                    labels: None,
+                }),
+                predicate: Expr::BinaryOp {
+                    left: Box::new(Expr::Bool(true)),
+                    right: Box::new(Expr::FuncCall {
+                        name: id_opaque,
+                        args: vec![]
+                    }),
+                    op: Op::Eq
+                }
+            }
+        );
+        Ok(())
+    }
+
+
+    #[test]
+    fn plan_match_with_bound_rel() -> Result<(), Error> {
+        let mut p = plan("MATCH (n)-[r]->() WITH r MATCH (a)-[r]->() WHERE true = opaque()")?;
         let id_n = p.tokenize("n");
         let id_opaque = p.tokenize("opaque");
 

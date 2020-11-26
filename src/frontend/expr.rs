@@ -2,7 +2,7 @@
 // to expressions.
 
 use crate::backend::{Token, Tokens};
-use crate::frontend::{PlanningContext, Result, Rule};
+use crate::frontend::{PlanningContext, Result, Rule, Scope};
 use crate::Slot;
 use pest::iterators::Pair;
 use std::collections::HashSet;
@@ -114,14 +114,14 @@ pub struct MapEntryExpr {
     pub val: Expr,
 }
 
-pub(super) fn plan_expr(pc: &mut PlanningContext, expression: Pair<Rule>) -> Result<Expr> {
+pub(super) fn plan_expr(scope: &mut Scope, expression: Pair<Rule>) -> Result<Expr> {
     let mut or_expressions = Vec::new();
     for inner in expression.into_inner() {
         match inner.as_rule() {
             Rule::and_expr => {
                 let mut and_expressions: Vec<Expr> = Vec::new();
                 for term in inner.into_inner() {
-                    and_expressions.push(plan_add_sub(pc, term)?)
+                    and_expressions.push(plan_add_sub(scope, term)?)
                 }
                 let and_expr = if and_expressions.len() == 1 {
                     and_expressions.remove(0)
@@ -140,12 +140,12 @@ pub(super) fn plan_expr(pc: &mut PlanningContext, expression: Pair<Rule>) -> Res
     }
 }
 
-fn plan_add_sub(pc: &mut PlanningContext, item: Pair<Rule>) -> Result<Expr> {
+fn plan_add_sub(scope: &mut Scope, item: Pair<Rule>) -> Result<Expr> {
     match item.as_rule() {
         Rule::add_sub_expr => {
             // let mut out = None;
             let mut inners = item.into_inner();
-            let mut out = plan_mul_div(pc, inners.next().unwrap())?;
+            let mut out = plan_mul_div(scope, inners.next().unwrap())?;
 
             // The parser guarantees there is at least one term (eg. *every* expression
             // is wrapped in mult_div for precedence reasons), but there may not actually
@@ -158,7 +158,7 @@ fn plan_add_sub(pc: &mut PlanningContext, item: Pair<Rule>) -> Result<Expr> {
                 // then the current "out" expression is the left term, we've got the op, and the
                 // parser should guarantee us another expression to go on the right:
                 let right = plan_mul_div(
-                    pc,
+                    scope,
                     inners
                         .next()
                         .ok_or(anyhow!("parser error: add / sub without right term?"))?,
@@ -176,15 +176,15 @@ fn plan_add_sub(pc: &mut PlanningContext, item: Pair<Rule>) -> Result<Expr> {
 }
 
 // See plan_add_sub
-fn plan_mul_div(pc: &mut PlanningContext, item: Pair<Rule>) -> Result<Expr> {
+fn plan_mul_div(scope: &mut Scope, item: Pair<Rule>) -> Result<Expr> {
     match item.as_rule() {
         Rule::mult_div_expr => {
             let mut inners = item.into_inner();
-            let mut out = plan_term(pc, inners.next().unwrap())?;
+            let mut out = plan_term(scope, inners.next().unwrap())?;
 
             while let Some(op) = inners.next() {
                 let right = plan_term(
-                    pc,
+                    scope,
                     inners.next().ok_or(anyhow!(
                         "parser error: multiplication / division without right term?"
                     ))?,
@@ -201,7 +201,7 @@ fn plan_mul_div(pc: &mut PlanningContext, item: Pair<Rule>) -> Result<Expr> {
     }
 }
 
-fn plan_term(pc: &mut PlanningContext, term: Pair<Rule>) -> Result<Expr> {
+fn plan_term(scope: &mut Scope, term: Pair<Rule>) -> Result<Expr> {
     match term.as_rule() {
         Rule::string => {
             let content = term
@@ -212,23 +212,23 @@ fn plan_term(pc: &mut PlanningContext, term: Pair<Rule>) -> Result<Expr> {
             return Ok(Expr::String(String::from(content)));
         }
         Rule::id => {
-            let tok = pc.tokenize(term.as_str());
-            return Ok(Expr::Slot(pc.get_or_alloc_slot(tok)));
+            let tok = scope.tokenize(term.as_str());
+            return Ok(Expr::Slot(scope.get_or_alloc_slot(tok)));
         }
         Rule::prop_lookup => {
             let mut prop_lookup = term.into_inner();
             let prop_lookup_expr = prop_lookup.next().unwrap();
             let base = match prop_lookup_expr.as_rule() {
                 Rule::id => {
-                    let tok = pc.tokenize(prop_lookup_expr.as_str());
-                    Expr::Slot(pc.get_or_alloc_slot(tok))
+                    let tok = scope.tokenize(prop_lookup_expr.as_str());
+                    Expr::Slot(scope.get_or_alloc_slot(tok))
                 }
                 _ => unreachable!(),
             };
             let mut props = Vec::new();
             for p_inner in prop_lookup {
                 if let Rule::id = p_inner.as_rule() {
-                    props.push(pc.tokenize(p_inner.as_str()));
+                    props.push(scope.tokenize(p_inner.as_str()));
                 }
             }
             return Ok(Expr::Prop(Box::new(base), props));
@@ -238,16 +238,16 @@ fn plan_term(pc: &mut PlanningContext, term: Pair<Rule>) -> Result<Expr> {
             let func_name_item = func_call
                 .next()
                 .expect("All func_calls must start with an identifier");
-            let name = pc.tokenize(&func_name_item.as_str().to_lowercase());
+            let name = scope.tokenize(&func_name_item.as_str().to_lowercase());
             // Parse args
             let mut args = Vec::new();
             for arg in func_call {
-                args.push(plan_expr(pc, arg)?);
+                args.push(plan_expr(scope, arg)?);
             }
             return Ok(Expr::FuncCall { name, args });
         }
         Rule::count_call => {
-            let name = pc.tokenize("count");
+            let name = scope.tokenize("count");
             return Ok(Expr::FuncCall {
                 name,
                 args: Vec::new(),
@@ -257,11 +257,11 @@ fn plan_term(pc: &mut PlanningContext, term: Pair<Rule>) -> Result<Expr> {
             let mut items = Vec::new();
             let exprs = term.into_inner();
             for exp in exprs {
-                items.push(plan_expr(pc, exp)?);
+                items.push(plan_expr(scope, exp)?);
             }
             return Ok(Expr::List(items));
         }
-        Rule::map => return Ok(Expr::Map(parse_map_expression(pc, term)?)),
+        Rule::map => return Ok(Expr::Map(parse_map_expression(scope, term)?)),
         Rule::int => {
             let v = term.as_str().parse::<i64>()?;
             return Ok(Expr::Int(v));
@@ -286,8 +286,8 @@ fn plan_term(pc: &mut PlanningContext, term: Pair<Rule>) -> Result<Expr> {
                 .next()
                 .expect("binary operators must have a right arg");
 
-            let left_expr = plan_term(pc, left)?;
-            let right_expr = plan_term(pc, right)?;
+            let left_expr = plan_term(scope, left)?;
+            let right_expr = plan_term(scope, right)?;
             return Ok(Expr::BinaryOp {
                 left: Box::new(left_expr),
                 right: Box::new(right_expr),
@@ -296,17 +296,17 @@ fn plan_term(pc: &mut PlanningContext, term: Pair<Rule>) -> Result<Expr> {
         }
         Rule::expr => {
             // this happens when there are parenthetises forcing "full" expressions down here
-            return plan_expr(pc, term);
+            return plan_expr(scope, term);
         }
         Rule::param => {
-            return Ok(Expr::Param(pc.tokenize(term.as_str())))
+            return Ok(Expr::Param(scope.tokenize(term.as_str())))
         }
         _ => panic!("({:?}): {}", term.as_rule(), term.as_str()),
     }
 }
 
 pub fn parse_map_expression(
-    pc: &mut PlanningContext,
+    scope: &mut Scope,
     map_expr: Pair<Rule>,
 ) -> Result<Vec<MapEntryExpr>> {
     let mut out = Vec::new();
@@ -317,12 +317,12 @@ pub fn parse_map_expression(
                 let id_token = pair_iter
                     .next()
                     .expect("Map pair must contain an identifier");
-                let identifier = pc.tokenize(id_token.as_str());
+                let identifier = scope.tokenize(id_token.as_str());
 
                 let expr_token = pair_iter
                     .next()
                     .expect("Map pair must contain an expression");
-                let expr = plan_expr(pc, expr_token)?;
+                let expr = plan_expr(scope, expr_token)?;
                 out.push(MapEntryExpr {
                     key: identifier,
                     val: expr,
@@ -378,7 +378,7 @@ mod tests {
         {
             return Ok(PlanArtifacts {
                 expr: projections[0].expr.clone(),
-                slots: pc.slots,
+                slots: pc.scope().clone().slots,
                 tokens: Rc::clone(&tokens),
             });
         } else {

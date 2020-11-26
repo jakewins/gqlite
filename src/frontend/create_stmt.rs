@@ -1,30 +1,30 @@
 use super::{
     parse_pattern_graph, Dir, LogicalPlan, NodeSpec, Pair, PlanningContext, RelSpec, Result, Rule,
 };
+use crate::frontend::PatternGraph;
 
 pub fn plan_create(
-    pc: &mut PlanningContext,
+    mut pc: &mut PlanningContext,
     src: LogicalPlan,
     create_stmt: Pair<Rule>,
 ) -> Result<LogicalPlan> {
     let mut pg = parse_pattern_graph(pc, create_stmt)?;
 
+    plan_create_patterngraph(&mut pc, src, pg)
+}
+
+pub fn plan_create_patterngraph(pc: &mut PlanningContext, src: LogicalPlan, mut pg: PatternGraph) -> Result<LogicalPlan> {
     let mut nodes = Vec::new();
     let mut rels = Vec::new();
     for id in pg.v_order {
-        if pc.is_declared(id) {
+        if pg.v.get(&id).map(|n|n.bound).unwrap_or(false) {
             // We already know about this node, it isn't meant to be created. ie
             // MATCH (n) CREATE (n)-[:NEWREL]->(newnode)
             continue;
         }
 
         let node = pg.v.remove(&id).ok_or(anyhow!("failed to parse pattern in query, please report this and include the query you are running"))?;
-        // Non-anonymous nodes declare new identifiers; we do this
-        // here rather than in parse_pattern_graph so we can do the
-        // is_declared check further up in this block.
-        if !node.anonymous {
-            pc.declare_tok(id);
-        }
+
         nodes.push(NodeSpec {
             slot: pc.get_or_alloc_slot(id),
             labels: node.labels,
