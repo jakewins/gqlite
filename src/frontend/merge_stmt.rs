@@ -1,32 +1,33 @@
 use super::{
     parse_pattern_graph, Dir, LogicalPlan, NodeSpec, Pair, PlanningContext, RelSpec, Result, Rule,
 };
-use crate::frontend::{PropertyUpdate, PropertyAction};
+use crate::frontend::{SetAction};
 use pest::iterators::Pairs;
 use crate::frontend::expr::plan_expr;
 use crate::frontend::match_stmt::{plan_match, plan_match_patterngraph};
 use crate::frontend::create_stmt::{plan_create, plan_create_patterngraph};
+use crate::frontend::set_stmt::parse_set_clause;
 
 pub fn plan_merge(
     mut pc: &mut PlanningContext,
     src: LogicalPlan,
-    create_stmt: Pair<Rule>,
+    merge_stmt: Pair<Rule>,
 ) -> Result<LogicalPlan> {
-    let mut pairs = create_stmt.into_inner();
+    let mut pairs = merge_stmt.into_inner();
     let patterns = pairs.next().unwrap();
 
     let mut pg = parse_pattern_graph(pc, patterns)?;
 
-    let mut on_create: Vec<PropertyUpdate> = Vec::new();
-    let mut on_match: Vec<PropertyUpdate> = Vec::new();
+    let mut on_create: Vec<SetAction> = Vec::new();
+    let mut on_match: Vec<SetAction> = Vec::new();
 
     for on_x in pairs {
         match on_x.as_rule() {
             Rule::on_create_clause => {
-                on_create.append(&mut parse_on_x_clause(pc, on_x)?)
+                on_create.append(&mut parse_set_clause(pc.scope_mut(), on_x)?)
             },
             Rule::on_match_clause => {
-                on_match.append(&mut parse_on_x_clause(pc, on_x)?)
+                on_match.append(&mut parse_set_clause(pc.scope_mut(), on_x)?)
             },
             r => unreachable!("{:?}", r),
         }
@@ -46,59 +47,41 @@ pub fn plan_merge(
         pattern_slots.push(pc.get_or_alloc_slot(*id));
     }
 
-    let matchplan = plan_match_patterngraph(&mut pc, src, matchpg)?;
+    let mut matchplan = LogicalPlan::Optional {
+        src: Box::new(plan_match_patterngraph(&mut pc, src, matchpg)?),
+        slots: pattern_slots.clone(),
+    };
     let mut createplan = plan_create_patterngraph(&mut pc, LogicalPlan::Argument, pg)?;
 
     if !on_create.is_empty() {
         createplan = LogicalPlan::SetProperties {
             src: Box::new(createplan),
-            updates: on_create
+            actions: on_create
         }
     }
 
-    Ok(LogicalPlan::AntiConditionalApply {
-        lhs: Box::new(LogicalPlan::ConditionalApply {
-            lhs: Box::new(LogicalPlan::Optional {
-                src: Box::new(matchplan ),
-                slots: pattern_slots.clone(),
-            } ),
+    if !on_match.is_empty() {
+        matchplan = LogicalPlan::ConditionalApply {
+            lhs: Box::new(matchplan ),
             rhs: Box::new(LogicalPlan::SetProperties {
                 src: Box::new(LogicalPlan::Argument),
-                updates: on_match,
+                actions: on_match,
             }),
             conditions: pattern_slots.clone(),
-        }),
+        };
+    }
+
+    Ok(LogicalPlan::AntiConditionalApply {
+        lhs: Box::new(matchplan),
         rhs: Box::new(createplan),
         conditions: pattern_slots
     })
 }
 
-fn parse_on_x_clause(pc: &mut PlanningContext, on_x: Pair<Rule>) -> Result<Vec<PropertyUpdate>> {
-    let mut out = Vec::new();
-    for part in on_x.into_inner() {
-        match part.as_rule() {
-            Rule::assignment => {
-                let mut parts = part.into_inner();
-                let identifier = pc.tokenize(parts.next().unwrap().as_str());
-                let entity = pc.get_or_alloc_slot(identifier);
-                let key = pc.tokenize(parts.next().unwrap().as_str());
-                let val = plan_expr(pc.scope_mut(), parts.next().unwrap())?;
-                out.push(PropertyUpdate{
-                    entity,
-                    key,
-                    action: PropertyAction::Set(val),
-                })
-            },
-            _ => unreachable!()
-        }
-    }
-    Ok(out)
-}
-
 #[cfg(test)]
 mod tests {
     use crate::frontend::tests::plan;
-    use crate::frontend::{Expr, LogicalPlan, MapEntryExpr, NodeSpec, Op, PropertyUpdate, PropertyAction};
+    use crate::frontend::{Expr, LogicalPlan, MapEntryExpr, NodeSpec, Op, SetAction, Dir, RelSpec};
     use crate::Error;
 
     #[test]
@@ -136,14 +119,14 @@ ON MATCH SET n.updated = timestamp()")?;
                     }),
                     rhs: Box::new(LogicalPlan::SetProperties {
                         src: Box::new(LogicalPlan::Argument),
-                        updates: vec![
-                            PropertyUpdate{
+                        actions: vec![
+                            SetAction::SingleAssign {
                                 entity: slot_n,
                                 key: key_updated,
-                                action: PropertyAction::Set(Expr::FuncCall {
+                                value: Expr::FuncCall {
                                     name: fn_timestamp,
                                     args: vec![]
-                                })
+                                }
                             }
                         ]
                     }),
@@ -160,18 +143,69 @@ ON MATCH SET n.updated = timestamp()")?;
                         }],
                         rels: vec![]
                     }),
-                    updates: vec![
-                        PropertyUpdate{
+                    actions: vec![
+                        SetAction::SingleAssign {
                             entity: slot_n,
                             key: key_created,
-                            action: PropertyAction::Set(Expr::FuncCall {
+                            value: Expr::FuncCall {
                                 name: fn_timestamp,
                                 args: vec![]
-                            })
+                            }
                         }]
                 }),
                 // eg. rhs is executed iff slot_n is null after executing lhs
                 conditions: vec![slot_n]
+            }
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn plan_merge_rel() -> Result<(), Error> {
+        let mut p = plan("MATCH (a), (b) MERGE (a)-[r:TYPE]->(b)")?;
+
+        let id_a = p.tokenize("a");
+        let id_b = p.tokenize("b");
+        let id_r = p.tokenize("r");
+        let tok_type = p.tokenize("TYPE");
+        assert_eq!(
+            p.plan,
+            LogicalPlan::AntiConditionalApply {
+                    lhs: Box::new(LogicalPlan::Optional {
+                        src: Box::new(LogicalPlan::ExpandInto {
+                            src: Box::new(LogicalPlan::NestLoop {
+                                outer: Box::new(LogicalPlan::NodeScan {
+                                    src: Box::new(LogicalPlan::Argument),
+                                    slot: p.slot(id_a),
+                                    labels: None
+                                }),
+                                inner: Box::new(LogicalPlan::NodeScan {
+                                    src: Box::new(LogicalPlan::Argument),
+                                    slot: p.slot(id_b),
+                                    labels: None
+                                }),
+                                predicate: Expr::Bool(true),
+                            }),
+                            left_node_slot: p.slot(id_a),
+                            right_node_slot: p.slot(id_b),
+                            dst_slot: p.slot(id_r),
+                            rel_type: Some(tok_type),
+                            dir: Some(Dir::Out)
+                        }),
+                        slots: vec![p.slot(id_r)]
+                }),
+                rhs: Box::new(LogicalPlan::Create {
+                    src: Box::new(LogicalPlan::Argument),
+                    nodes: vec![],
+                    rels: vec![RelSpec{
+                        slot: p.slot(id_r),
+                        rel_type: tok_type,
+                        start_node_slot: p.slot(id_a),
+                        end_node_slot: p.slot(id_b),
+                        props: vec![]
+                    }]
+                }),
+                conditions: vec![p.slot(id_r)]
             }
         );
         Ok(())

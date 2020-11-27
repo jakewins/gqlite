@@ -22,6 +22,7 @@ mod match_stmt;
 mod merge_stmt;
 mod with_stmt;
 mod call_stmt;
+mod set_stmt;
 
 use expr::plan_expr;
 pub use expr::{Expr, MapEntryExpr, Op};
@@ -66,6 +67,9 @@ impl Frontend {
                 Rule::create_stmt => {
                     plan = create_stmt::plan_create(pc, plan, stmt)?;
                 }
+                Rule::set_stmt => {
+                    plan = set_stmt::plan_set(pc, plan, stmt)?
+                }
                 Rule::merge_stmt => {
                     plan = merge_stmt::plan_merge(pc, plan, stmt)?;
                 }
@@ -105,6 +109,9 @@ pub enum LogicalPlan {
         slot: usize,
         labels: Option<Token>,
     },
+
+    // Starting at a node, expand once according to the specifications in this plan, storing
+    // each rel and node pair found in rel_slot and dst_slot
     Expand {
         src: Box<Self>,
         src_slot: usize,
@@ -113,6 +120,27 @@ pub enum LogicalPlan {
         rel_type: Option<Token>,
         dir: Option<Dir>,
     },
+
+    // Given a known relationship, produce the nodes it connects
+    ExpandRel {
+        src: Box<Self>,
+        src_rel_slot: usize,
+
+        start_node_slot: usize,
+        end_node_slot: usize,
+    },
+
+    // Given two known nodes, yield one row per relationship they have in common
+    // eg. MATCH (a), (b) WITH a, b MATCH (a)-[r]-(b)
+    ExpandInto {
+        src: Box<Self>,
+        left_node_slot: usize,
+        right_node_slot: usize,
+        dst_slot: usize,
+        rel_type: Option<Token>,
+        dir: Option<Dir>,
+    },
+
     // Produce source rows, unless source row is empty, in which case we produce one row with
     // the specified slots set to NULL
     Optional {
@@ -131,8 +159,17 @@ pub enum LogicalPlan {
     },
     SetProperties {
         src: Box<Self>,
-        updates: Vec<PropertyUpdate>,
+        actions: Vec<SetAction>,
     },
+
+    // TODO I don't like these operators, they drop a ton of relevant bits of information.
+    //      It seems it'd be both better and simpler with a less generic option, like
+    //      a dedicated `Merge` operator, because otherwise the planner needs to start making
+    //      assumptions about locking on the backend; a less generic operator would both be
+    //      easier to reason about and carry more semantic information about user intent.
+    //
+    //      Lets come back to that once we know if they are used for anything outside of MERGE
+
     // For each entry in lhs, execute rhs iff all specified slots are non-null; otherwise
     // just yield the output of lhs
     ConditionalApply {
@@ -222,9 +259,9 @@ impl LogicalPlan {
                 }
                 format!(
                     "ProduceResult(\n{}src={},\n{}fields=[{}])",
-                    next_indent,
+                    ind,
                     src.fmt_pretty(&format!("{}  ", next_indent), t),
-                    next_indent,
+                    ind,
                     proj
                 )
             }
@@ -239,9 +276,9 @@ impl LogicalPlan {
                 }
                 format!(
                     "Project(\n{}src={},\n{}projections=[{}])",
-                    next_indent,
+                    ind,
                     src.fmt_pretty(&format!("{}  ", next_indent), t),
-                    next_indent,
+                    ind,
                     proj,
                 )
             }
@@ -284,16 +321,24 @@ impl LogicalPlan {
                         },
                         ind, &format!("{:?}", dir))
             }
+            LogicalPlan::ExpandRel { src, src_rel_slot, start_node_slot: start_node, end_node_slot: end_node } => {
+                let next_indent = &format!("{}  ", ind);
+                format!("ExpandRel(\n{}src={}\n{}src_rel_slot=Slot({})\n{}start_node=Slot({})\n{}end_node=Slot({}))",
+                        ind, src.fmt_pretty(next_indent, t),
+                        ind, src_rel_slot,
+                        ind, start_node,
+                        ind, end_node)
+            }
             LogicalPlan::Argument => format!("Argument()"),
             LogicalPlan::Create { src, nodes, rels } => {
                 let next_indent = &format!("{}  ", ind);
                 format!(
                     "Create(\n{}src={},\n{}nodes={},\n{}rels={})",
-                    next_indent,
+                    ind,
                     src.fmt_pretty(&format!("{}  ", next_indent), t),
-                    next_indent,
+                    ind,
                     format!("{:?}", nodes),
-                    next_indent,
+                    ind,
                     format!("{:?}", rels)
                 )
             }
@@ -301,9 +346,9 @@ impl LogicalPlan {
                 let next_indent = &format!("{}  ", ind);
                 format!(
                     "Selection(\n{}src={}\n{}predicate={:?})",
-                    next_indent,
+                    ind,
                     src.fmt_pretty(next_indent, t),
-                    next_indent,
+                    ind,
                     predicate,
                 )
             }
@@ -311,11 +356,11 @@ impl LogicalPlan {
                 let next_indent = &format!("{}  ", ind);
                 format!(
                     "Limit(\n{}src={}\n{}skip={:?},\n{}limit={:?})",
-                    next_indent,
+                    ind,
                     src.fmt_pretty(next_indent, t),
-                    next_indent,
+                    ind,
                     skip,
-                    next_indent,
+                    ind,
                     limit,
                 )
             }
@@ -323,9 +368,9 @@ impl LogicalPlan {
                 let next_indent = &format!("{}  ", ind);
                 format!(
                     "Sort(\n{}src={}\n{}by={:?})",
-                    next_indent,
+                    ind,
                     src.fmt_pretty(next_indent, t),
-                    next_indent,
+                    ind,
                     sort_by,
                 )
             }
@@ -379,14 +424,14 @@ impl LogicalPlan {
                     slots,
                 )
             }
-            LogicalPlan::SetProperties { src, updates } => {
+            LogicalPlan::SetProperties { src, actions } => {
                 let next_indent = &format!("{}  ", ind);
                 format!(
-                    "SetProperties(\n{}src={}\n{}updates=[{:?}])",
+                    "SetProperties(\n{}src={}\n{}actions=[{:?}])",
                     ind,
                     src.fmt_pretty(next_indent, t),
                     ind,
-                    updates,
+                    actions,
                 )
             }
             LogicalPlan::NestLoop { outer, inner, predicate } => {
@@ -406,20 +451,25 @@ impl LogicalPlan {
     }
 }
 
-// Specification for changing a property
-#[derive(Debug, PartialEq)]
-pub enum PropertyAction {
-    // Set the property to the result of the expression
-    Set(Expr),
-    // Delete,
-}
-
 // Spec for modifying a property on some entity
 #[derive(Debug, PartialEq)]
-pub struct PropertyUpdate {
-    entity: Slot,
-    key: Token,
-    action: PropertyAction
+pub enum SetAction {
+    // SET a.blah = 1
+    SingleAssign {
+        entity: Slot,
+        key: Token,
+        value: Expr,
+    },
+    // SET a += b or SET a += { 'a': "Map" }
+    Append {
+        entity: Slot,
+        value: Expr,
+    },
+    // SET a = b or SET a = { 'a': "Map" }
+    Overwrite {
+        entity: Slot,
+        value: Expr,
+    }
 }
 
 // Specification of a node to create
@@ -707,9 +757,10 @@ pub struct PatternNode {
     // eg. in "MATCH (a)-->()", the second node is anonymous; it will have
     // been assigned an anonymous identifier
     anonymous: bool,
-    // In the pattern, is this node referring to one we already know about?
-    // eg. in "MATCH (a) WITH a MATCH (a)-->(b)", "a" is a bound node in the second MATCH clause
-    bound: bool,
+    // This is mutated as the pattern is solved. Initially bound nodes - nodes we already
+    // know about from before the MATCH, like in `MATCH (a) WITH a MATCH (a)-->(b)` - are
+    // marked solved. As the pattern solver works it incrementally marks more and more stuff
+    // solved.
     solved: bool,
 }
 
@@ -726,13 +777,9 @@ pub struct PatternRel {
     // From the perspective of the left node, is this pattern inbound or outbound?
     dir: Option<Dir>,
     props: Vec<MapEntryExpr>,
-    // In the pattern, was this node assigned an identifier?
-    // eg. in "MATCH (a)-[r]->(b)-->(c)", the second rel is anonymous; it will have
-    // been assigned an auto-generated identifier
+    // See PatternNode#anonymous
     anonymous: bool,
-    // In the pattern, is this node referring to one we already know about?
-    // eg. in "MATCH ()-[r]-() WITH r MATCH (a)-[r]->(b)", "r" is a bound rel in the second MATCH
-    bound: bool,
+    // See PatternNode#solved
     solved: bool,
 }
 
@@ -811,7 +858,7 @@ fn parse_pattern_graph(pc: &mut PlanningContext, patterns: Pair<Rule>) -> Result
                     match segment.as_rule() {
                         Rule::node => {
                             let current_node = parse_pattern_node(pc, segment)?;
-                            if !current_node.anonymous && !current_node.bound {
+                            if !current_node.anonymous && !current_node.solved {
                                 let is_new = pc.declare_tok(current_node.identifier);
                                 if is_new {
                                     pg.unbound_identifiers.push(current_node.identifier)
@@ -831,7 +878,7 @@ fn parse_pattern_graph(pc: &mut PlanningContext, patterns: Pair<Rule>) -> Result
                                 prior_node_id.expect("pattern rel must be preceded by node"),
                                 segment,
                             )?;
-                            if !current_rel.anonymous && !current_rel.bound {
+                            if !current_rel.anonymous && !current_rel.solved {
                                 let is_new = pc.declare_tok(current_rel.identifier);
                                 if is_new {
                                     pg.unbound_identifiers.push(current_rel.identifier)
@@ -889,7 +936,6 @@ fn parse_pattern_node(pc: &mut PlanningContext, pattern_node: Pair<Rule>) -> Res
         labels,
         props,
         anonymous,
-        bound: is_bound,
         solved: is_bound,
     })
 }
@@ -931,7 +977,6 @@ fn parse_pattern_rel(
         dir,
         props,
         anonymous,
-        bound: is_bound,
         solved: is_bound,
     })
 }

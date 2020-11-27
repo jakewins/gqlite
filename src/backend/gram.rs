@@ -100,6 +100,31 @@ impl GramBackend {
                     tokens: self.tokens.clone(),
                 }))
             }
+            LogicalPlan::SetProperties { src, actions } => {
+                let mut out_actions = Vec::with_capacity(actions.len());
+                for action in actions {
+                    match action {
+                        frontend::SetAction::SingleAssign { entity, key, value } => {
+                            out_actions.push(SetAction::SingleAssign {
+                                entity,
+                                key,
+                                value: self.convert_expr(value)
+                            })
+                        }
+                        frontend::SetAction::Append { entity, value } => {
+                            out_actions.push(SetAction::Append { entity,
+                                value: self.convert_expr(value) })
+                        }
+                        frontend::SetAction::Overwrite { entity, value } => {
+                            out_actions.push(SetAction::Overwrite { entity,
+                                value: self.convert_expr(value) })
+                        }
+                    }
+                }
+                Ok(Box::new(SetProperties{
+                    src: self.convert(*src)?,
+                    actions: out_actions }))
+            }
             LogicalPlan::Expand {
                 src,
                 src_slot,
@@ -116,6 +141,23 @@ impl GramBackend {
                 dir,
                 next_rel_index: 0,
                 state: ExpandState::NextNode,
+            })),
+            LogicalPlan::ExpandRel {
+                src,
+                src_rel_slot,
+                start_node_slot: start_node,
+                end_node_slot: end_node,
+            } => Ok(Box::new(ExpandRel {
+                src: self.convert(*src)?,
+                src_rel_slot,
+                start_node,
+                end_node,
+            })),
+            LogicalPlan::ExpandInto {
+                src, left_node_slot, right_node_slot, dst_slot, rel_type, dir
+            } => Ok(Box::new(ExpandInto {
+                src: self.convert(*src)?,
+                left_node_slot, right_node_slot, dst_slot, rel_type, dir,
             })),
             LogicalPlan::Selection { src, predicate } => {
                 // self.convert(*src)
@@ -228,6 +270,20 @@ impl GramBackend {
                 predicate: self.convert_expr(predicate),
                 initialized: false,
             })),
+            LogicalPlan::AntiConditionalApply { lhs, rhs, conditions } => {
+                Ok(Box::new(AntiConditionalApply{
+                    lhs: self.convert(*lhs)?,
+                    rhs: self.convert(*rhs)?,
+                    conditions
+                }))
+            },
+            LogicalPlan::ConditionalApply { lhs, rhs, conditions } => {
+                Ok(Box::new(ConditionalApply{
+                    lhs: self.convert(*lhs)?,
+                    rhs: self.convert(*rhs)?,
+                    conditions
+                }))
+            }
             other => Err(anyhow!("gram backend does not support {:?} yet", other)),
         }
     }
@@ -912,6 +968,84 @@ impl Operator for Expand {
     }
 }
 
+#[derive(Debug)]
+struct ExpandRel {
+    pub src: Box<dyn Operator>,
+
+    pub src_rel_slot: usize,
+
+    pub start_node: usize,
+
+    pub end_node: usize,
+}
+
+impl Operator for ExpandRel {
+    fn next(&mut self, ctx: &mut Context, out: &mut GramRow) -> Result<bool> {
+        if ! self.src.next(ctx, out)? {
+            return Ok(false)
+        }
+
+        // TODO: This is wrong, the direction of the pattern needs to be considered,
+        //       see the planner notes about planning ExpandRel; seeing how far the TCK will let
+        //       me go wrong here
+        let rel = &out.slots[self.src_rel_slot];
+        match rel {
+            GramVal::Rel { node_id, rel_index } => {
+                let node_data = &ctx.g.borrow().nodes[*node_id];
+                let rel_data = &node_data.rels[*rel_index];
+                out.slots[self.end_node] = GramVal::Node { id: *node_id };
+                out.slots[self.start_node] = GramVal::Node { id: rel_data.other_node }
+            }
+            _ => unreachable!()
+        }
+        Ok(true)
+    }
+}
+
+
+#[derive(Debug)]
+struct ExpandInto {
+    pub src: Box<dyn Operator>,
+
+    pub left_node_slot: usize,
+    pub right_node_slot: usize,
+    pub dst_slot: usize,
+    pub rel_type: Option<Token>,
+    pub dir: Option<Dir>,
+}
+
+impl Operator for ExpandInto {
+    fn next(&mut self, ctx: &mut Context, out: &mut GramRow) -> Result<bool> {
+        loop {
+            if !self.src.next(ctx, out)? {
+                return Ok(false)
+            }
+
+            // TODO this is wrong, it only handles cases of one matching rel, does not
+            //      take type or direction into account.
+
+            let left_raw = &out.slots[self.left_node_slot];
+            let right_raw = &out.slots[self.left_node_slot];
+            match (left_raw, right_raw) {
+                (GramVal::Node { id: left }, GramVal::Node { id: right }) => {
+                    let left_node = &ctx.g.borrow().nodes[*left];
+                    let mut rel_index = 0;
+                    for candidate in &left_node.rels {
+                        if candidate.other_node == *right {
+                            out.slots[self.dst_slot] = GramVal::Rel {
+                                node_id: *left, rel_index,
+                            };
+                            return Ok(true)
+                        }
+                        rel_index += 1;
+                    }
+                }
+                _ => panic!("TODO")
+            };
+        }
+    }
+}
+
 // For each src row, perform a full no de scan with the specified filters
 #[derive(Debug)]
 struct NodeScan {
@@ -1082,6 +1216,35 @@ impl Operator for Create {
                 append_rel(ctx, start_node, end_node, rel.rel_type, rel_properties)?;
         }
         Ok(true)
+    }
+}
+
+#[derive(Debug)]
+enum SetAction {
+    SingleAssign {
+        entity: Slot,
+        key: Token,
+        value: Expr,
+    },
+    Append {
+        entity: Slot,
+        value: Expr,
+    },
+    Overwrite {
+        entity: Slot,
+        value: Expr,
+    }
+}
+
+#[derive(Debug)]
+struct SetProperties {
+    pub src: Box<dyn Operator>,
+    pub actions: Vec<SetAction>,
+}
+
+impl Operator for SetProperties {
+    fn next(&mut self, ctx: &mut Context, out: &mut GramRow) -> Result<bool, Error> {
+        todo!()
     }
 }
 
@@ -1506,6 +1669,67 @@ impl Operator for Unwind {
                 row.slots[self.dst] = it[self.next_index].clone();
                 self.next_index += 1;
                 return Ok(true);
+            }
+        }
+    }
+}
+
+#[derive(Debug)]
+struct AntiConditionalApply {
+    pub lhs: Box<dyn Operator>,
+    pub rhs: Box<dyn Operator>,
+
+    pub conditions: Vec<usize>,
+}
+
+impl Operator for AntiConditionalApply {
+    fn next(&mut self, ctx: &mut Context, out: &mut GramRow) -> Result<bool> {
+        loop {
+            if !self.lhs.next(ctx, out)? {
+                return Ok(false)
+            }
+
+            let mut condition_passed = true;
+            for condition_slot in &self.conditions {
+                match out.slots[*condition_slot] {
+                    GramVal::Lit(Val::Null) => (),
+                    _ => {
+                        condition_passed = false;
+                        break;
+                    }
+                }
+            }
+            if condition_passed {
+                return Ok(true)
+            }
+        }
+    }
+}
+
+#[derive(Debug)]
+struct ConditionalApply {
+    pub lhs: Box<dyn Operator>,
+    pub rhs: Box<dyn Operator>,
+
+    pub conditions: Vec<usize>,
+}
+
+impl Operator for ConditionalApply {
+    fn next(&mut self, ctx: &mut Context, out: &mut GramRow) -> Result<bool> {
+        loop {
+            if !self.lhs.next(ctx, out)? {
+                return Ok(false)
+            }
+
+            let mut condition_passed = true;
+            for condition_slot in &self.conditions {
+                if let GramVal::Lit(Val::Null) = out.slots[*condition_slot] {
+                    condition_passed = false;
+                    break;
+                }
+            }
+            if condition_passed {
+                return Ok(true)
             }
         }
     }
