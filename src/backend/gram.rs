@@ -1392,11 +1392,13 @@ impl SetProperties {
     fn write_thing_to_thing(&self, ctx: &mut Context, thing: &GramVal, src: GramVal) -> Result<()> {
         match src {
             GramVal::Map(entries) => {
-                for (k,v) in entries {
+                for (k, v) in entries {
                     if let GramVal::Lit(litval) = v {
                         self.write_prop_to_thing(ctx, thing, k, litval)?;
                     } else {
-                        bail!("Expected a literal value here, probably programming error? Got: {:?}", v)
+                        bail!(
+                            "Expected a literal value here, probably programming error? Got: {:?}",
+                            v)
                     }
                 }
             }
