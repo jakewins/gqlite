@@ -13,7 +13,7 @@ pub fn plan_match(
 
     if pg.optional {
         // We currently only handle a singular case here, OPTIONAL MATCH with a single unbound node:
-        if pg.e.len() > 0 {
+        if !pg.e.is_empty() {
             bail!("gqlite does not yet support OPTIONAL MATCH with relationships, sorry")
         }
 
@@ -34,7 +34,7 @@ pub fn plan_match(
         });
     }
 
-    return plan_match_patterngraph(pc, src, pg);
+    plan_match_patterngraph(pc, src, pg)
 }
 
 pub fn plan_match_patterngraph(
@@ -95,7 +95,7 @@ pub fn plan_match_patterngraph(
     //    - Declare all identifiers introduced
     let mut candidate_id = None;
     for id in &pg.v_order {
-        if let None = candidate_id {
+        if candidate_id.is_none() {
             candidate_id = Some(id);
         }
         let candidate = pg.v.get_mut(id).unwrap();
@@ -199,7 +199,7 @@ pub fn plan_match_patterngraph(
         // eg. something like MATCH (a), (b) or MATCH (a), (b)-->(). So, go through the nodes
         // and, if there are unsolved ones, this means there's a cartesian product we need to solve
         if !solved_any {
-            for (_, v) in &mut pg.v {
+            for v in pg.v.values_mut() {
                 if v.solved {
                     continue;
                 }

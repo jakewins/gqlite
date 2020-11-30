@@ -363,7 +363,7 @@ impl LogicalPlan {
                         ind, start_node,
                         ind, end_node)
             }
-            LogicalPlan::Argument => format!("Argument()"),
+            LogicalPlan::Argument => "Argument()".to_string(),
             LogicalPlan::Create { src, nodes, rels } => {
                 let next_indent = &format!("{}  ", ind);
                 format!(
@@ -691,7 +691,7 @@ impl Scoping {
             },
         );
         let old_prior = mem::replace(&mut self._prior, new_prior);
-        if old_prior.slots.len() > 0 || old_prior.named_identifiers.len() > 0 {
+        if !old_prior.slots.is_empty() || old_prior.named_identifiers.is_empty() {
             self.history.push(old_prior);
         }
     }
@@ -739,7 +739,7 @@ impl Scoping {
 
     // If the given id is a currently active stack reference, return the stack slot it's referencing
     fn lookup_stackref(&self, id: Token) -> Option<usize> {
-        self.stackrefs.get(&id).map(|r| *r)
+        self.stackrefs.get(&id).copied()
     }
 
     fn tokenize(&mut self, contents: &str) -> Token {
@@ -763,7 +763,7 @@ impl Scoping {
     fn declare(&mut self, contents: &str) -> Token {
         let tok = self.tokenize(contents);
         self.declare_tok(tok);
-        return tok;
+        tok
     }
 
     // Is the given token a value that we know about already?
@@ -850,11 +850,11 @@ fn plan_unwind(
     );
     let alias = pc.scoping.lookup_or_allocrow(alias_token);
 
-    return Ok(LogicalPlan::Unwind {
+    Ok(LogicalPlan::Unwind {
         src: Box::new(src),
         list_expr,
         alias,
-    });
+    })
 }
 
 #[derive(Debug, PartialEq, Clone)]

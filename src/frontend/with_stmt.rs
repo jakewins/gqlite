@@ -9,8 +9,8 @@ pub fn plan_with(
     stmt: Pair<Rule>,
 ) -> Result<LogicalPlan> {
     let parts = stmt.into_inner();
-    let projections: Projections = parse_projections(pc, parts)?;
-    return plan_parsed_with(pc, src, projections);
+    let projections = parse_projections(pc, parts)?;
+    plan_parsed_with(pc, src, projections)
 }
 
 // This is shared between the RETURN and WITH plan functions
@@ -56,7 +56,7 @@ fn plan_parsed_with(
         }
     }
 
-    return Ok(plan);
+    Ok(plan)
 }
 
 pub fn plan_aggregation(
@@ -85,14 +85,14 @@ pub fn plan_aggregation(
         })
     }
 
-    return Ok(LogicalPlan::Project {
+    Ok(LogicalPlan::Project {
         src: Box::new(LogicalPlan::Aggregate {
             src: Box::new(src),
             grouping,
             aggregations,
         }),
         projections: post_aggregation_projections,
-    });
+    })
 }
 
 pub fn plan_return(
@@ -109,10 +109,10 @@ pub fn plan_return(
     }
 
     let result = plan_parsed_with(pc, src, projections)?;
-    return Ok(LogicalPlan::ProduceResult {
+    Ok(LogicalPlan::ProduceResult {
         src: Box::new(result),
         fields,
-    });
+    })
 }
 
 struct Projections {
@@ -173,7 +173,7 @@ fn parse_projections(pc: &mut PlanningContext, parts: Pairs<Rule>) -> Result<Pro
                 let where_expr = part
                     .into_inner()
                     .next()
-                    .ok_or(anyhow!("WHERE contained unexpected part"))?;
+                    .ok_or_else(|| anyhow!("WHERE contained unexpected part"))?;
                 let prior_mode = mem::replace(&mut pc.scoping.mode, ScopingMode::ProjectionMode);
                 let maybe_where_expr = plan_expr(&mut pc.scoping, where_expr);
                 pc.scoping.mode = prior_mode;
@@ -183,14 +183,14 @@ fn parse_projections(pc: &mut PlanningContext, parts: Pairs<Rule>) -> Result<Pro
                 let skip_expr = part
                     .into_inner()
                     .next()
-                    .ok_or(anyhow!("SKIP contained unexpected part"))?;
+                    .ok_or_else(|| anyhow!("SKIP contained unexpected part"))?;
                 skip = Some(plan_expr(&mut pc.scoping, skip_expr)?);
             }
             Rule::limit_clause => {
                 let limit_expr = part
                     .into_inner()
                     .next()
-                    .ok_or(anyhow!("LIMIT contained unexpected part"))?;
+                    .ok_or_else(|| anyhow!("LIMIT contained unexpected part"))?;
                 limit = Some(plan_expr(&mut pc.scoping, limit_expr)?);
             }
             Rule::order_clause => {
@@ -199,7 +199,7 @@ fn parse_projections(pc: &mut PlanningContext, parts: Pairs<Rule>) -> Result<Pro
                     let sort_expr = sort_group
                         .into_inner()
                         .next()
-                        .ok_or(anyhow!("SORT contained unexpected part"))?;
+                        .ok_or_else(|| anyhow!("SORT contained unexpected part"))?;
                     let planned_sort_expr =
                         plan_order_key_expression(&mut pc.scoping, &projections, sort_expr)?;
                     out.push(planned_sort_expr)
@@ -224,7 +224,7 @@ fn parse_projections(pc: &mut PlanningContext, parts: Pairs<Rule>) -> Result<Pro
 // See OrderByMode on Scoping
 fn plan_order_key_expression(
     scoping: &mut Scoping,
-    projections: &Vec<Projection>,
+    projections: &[Projection],
     expression: Pair<Rule>,
 ) -> Result<Expr> {
     // Enter special ORDER BY scoping mode, see OrderByMode

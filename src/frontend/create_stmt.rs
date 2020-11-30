@@ -27,7 +27,7 @@ pub fn plan_create_patterngraph(
             continue;
         }
 
-        let node = pg.v.remove(&id).ok_or(anyhow!("failed to parse pattern in query, please report this and include the query you are running"))?;
+        let node = pg.v.remove(&id).ok_or_else(||anyhow!("failed to parse pattern in query, please report this and include the query you are running"))?;
 
         nodes.push(NodeSpec {
             slot: pc.scoping.lookup_or_allocrow(id),
@@ -44,9 +44,9 @@ pub fn plan_create_patterngraph(
             Some(Dir::Out) => {
                 rels.push(RelSpec {
                     slot: pc.scoping.lookup_or_allocrow(rel.identifier),
-                    rel_type: rel.rel_type.ok_or(anyhow!(
-                        "Relationship patterns in CREATE must have a type specified"
-                    ))?,
+                    rel_type: rel.rel_type.ok_or_else(|| {
+                        anyhow!("Relationship patterns in CREATE must have a type specified")
+                    })?,
                     start_node_slot: pc.scoping.lookup_or_allocrow(rel.left_node),
                     end_node_slot: pc.scoping.lookup_or_allocrow(rel.right_node.unwrap()),
                     props: rel.props,
@@ -55,9 +55,9 @@ pub fn plan_create_patterngraph(
             Some(Dir::In) => {
                 rels.push(RelSpec {
                     slot: pc.scoping.lookup_or_allocrow(rel.identifier),
-                    rel_type: rel.rel_type.ok_or(anyhow!(
-                        "Relationship patterns in CREATE must have a type specified"
-                    ))?,
+                    rel_type: rel.rel_type.ok_or_else(|| {
+                        anyhow!("Relationship patterns in CREATE must have a type specified")
+                    })?,
                     start_node_slot: pc.scoping.lookup_or_allocrow(rel.right_node.unwrap()),
                     end_node_slot: pc.scoping.lookup_or_allocrow(rel.left_node),
                     props: vec![],

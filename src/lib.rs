@@ -79,6 +79,7 @@ impl<B: Backend> Cursor<B> {
         self.inner.fields()
     }
 
+    #[allow(clippy::should_implement_trait)]
     pub fn next(&mut self) -> Result<Option<&Row>> {
         self.inner.next()
     }

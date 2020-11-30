@@ -27,7 +27,7 @@ pub fn plan_call(
     Ok(LogicalPlan::Call {
         src: Box::new(src),
         name: name.unwrap(),
-        args: args.unwrap_or(Vec::new()),
+        args: args.unwrap_or_default(),
     })
 }
 
@@ -39,7 +39,7 @@ fn plan_args(pc: &mut PlanningContext, arglist: Pair<Rule>) -> Result<Vec<Expr>>
             _ => unreachable!(),
         }
     }
-    return Ok(out);
+    Ok(out)
 }
 
 #[cfg(test)]

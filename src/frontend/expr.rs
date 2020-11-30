@@ -111,16 +111,12 @@ impl Expr {
             Expr::And(terms) => terms.iter().any(|c| c.is_aggregating(aggregating_funcs)),
             Expr::Or(terms) => terms.iter().any(|c| c.is_aggregating(aggregating_funcs)),
             Expr::Bool(_) => false,
-            Expr::BinaryOp { left, right, op: _ } => {
+            Expr::BinaryOp { left, right, .. } => {
                 left.is_aggregating(aggregating_funcs) | right.is_aggregating(aggregating_funcs)
             }
             Expr::Param(_) => false,
             Expr::HasLabel(_, _) => false,
-            Expr::ListComprehension {
-                src,
-                stackslot: _,
-                map_expr,
-            } => {
+            Expr::ListComprehension { src, map_expr, .. } => {
                 src.is_aggregating(aggregating_funcs) || map_expr.is_aggregating(aggregating_funcs)
             }
         }
@@ -187,7 +183,7 @@ fn plan_add_sub(scope: &mut Scoping, item: Pair<Rule>) -> Result<Expr> {
                     scope,
                     inners
                         .next()
-                        .ok_or(anyhow!("parser error: add / sub without right term?"))?,
+                        .ok_or_else(|| anyhow!("parser error: add / sub without right term?"))?,
                 )?;
                 out = Expr::BinaryOp {
                     left: Box::new(out),
@@ -211,9 +207,9 @@ fn plan_mul_div(scope: &mut Scoping, item: Pair<Rule>) -> Result<Expr> {
             while let Some(op) = inners.next() {
                 let right = plan_term(
                     scope,
-                    inners.next().ok_or(anyhow!(
-                        "parser error: multiplication / division without right term?"
-                    ))?,
+                    inners.next().ok_or_else(|| {
+                        anyhow!("parser error: multiplication / division without right term?")
+                    })?,
                 )?;
                 out = Expr::BinaryOp {
                     left: Box::new(out),
@@ -235,14 +231,14 @@ fn plan_term(scope: &mut Scoping, term: Pair<Rule>) -> Result<Expr> {
                 .next()
                 .expect("Strings should always have an inner value")
                 .as_str();
-            return Ok(Expr::String(String::from(content)));
+            Ok(Expr::String(String::from(content)))
         }
         Rule::id => {
             let tok = scope.tokenize(term.as_str());
             if let Some(stackref) = scope.lookup_stackref(tok) {
                 return Ok(Expr::StackRef(stackref));
             }
-            return Ok(Expr::RowRef(scope.lookup_or_allocrow(tok)));
+            Ok(Expr::RowRef(scope.lookup_or_allocrow(tok)))
         }
         Rule::prop_lookup => {
             let mut prop_lookup = term.into_inner();
@@ -277,7 +273,7 @@ fn plan_term(scope: &mut Scoping, term: Pair<Rule>) -> Result<Expr> {
             if props.is_empty() {
                 return Ok(base);
             }
-            return Ok(Expr::Prop(Box::new(base), props));
+            Ok(Expr::Prop(Box::new(base), props))
         }
         Rule::func_call => {
             let mut func_call = term.into_inner();
@@ -290,14 +286,14 @@ fn plan_term(scope: &mut Scoping, term: Pair<Rule>) -> Result<Expr> {
             for arg in func_call {
                 args.push(plan_expr(scope, arg)?);
             }
-            return Ok(Expr::FuncCall { name, args });
+            Ok(Expr::FuncCall { name, args })
         }
         Rule::count_call => {
             let name = scope.tokenize("count");
-            return Ok(Expr::FuncCall {
+            Ok(Expr::FuncCall {
                 name,
                 args: Vec::new(),
-            });
+            })
         }
         Rule::list_comprehension => {
             let mut parts = term.into_inner();
@@ -310,11 +306,11 @@ fn plan_term(scope: &mut Scoping, term: Pair<Rule>) -> Result<Expr> {
 
             scope.dealloc_stack(identifier);
 
-            return Ok(Expr::ListComprehension {
+            Ok(Expr::ListComprehension {
                 src: Box::new(src_expr),
                 stackslot: 0,
                 map_expr: Box::new(map_expr),
-            });
+            })
         }
         Rule::list => {
             let mut items = Vec::new();
@@ -322,23 +318,23 @@ fn plan_term(scope: &mut Scoping, term: Pair<Rule>) -> Result<Expr> {
             for exp in exprs {
                 items.push(plan_expr(scope, exp)?);
             }
-            return Ok(Expr::List(items));
+            Ok(Expr::List(items))
         }
-        Rule::map => return Ok(Expr::Map(parse_map_expression(scope, term)?)),
+        Rule::map => Ok(Expr::Map(parse_map_expression(scope, term)?)),
         Rule::int => {
             let v = term.as_str().parse::<i64>()?;
-            return Ok(Expr::Int(v));
+            Ok(Expr::Int(v))
         }
         Rule::float => {
             let v = term.as_str().parse::<f64>()?;
-            return Ok(Expr::Float(v));
+            Ok(Expr::Float(v))
         }
         Rule::science => {
             let v = term.as_str().parse::<f64>()?;
-            return Ok(Expr::Float(v));
+            Ok(Expr::Float(v))
         }
-        Rule::lit_true => return Ok(Expr::Bool(true)),
-        Rule::lit_false => return Ok(Expr::Bool(false)),
+        Rule::lit_true => Ok(Expr::Bool(true)),
+        Rule::lit_false => Ok(Expr::Bool(false)),
         Rule::binary_op => {
             let mut parts = term.into_inner();
             let left = parts.next().expect("binary operators must have a left arg");
@@ -351,17 +347,17 @@ fn plan_term(scope: &mut Scoping, term: Pair<Rule>) -> Result<Expr> {
 
             let left_expr = plan_term(scope, left)?;
             let right_expr = plan_term(scope, right)?;
-            return Ok(Expr::BinaryOp {
+            Ok(Expr::BinaryOp {
                 left: Box::new(left_expr),
                 right: Box::new(right_expr),
                 op: Op::from_str(op.as_str())?,
-            });
+            })
         }
         Rule::expr => {
             // this happens when there are parenthetises forcing "full" expressions down here
-            return plan_expr(scope, term);
+            plan_expr(scope, term)
         }
-        Rule::param => return Ok(Expr::Param(scope.tokenize(term.as_str()))),
+        Rule::param => Ok(Expr::Param(scope.tokenize(term.as_str()))),
         _ => panic!("({:?}): {}", term.as_rule(), term.as_str()),
     }
 }

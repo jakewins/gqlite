@@ -9,10 +9,10 @@ pub fn plan_set(
     set_stmt: Pair<Rule>,
 ) -> Result<LogicalPlan> {
     let actions = parse_set_clause(&mut pc.scoping, set_stmt)?;
-    return Ok(LogicalPlan::SetProperties {
+    Ok(LogicalPlan::SetProperties {
         src: Box::new(src),
         actions,
-    });
+    })
 }
 
 pub fn parse_set_clause(scoping: &mut Scoping, set_stmt: Pair<Rule>) -> Result<Vec<SetAction>> {
@@ -55,7 +55,7 @@ pub fn parse_set_clause(scoping: &mut Scoping, set_stmt: Pair<Rule>) -> Result<V
         }
     }
 
-    return Ok(actions);
+    Ok(actions)
 }
 
 #[cfg(test)]
