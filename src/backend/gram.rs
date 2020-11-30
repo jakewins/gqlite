@@ -1398,7 +1398,8 @@ impl SetProperties {
                     } else {
                         bail!(
                             "Expected a literal value here, probably programming error? Got: {:?}",
-                            v)
+                            v
+                        )
                     }
                 }
             }
