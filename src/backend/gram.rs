@@ -1346,7 +1346,11 @@ impl SetProperties {
             GramVal::Rel { node_id, rel_index } => {
                 let node = &ctx.g.borrow_mut().nodes[*node_id];
                 let rel_half = &node.rels[*rel_index];
-                rel_half.properties.borrow_mut().insert(key, val);
+                if val == Val::Null {
+                    rel_half.properties.borrow_mut().remove(&key);
+                } else {
+                    rel_half.properties.borrow_mut().insert(key, val);
+                }
             }
             v => {
                 bail!("Don't know how to append properties to {:?}", v)
