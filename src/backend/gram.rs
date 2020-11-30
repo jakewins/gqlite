@@ -603,6 +603,9 @@ impl Expr {
                     .find(|(ek, _)| ek == key)
                     .map(|e| e.1.clone())
                     .unwrap_or(GramVal::Lit(Val::Null)),
+                GramVal::Lit(Val::Null) => {
+                    bail!("Can't read property {:?} because {:?} is NULL", prop, expr)
+                }
                 v => bail!("Gram backend does not yet support {:?}", v),
             };
         }

@@ -174,7 +174,10 @@ fn parse_projections(pc: &mut PlanningContext, parts: Pairs<Rule>) -> Result<Pro
                     .into_inner()
                     .next()
                     .ok_or(anyhow!("WHERE contained unexpected part"))?;
-                selection = Some(plan_expr(&mut pc.scoping, where_expr)?);
+                let prior_mode = mem::replace(&mut pc.scoping.mode, ScopingMode::ProjectionMode);
+                let maybe_where_expr = plan_expr(&mut pc.scoping, where_expr);
+                pc.scoping.mode = prior_mode;
+                selection = Some(maybe_where_expr?);
             }
             Rule::skip_clause => {
                 let skip_expr = part
@@ -198,8 +201,6 @@ fn parse_projections(pc: &mut PlanningContext, parts: Pairs<Rule>) -> Result<Pro
                         .next()
                         .ok_or(anyhow!("SORT contained unexpected part"))?;
                     let planned_sort_expr = plan_order_key_expression(&mut pc.scoping, &projections,sort_expr)?;
-                    println!("ORDER_CLAUSE: {:?} / {:?}", pc.scoping, planned_sort_expr);
-                    println!("ORDER_CLAUSE AGG: {:?}", projections);
                     out.push(planned_sort_expr)
                 }
                 sort = Some(out);
@@ -222,7 +223,7 @@ fn parse_projections(pc: &mut PlanningContext, parts: Pairs<Rule>) -> Result<Pro
 // See OrderByMode on Scoping
 fn plan_order_key_expression(scoping: &mut Scoping, projections: &Vec<Projection>, expression: Pair<Rule>) -> Result<Expr> {
     // Enter special ORDER BY scoping mode, see OrderByMode
-    let original_scoping_mode = mem::replace(&mut scoping.mode, ScopingMode::OrderByMode);
+    let original_scoping_mode = mem::replace(&mut scoping.mode, ScopingMode::ProjectionMode);
     let maybe_sortkey = plan_expr(scoping, expression);
     scoping.mode = original_scoping_mode;
     let sortkey = maybe_sortkey?;
@@ -634,6 +635,39 @@ mod tests {
                         expr: Expr::RowRef(p.slot(id_n)),
                         alias: id_n,
                         dst: p.slot(id_n),
+                    }],
+                }),
+                predicate: Expr::BinaryOp {
+                    left: Box::new(Expr::Prop(
+                        Box::new(Expr::RowRef(p.slot(id_n))),
+                        vec![key_name]
+                    )),
+                    right: Box::new(Expr::String("bob".to_string())),
+                    op: Op::Eq
+                }
+            }
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn plan_with_where_referring_to_prior_scope() -> Result<(), Error> {
+        let mut p = plan("MATCH (n) WITH n.name AS name WHERE n.name = 'bob'")?;
+        let id_n = p.tokenize("n");
+        let key_name = p.tokenize("name");
+        assert_eq!(
+            p.plan,
+            LogicalPlan::Selection {
+                src: Box::new(LogicalPlan::Project {
+                    src: Box::new(LogicalPlan::NodeScan {
+                        src: Box::new(LogicalPlan::Argument),
+                        slot: 0,
+                        labels: None,
+                    }),
+                    projections: vec![Projection {
+                        expr: Expr::Prop(Box::new(Expr::RowRef(p.slot(id_n))), vec![key_name]),
+                        alias: key_name,
+                        dst: p.slot(key_name),
                     }],
                 }),
                 predicate: Expr::BinaryOp {

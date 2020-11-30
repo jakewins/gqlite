@@ -597,12 +597,15 @@ pub enum ScopingMode {
     Current,
     Prior,
 
-    // Special scoping rules used for ORDER BY expressions:
+    // Special scoping rules used "inside" WITH and RETURN statements, in the ORDER BY and
+    // WHERE clauses associated with them; these get a bit tangly because we're dealing with
+    // the transition from one scope to the next (eg. WITH introduce a new scope and navigates
+    // the translation across)
     //
     // - You can't declare new stuff
     // - If you look something up, we first try to find it in the prior scope
     // - If we can't find it in the prior scope, we look it up in the current scope
-    OrderByMode,
+    ProjectionMode,
 }
 
 // Owns variable scoping as the query is planned
@@ -727,7 +730,7 @@ impl Scoping {
         match self.mode {
             ScopingMode::Current => self._current.named_identifiers.insert(tok),
             ScopingMode::Prior => self._prior.named_identifiers.insert(tok),
-            ScopingMode::OrderByMode => panic!("cannot declare new variables in ORDER BY clause"),
+            ScopingMode::ProjectionMode => panic!("cannot declare new variables in ORDER BY clause"),
         }
     }
 
@@ -745,7 +748,7 @@ impl Scoping {
         match self.mode {
             ScopingMode::Current => self._current.named_identifiers.contains(&tok),
             ScopingMode::Prior => self._prior.named_identifiers.contains(&tok),
-            ScopingMode::OrderByMode => self._prior.named_identifiers.contains(&tok) || self._current.named_identifiers.contains(&tok),
+            ScopingMode::ProjectionMode => self._prior.named_identifiers.contains(&tok) || self._current.named_identifiers.contains(&tok),
         }
     }
 
@@ -773,7 +776,7 @@ impl Scoping {
                     }
                 }
             },
-            ScopingMode::OrderByMode => {
+            ScopingMode::ProjectionMode => {
                 if let Some(slot) = self._prior.slots.get(&tok) {
                     *slot
                 } else if let Some(slot) = self._current.slots.get(&tok) {
