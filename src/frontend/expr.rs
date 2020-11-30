@@ -396,7 +396,7 @@ pub fn parse_map_expression(
 mod tests {
     use super::*;
     use crate::backend::{BackendDesc, FuncSignature, FuncType, Token, Tokens};
-    use crate::frontend::{Frontend, LogicalPlan};
+    use crate::frontend::{Frontend, LogicalPlan, PlanningContext};
     use crate::Type;
     use anyhow::Result;
     use std::cell::RefCell;
