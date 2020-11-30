@@ -1367,7 +1367,7 @@ impl SetProperties {
             GramVal::Map(entries) => {
                 for (k,v) in entries {
                     if let GramVal::Lit(litval) = v {
-                        self.write_prop_to_thing(ctx, thing, k, litval);
+                        self.write_prop_to_thing(ctx, thing, k, litval)?;
                     } else {
                         bail!("Expected a literal value here, probably programming error? Got: {:?}", v)
                     }
@@ -1379,7 +1379,7 @@ impl SetProperties {
                     node.properties.clone()
                 };
                 for (k, v) in clonedprops.iter() {
-                    self.write_prop_to_thing(ctx, thing, *k, v.clone());
+                    self.write_prop_to_thing(ctx, thing, *k, v.clone())?;
                 }
             }
             _ => {
@@ -1395,7 +1395,7 @@ impl SetProperties {
                 let node = &mut ctx.g.borrow_mut().nodes[*node_id];
                 let rel = &mut node.rels[*rel_index];
                 let mut props = rel.properties.borrow_mut();
-                let num_props = props.len();
+                let _num_props = props.len();
                 props.clear();
             }
             v => {

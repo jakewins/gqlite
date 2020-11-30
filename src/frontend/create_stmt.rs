@@ -8,7 +8,7 @@ pub fn plan_create(
     src: LogicalPlan,
     create_stmt: Pair<Rule>,
 ) -> Result<LogicalPlan> {
-    let mut pg = parse_pattern_graph(pc, create_stmt)?;
+    let pg = parse_pattern_graph(pc, create_stmt)?;
 
     plan_create_patterngraph(&mut pc, src, pg)
 }

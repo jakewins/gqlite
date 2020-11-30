@@ -1,14 +1,14 @@
-use super::{Expr, LogicalPlan, Pair, PlanningContext, Result, Rule};
-use crate::backend::Token;
+use super::{LogicalPlan, Pair, PlanningContext, Result, Rule};
+
 use crate::frontend::expr::plan_expr;
-use crate::frontend::{SetAction, Scoping, Scope};
+use crate::frontend::{SetAction, Scoping};
 
 pub fn plan_set(
     pc: &mut PlanningContext,
     src: LogicalPlan,
     set_stmt: Pair<Rule>,
 ) -> Result<LogicalPlan> {
-    let mut actions = parse_set_clause(&mut pc.scoping, set_stmt)?;
+    let actions = parse_set_clause(&mut pc.scoping, set_stmt)?;
     return Ok(LogicalPlan::SetProperties { src: Box::new(src), actions })
 }
 
@@ -95,7 +95,7 @@ mod tests {
         let mut p = plan("MATCH (a), (b) SET a = b")?;
         let id_a = p.tokenize("a");
         let id_b = p.tokenize("b");
-        let key_name = p.tokenize("name");
+        let _key_name = p.tokenize("name");
 
         assert_eq!(
             p.plan,

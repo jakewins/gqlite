@@ -319,7 +319,7 @@ mod example_steps {
                 }
             }
         }
-        for (newkey, newval) in new.iter() {
+        for (newkey, _newval) in new.iter() {
             if !original.contains_key(newkey) {
                 added += 1
             }

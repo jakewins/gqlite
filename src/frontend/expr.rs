@@ -2,7 +2,7 @@
 // to expressions.
 
 use crate::backend::{Token, Tokens};
-use crate::frontend::{PlanningContext, Result, Rule, Scoping};
+use crate::frontend::{Result, Rule, Scoping};
 use crate::Slot;
 use pest::iterators::Pair;
 use std::collections::HashSet;

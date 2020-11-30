@@ -7,7 +7,7 @@ pub fn plan_match(
     src: LogicalPlan,
     match_stmt: Pair<Rule>,
 ) -> Result<LogicalPlan> {
-    let mut pg = parse_pattern_graph(pc, match_stmt)?;
+    let pg = parse_pattern_graph(pc, match_stmt)?;
 
     println!("PG: {:?}", pg);
 

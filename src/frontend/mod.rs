@@ -1073,7 +1073,7 @@ pub(crate) mod tests {
     use crate::Type;
     use anyhow::Result;
     use std::cell::RefCell;
-    use std::collections::HashMap;
+    
     use std::rc::Rc;
 
     // Outcome of testing planning; the plan plus other related items to do checks on

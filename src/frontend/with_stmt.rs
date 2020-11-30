@@ -396,12 +396,12 @@ mod tests {
         // Eg. a as b, b as tmp should not cause the slot holding `b` to be overwritten by `a`
         let mut p = plan("MATCH (a:A)-[r:REL]->(b:B) WITH a AS b, b AS tmp, r AS r")?;
 
-        let id_a = p.tokenize("a");
+        let _id_a = p.tokenize("a");
         let id_b = p.tokenize("b");
         let id_tmp = p.tokenize("tmp");
         let id_r = p.tokenize("r");
 
-        let projections = if let LogicalPlan::Project { src, projections } = & p.plan {
+        let projections = if let LogicalPlan::Project { src: _, projections } = & p.plan {
             projections.clone().to_vec()
         } else {
             panic!("Expected plan to be a projection, got {:?}", p.plan)
@@ -439,7 +439,7 @@ mod tests {
         let id_one = p.tokenize("one");
         let id_r = p.tokenize("r");
 
-        let projections = if let LogicalPlan::Project { src, projections } = & p.plan {
+        let projections = if let LogicalPlan::Project { src: _, projections } = & p.plan {
             projections.clone().to_vec()
         } else {
             panic!("Expected plan to be a projection, got {:?}", p.plan)

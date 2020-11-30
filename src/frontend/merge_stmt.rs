@@ -1,11 +1,11 @@
 use super::{
-    parse_pattern_graph, Dir, LogicalPlan, NodeSpec, Pair, PlanningContext, RelSpec, Result, Rule,
+    parse_pattern_graph, LogicalPlan, Pair, PlanningContext, Result, Rule,
 };
 use crate::frontend::{SetAction};
-use pest::iterators::Pairs;
-use crate::frontend::expr::plan_expr;
-use crate::frontend::match_stmt::{plan_match, plan_match_patterngraph};
-use crate::frontend::create_stmt::{plan_create, plan_create_patterngraph};
+
+
+use crate::frontend::match_stmt::{plan_match_patterngraph};
+use crate::frontend::create_stmt::{plan_create_patterngraph};
 use crate::frontend::set_stmt::parse_set_clause;
 
 pub fn plan_merge(
@@ -16,7 +16,7 @@ pub fn plan_merge(
     let mut pairs = merge_stmt.into_inner();
     let patterns = pairs.next().unwrap();
 
-    let mut pg = parse_pattern_graph(pc, patterns)?;
+    let pg = parse_pattern_graph(pc, patterns)?;
 
     let mut on_create: Vec<SetAction> = Vec::new();
     let mut on_match: Vec<SetAction> = Vec::new();
@@ -38,7 +38,7 @@ pub fn plan_merge(
     // the mutating state hidden in their own implementations and take an immutable graph later on..
     // Eg. pathological MERGE statements may contain hundreds of thousands of pattern nodes, so
     // clone is expensive
-    let mut matchpg = pg.clone();
+    let matchpg = pg.clone();
 
     // Slots the pattern populates; either the match will fill these or the create will; we use
     // this list in the ConditionalApply/AntiConditionalApply plans below
