@@ -92,7 +92,9 @@ impl Expr {
     pub fn is_aggregating(&self, aggregating_funcs: &HashSet<Token>) -> bool {
         match self {
             Expr::Prop(c, _) => c.is_aggregating(aggregating_funcs),
-            Expr::DynProp(b, p) => b.is_aggregating(aggregating_funcs) || p.is_aggregating(aggregating_funcs),
+            Expr::DynProp(b, p) => {
+                b.is_aggregating(aggregating_funcs) || p.is_aggregating(aggregating_funcs)
+            }
             Expr::RowRef(_) => false,
             Expr::StackRef(_) => false,
             Expr::Float(_) => false,
@@ -114,7 +116,13 @@ impl Expr {
             }
             Expr::Param(_) => false,
             Expr::HasLabel(_, _) => false,
-            Expr::ListComprehension { src, stackslot: _, map_expr } => src.is_aggregating(aggregating_funcs) || map_expr.is_aggregating(aggregating_funcs),
+            Expr::ListComprehension {
+                src,
+                stackslot: _,
+                map_expr,
+            } => {
+                src.is_aggregating(aggregating_funcs) || map_expr.is_aggregating(aggregating_funcs)
+            }
         }
     }
 
@@ -232,7 +240,7 @@ fn plan_term(scope: &mut Scoping, term: Pair<Rule>) -> Result<Expr> {
         Rule::id => {
             let tok = scope.tokenize(term.as_str());
             if let Some(stackref) = scope.lookup_stackref(tok) {
-                return Ok(Expr::StackRef(stackref))
+                return Ok(Expr::StackRef(stackref));
             }
             return Ok(Expr::RowRef(scope.lookup_or_allocrow(tok)));
         }
@@ -257,7 +265,8 @@ fn plan_term(scope: &mut Scoping, term: Pair<Rule>) -> Result<Expr> {
                         } else {
                             base = Expr::DynProp(
                                 Box::new(Expr::Prop(Box::new(base), props)),
-                                Box::new(dyn_lookup_expr));
+                                Box::new(dyn_lookup_expr),
+                            );
                             props = Vec::new();
                         }
                     }
@@ -266,7 +275,7 @@ fn plan_term(scope: &mut Scoping, term: Pair<Rule>) -> Result<Expr> {
             }
             // Can happen if Rule::expr branch above is involved
             if props.is_empty() {
-                return Ok(base)
+                return Ok(base);
             }
             return Ok(Expr::Prop(Box::new(base), props));
         }
@@ -305,7 +314,7 @@ fn plan_term(scope: &mut Scoping, term: Pair<Rule>) -> Result<Expr> {
                 src: Box::new(src_expr),
                 stackslot: 0,
                 map_expr: Box::new(map_expr),
-            })
+            });
         }
         Rule::list => {
             let mut items = Vec::new();
@@ -352,9 +361,7 @@ fn plan_term(scope: &mut Scoping, term: Pair<Rule>) -> Result<Expr> {
             // this happens when there are parenthetises forcing "full" expressions down here
             return plan_expr(scope, term);
         }
-        Rule::param => {
-            return Ok(Expr::Param(scope.tokenize(term.as_str())))
-        }
+        Rule::param => return Ok(Expr::Param(scope.tokenize(term.as_str()))),
         _ => panic!("({:?}): {}", term.as_rule(), term.as_str()),
     }
 }
@@ -587,7 +594,10 @@ mod tests {
                         right: Box::new(Expr::String("->".to_string())),
                         op: Op::Add
                     }),
-                    right: Box::new(Expr::DynProp(Box::new(Expr::Param(param_r)), Box::new(Expr::StackRef(0)))),
+                    right: Box::new(Expr::DynProp(
+                        Box::new(Expr::Param(param_r)),
+                        Box::new(Expr::StackRef(0))
+                    )),
                     op: Op::Add
                 })
             },

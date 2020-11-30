@@ -1,6 +1,6 @@
 use super::{parse_pattern_graph, Dir, Expr, LogicalPlan, Pair, PlanningContext, Result, Rule};
 use crate::backend::Token;
-use crate::frontend::{Op, PatternNode, PatternGraph};
+use crate::frontend::{Op, PatternGraph, PatternNode};
 
 pub fn plan_match(
     pc: &mut PlanningContext,
@@ -34,10 +34,14 @@ pub fn plan_match(
         });
     }
 
-    return plan_match_patterngraph(pc, src, pg)
+    return plan_match_patterngraph(pc, src, pg);
 }
 
-pub fn plan_match_patterngraph(pc: &mut PlanningContext, src: LogicalPlan, mut pg: PatternGraph) -> Result<LogicalPlan> {
+pub fn plan_match_patterngraph(
+    pc: &mut PlanningContext,
+    src: LogicalPlan,
+    mut pg: PatternGraph,
+) -> Result<LogicalPlan> {
     fn filter_expand(expand: LogicalPlan, slot: Token, labels: &[Token]) -> LogicalPlan {
         let labels = labels
             .iter()
@@ -76,7 +80,7 @@ pub fn plan_match_patterngraph(pc: &mut PlanningContext, src: LogicalPlan, mut p
                 src: Box::new(plan),
                 src_rel_slot: pc.scoping.lookup_or_allocrow(rel.identifier),
                 start_node_slot: pc.scoping.lookup_or_allocrow(left_node.identifier),
-                end_node_slot: pc.scoping.lookup_or_allocrow(right_node.identifier)
+                end_node_slot: pc.scoping.lookup_or_allocrow(right_node.identifier),
             };
 
             rel.solved = true;
@@ -185,7 +189,7 @@ pub fn plan_match_patterngraph(pc: &mut PlanningContext, src: LogicalPlan, mut p
                     right_node_slot: pc.scoping.lookup_or_allocrow(right_id),
                     dst_slot,
                     rel_type: rel.rel_type,
-                    dir: rel.dir
+                    dir: rel.dir,
                 }
             }
         }
@@ -395,13 +399,12 @@ mod tests {
                         rel_type: None,
                         dir: Some(Dir::Out)
                     }),
-                    projections: vec![
-                        Projection{
-                            expr: Expr::RowRef(p.slot(id_r)),
-                            alias: id_r,
-                            dst: p.slot(id_r)
-                        }
-                    ] }),
+                    projections: vec![Projection {
+                        expr: Expr::RowRef(p.slot(id_r)),
+                        alias: id_r,
+                        dst: p.slot(id_r)
+                    }]
+                }),
                 src_rel_slot: p.slot(id_r),
                 start_node_slot: p.slot(id_a),
                 end_node_slot: p.slot(id_b)

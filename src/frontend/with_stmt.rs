@@ -1,7 +1,7 @@
 use super::{plan_expr, Expr, LogicalPlan, Pair, PlanningContext, Projection, Result, Rule};
-use pest::iterators::Pairs;
 use crate::frontend::{Scoping, ScopingMode};
 use core::mem;
+use pest::iterators::Pairs;
 
 pub fn plan_with(
     pc: &mut PlanningContext,
@@ -200,7 +200,8 @@ fn parse_projections(pc: &mut PlanningContext, parts: Pairs<Rule>) -> Result<Pro
                         .into_inner()
                         .next()
                         .ok_or(anyhow!("SORT contained unexpected part"))?;
-                    let planned_sort_expr = plan_order_key_expression(&mut pc.scoping, &projections,sort_expr)?;
+                    let planned_sort_expr =
+                        plan_order_key_expression(&mut pc.scoping, &projections, sort_expr)?;
                     out.push(planned_sort_expr)
                 }
                 sort = Some(out);
@@ -221,7 +222,11 @@ fn parse_projections(pc: &mut PlanningContext, parts: Pairs<Rule>) -> Result<Pro
 }
 
 // See OrderByMode on Scoping
-fn plan_order_key_expression(scoping: &mut Scoping, projections: &Vec<Projection>, expression: Pair<Rule>) -> Result<Expr> {
+fn plan_order_key_expression(
+    scoping: &mut Scoping,
+    projections: &Vec<Projection>,
+    expression: Pair<Rule>,
+) -> Result<Expr> {
     // Enter special ORDER BY scoping mode, see OrderByMode
     let original_scoping_mode = mem::replace(&mut scoping.mode, ScopingMode::ProjectionMode);
     let maybe_sortkey = plan_expr(scoping, expression);
@@ -244,7 +249,7 @@ fn plan_order_key_expression(scoping: &mut Scoping, projections: &Vec<Projection
             // Sort key is a slot produced by the projection
             Expr::RowRef(slot) => {
                 if *slot == proj.dst {
-                    return Ok(sortkey)
+                    return Ok(sortkey);
                 }
             }
 
@@ -401,7 +406,11 @@ mod tests {
         let id_tmp = p.tokenize("tmp");
         let id_r = p.tokenize("r");
 
-        let projections = if let LogicalPlan::Project { src: _, projections } = & p.plan {
+        let projections = if let LogicalPlan::Project {
+            src: _,
+            projections,
+        } = &p.plan
+        {
             projections.clone().to_vec()
         } else {
             panic!("Expected plan to be a projection, got {:?}", p.plan)
@@ -425,7 +434,8 @@ mod tests {
                     alias: id_r,
                     dst: p.slot(id_r),
                 }
-            ]);
+            ]
+        );
         Ok(())
     }
 
@@ -439,7 +449,11 @@ mod tests {
         let id_one = p.tokenize("one");
         let id_r = p.tokenize("r");
 
-        let projections = if let LogicalPlan::Project { src: _, projections } = & p.plan {
+        let projections = if let LogicalPlan::Project {
+            src: _,
+            projections,
+        } = &p.plan
+        {
             projections.clone().to_vec()
         } else {
             panic!("Expected plan to be a projection, got {:?}", p.plan)
@@ -463,7 +477,8 @@ mod tests {
                     alias: id_r,
                     dst: p.slot(id_r),
                 }
-            ]);
+            ]
+        );
         Ok(())
     }
 
@@ -804,8 +819,8 @@ mod tests {
                             labels: None,
                         }),
                         grouping: vec![(
-                                           Expr::Prop(Box::new(Expr::RowRef(p.slot(id_n))), vec![prop_name]),
-                                           1
+                            Expr::Prop(Box::new(Expr::RowRef(p.slot(id_n))), vec![prop_name]),
+                            1
                         ),],
                         aggregations: vec![]
                     }),

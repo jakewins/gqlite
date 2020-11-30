@@ -1,11 +1,8 @@
-use super::{
-    parse_pattern_graph, LogicalPlan, Pair, PlanningContext, Result, Rule,
-};
-use crate::frontend::{SetAction};
+use super::{parse_pattern_graph, LogicalPlan, Pair, PlanningContext, Result, Rule};
+use crate::frontend::SetAction;
 
-
-use crate::frontend::match_stmt::{plan_match_patterngraph};
-use crate::frontend::create_stmt::{plan_create_patterngraph};
+use crate::frontend::create_stmt::plan_create_patterngraph;
+use crate::frontend::match_stmt::plan_match_patterngraph;
 use crate::frontend::set_stmt::parse_set_clause;
 
 pub fn plan_merge(
@@ -25,10 +22,8 @@ pub fn plan_merge(
         match on_x.as_rule() {
             Rule::on_create_clause => {
                 on_create.append(&mut parse_set_clause(&mut pc.scoping, on_x)?)
-            },
-            Rule::on_match_clause => {
-                on_match.append(&mut parse_set_clause(&mut pc.scoping, on_x)?)
-            },
+            }
+            Rule::on_match_clause => on_match.append(&mut parse_set_clause(&mut pc.scoping, on_x)?),
             r => unreachable!("{:?}", r),
         }
     }
@@ -48,7 +43,11 @@ pub fn plan_merge(
     }
 
     let mut matchplan = LogicalPlan::Optional {
-        src: Box::new(plan_match_patterngraph(&mut pc, LogicalPlan::Argument, matchpg)?),
+        src: Box::new(plan_match_patterngraph(
+            &mut pc,
+            LogicalPlan::Argument,
+            matchpg,
+        )?),
         slots: pattern_slots.clone(),
     };
     let mut createplan = plan_create_patterngraph(&mut pc, LogicalPlan::Argument, pg)?;
@@ -56,13 +55,13 @@ pub fn plan_merge(
     if !on_create.is_empty() {
         createplan = LogicalPlan::SetProperties {
             src: Box::new(createplan),
-            actions: on_create
+            actions: on_create,
         }
     }
 
     if !on_match.is_empty() {
         matchplan = LogicalPlan::ConditionalApply {
-            lhs: Box::new(matchplan ),
+            lhs: Box::new(matchplan),
             rhs: Box::new(LogicalPlan::SetProperties {
                 src: Box::new(LogicalPlan::Argument),
                 actions: on_match,
@@ -74,7 +73,7 @@ pub fn plan_merge(
     let mut mergeplan = LogicalPlan::AntiConditionalApply {
         lhs: Box::new(matchplan),
         rhs: Box::new(createplan),
-        conditions: pattern_slots
+        conditions: pattern_slots,
     };
 
     match src {
@@ -83,8 +82,8 @@ pub fn plan_merge(
             // If the input is not Argument, that means we need to run the merge for each input
             // row, which we do via an Apply plan
             mergeplan = LogicalPlan::Apply {
-                lhs: Box::new(src ),
-                rhs: Box::new(mergeplan )
+                lhs: Box::new(src),
+                rhs: Box::new(mergeplan),
             }
         }
     }
@@ -95,14 +94,16 @@ pub fn plan_merge(
 #[cfg(test)]
 mod tests {
     use crate::frontend::tests::plan;
-    use crate::frontend::{Expr, LogicalPlan, MapEntryExpr, NodeSpec, Op, SetAction, Dir, RelSpec};
+    use crate::frontend::{Dir, Expr, LogicalPlan, MapEntryExpr, NodeSpec, Op, RelSpec, SetAction};
     use crate::Error;
 
     #[test]
     fn plan_merge() -> Result<(), Error> {
-        let mut p = plan("MERGE (n:Person {name: $name})
+        let mut p = plan(
+            "MERGE (n:Person {name: $name})
 ON CREATE SET n.created = timestamp()
-ON MATCH SET n.updated = timestamp()")?;
+ON MATCH SET n.updated = timestamp()",
+        )?;
 
         let lbl_person = p.tokenize("Person");
         let tok_name = p.tokenize("name");
@@ -124,7 +125,10 @@ ON MATCH SET n.updated = timestamp()")?;
                                 labels: Some(lbl_person)
                             }),
                             predicate: Expr::BinaryOp {
-                                left: Box::new(Expr::Prop(Box::new(Expr::RowRef(slot_n)), vec![tok_name])),
+                                left: Box::new(Expr::Prop(
+                                    Box::new(Expr::RowRef(slot_n)),
+                                    vec![tok_name]
+                                )),
                                 right: Box::new(Expr::Param(param_name)),
                                 op: Op::Eq
                             }
@@ -133,16 +137,14 @@ ON MATCH SET n.updated = timestamp()")?;
                     }),
                     rhs: Box::new(LogicalPlan::SetProperties {
                         src: Box::new(LogicalPlan::Argument),
-                        actions: vec![
-                            SetAction::SingleAssign {
-                                entity: slot_n,
-                                key: key_updated,
-                                value: Expr::FuncCall {
-                                    name: fn_timestamp,
-                                    args: vec![]
-                                }
+                        actions: vec![SetAction::SingleAssign {
+                            entity: slot_n,
+                            key: key_updated,
+                            value: Expr::FuncCall {
+                                name: fn_timestamp,
+                                args: vec![]
                             }
-                        ]
+                        }]
                     }),
                     conditions: vec![slot_n]
                 }),
@@ -150,22 +152,24 @@ ON MATCH SET n.updated = timestamp()")?;
                 rhs: Box::new(LogicalPlan::SetProperties {
                     src: Box::new(LogicalPlan::Create {
                         src: Box::new(LogicalPlan::Argument),
-                        nodes: vec![NodeSpec{
+                        nodes: vec![NodeSpec {
                             slot: slot_n,
                             labels: vec![lbl_person],
-                            props: vec![MapEntryExpr{ key: tok_name, val: Expr::Param(param_name) }]
+                            props: vec![MapEntryExpr {
+                                key: tok_name,
+                                val: Expr::Param(param_name)
+                            }]
                         }],
                         rels: vec![]
                     }),
-                    actions: vec![
-                        SetAction::SingleAssign {
-                            entity: slot_n,
-                            key: key_created,
-                            value: Expr::FuncCall {
-                                name: fn_timestamp,
-                                args: vec![]
-                            }
-                        }]
+                    actions: vec![SetAction::SingleAssign {
+                        entity: slot_n,
+                        key: key_created,
+                        value: Expr::FuncCall {
+                            name: fn_timestamp,
+                            args: vec![]
+                        }
+                    }]
                 }),
                 // eg. rhs is executed iff slot_n is null after executing lhs
                 conditions: vec![slot_n]
@@ -201,7 +205,7 @@ ON MATCH SET n.updated = timestamp()")?;
                 rhs: Box::new(LogicalPlan::AntiConditionalApply {
                     lhs: Box::new(LogicalPlan::Optional {
                         src: Box::new(LogicalPlan::ExpandInto {
-                            src: Box::new(LogicalPlan::Argument ),
+                            src: Box::new(LogicalPlan::Argument),
                             left_node_slot: p.slot(id_a),
                             right_node_slot: p.slot(id_b),
                             dst_slot: p.slot(id_r),
@@ -213,7 +217,7 @@ ON MATCH SET n.updated = timestamp()")?;
                     rhs: Box::new(LogicalPlan::Create {
                         src: Box::new(LogicalPlan::Argument),
                         nodes: vec![],
-                        rels: vec![RelSpec{
+                        rels: vec![RelSpec {
                             slot: p.slot(id_r),
                             rel_type: tok_type,
                             start_node_slot: p.slot(id_a),
@@ -227,5 +231,4 @@ ON MATCH SET n.updated = timestamp()")?;
         );
         Ok(())
     }
-
 }

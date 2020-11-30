@@ -13,11 +13,15 @@ pub fn plan_create(
     plan_create_patterngraph(&mut pc, src, pg)
 }
 
-pub fn plan_create_patterngraph(pc: &mut PlanningContext, src: LogicalPlan, mut pg: PatternGraph) -> Result<LogicalPlan> {
+pub fn plan_create_patterngraph(
+    pc: &mut PlanningContext,
+    src: LogicalPlan,
+    mut pg: PatternGraph,
+) -> Result<LogicalPlan> {
     let mut nodes = Vec::new();
     let mut rels = Vec::new();
     for id in pg.v_order {
-        if pg.v.get(&id).map(|n|n.solved).unwrap_or(false) {
+        if pg.v.get(&id).map(|n| n.solved).unwrap_or(false) {
             // We already know about this node, it isn't meant to be created. ie
             // MATCH (n) CREATE (n)-[:NEWREL]->(newnode)
             continue;

@@ -7,7 +7,7 @@ pub fn plan_call(
     src: LogicalPlan,
     call_stmt: Pair<Rule>,
 ) -> Result<LogicalPlan> {
-    let mut name :Option<Token> = None;
+    let mut name: Option<Token> = None;
     let mut args: Option<Vec<Expr>> = None;
     for part in call_stmt.into_inner() {
         match part.as_rule() {
@@ -22,7 +22,7 @@ pub fn plan_call(
     }
 
     if name.is_none() {
-        return Err(anyhow!("Unable to parse procedure name in CALL statement"))
+        return Err(anyhow!("Unable to parse procedure name in CALL statement"));
     }
     Ok(LogicalPlan::Call {
         src: Box::new(src),
@@ -35,13 +35,11 @@ fn plan_args(pc: &mut PlanningContext, arglist: Pair<Rule>) -> Result<Vec<Expr>>
     let mut out = Vec::new();
     for part in arglist.into_inner() {
         match part.as_rule() {
-            Rule::expr => {
-                out.push(plan_expr(&mut pc.scoping, part)?)
-            }
+            Rule::expr => out.push(plan_expr(&mut pc.scoping, part)?),
             _ => unreachable!(),
         }
     }
-    return Ok(out)
+    return Ok(out);
 }
 
 #[cfg(test)]

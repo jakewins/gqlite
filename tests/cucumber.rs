@@ -1,8 +1,8 @@
 use cucumber::{after, before, cucumber};
 use gqlite::gramdb::{GramCursor, GramDatabase};
 use gqlite::{Database, Val};
-use tempfile::tempfile;
 use std::collections::HashMap;
+use tempfile::tempfile;
 
 #[macro_use]
 extern crate anyhow;
@@ -53,9 +53,9 @@ mod example_steps {
     use gqlite::gramdb::GramCursor;
     use gqlite::{Error, Val};
 
+    use std::collections::HashMap;
     use std::iter::Peekable;
     use std::str::Chars;
-    use std::collections::HashMap;
 
     macro_rules! ensure_eq {
         ($left:expr, $right:expr) => {{
@@ -300,7 +300,10 @@ mod example_steps {
         while let Some(r) = cursor.next().unwrap() {
             if let Val::Rel(n) = &r.slots[0] {
                 for (k, v) in &n.props {
-                    out.insert(format!("rel/{}/{}/{}/{}", n.start, n.rel_type, n.end, k), v.clone());
+                    out.insert(
+                        format!("rel/{}/{}/{}/{}", n.start, n.rel_type, n.end, k),
+                        v.clone(),
+                    );
                 }
             } else {
                 panic!("Query requesting rels returned something else: {:?}", r)
@@ -327,7 +330,10 @@ mod example_steps {
         added
     }
 
-    fn count_removed_properties(original: &HashMap<String, Val>, new: &HashMap<String, Val>) -> i32  {
+    fn count_removed_properties(
+        original: &HashMap<String, Val>,
+        new: &HashMap<String, Val>,
+    ) -> i32 {
         let mut removed = 0;
         for (oldkey, oldval) in original.iter() {
             if let Some(newval) = new.get(oldkey) {
@@ -376,23 +382,21 @@ mod example_steps {
             "+properties" => {
                 let new_props = gather_properties(world);
                 assert_eq!(
-                    count_added_properties(&world.starting_graph_properties.properties,
-                                           &new_props),
+                    count_added_properties(&world.starting_graph_properties.properties, &new_props),
                     val.parse::<i32>().unwrap()
                 )
-            },
+            }
             "-properties" => {
                 let new_props = gather_properties(world);
                 eprintln!("OLD: {:?}", world.starting_graph_properties.properties);
                 eprintln!("NEW: {:?}", new_props);
-                let removed = count_removed_properties(&world.starting_graph_properties.properties,
-                                                       &new_props);
+                let removed = count_removed_properties(
+                    &world.starting_graph_properties.properties,
+                    &new_props,
+                );
                 eprintln!("REM: {}", removed);
-                assert_eq!(
-                    removed,
-                    val.parse::<i32>().unwrap()
-                )
-            },
+                assert_eq!(removed, val.parse::<i32>().unwrap())
+            }
             _ => panic!(format!("unknown side effect: '{}'", kind)),
         }
     }

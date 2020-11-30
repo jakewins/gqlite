@@ -1,7 +1,7 @@
 use super::{LogicalPlan, Pair, PlanningContext, Result, Rule};
 
 use crate::frontend::expr::plan_expr;
-use crate::frontend::{SetAction, Scoping};
+use crate::frontend::{Scoping, SetAction};
 
 pub fn plan_set(
     pc: &mut PlanningContext,
@@ -9,13 +9,13 @@ pub fn plan_set(
     set_stmt: Pair<Rule>,
 ) -> Result<LogicalPlan> {
     let actions = parse_set_clause(&mut pc.scoping, set_stmt)?;
-    return Ok(LogicalPlan::SetProperties { src: Box::new(src), actions })
+    return Ok(LogicalPlan::SetProperties {
+        src: Box::new(src),
+        actions,
+    });
 }
 
-pub fn parse_set_clause(
-    scoping: &mut Scoping,
-    set_stmt: Pair<Rule>,
-) -> Result<Vec<SetAction>> {
+pub fn parse_set_clause(scoping: &mut Scoping, set_stmt: Pair<Rule>) -> Result<Vec<SetAction>> {
     let mut actions = Vec::new();
     for assignment in set_stmt.into_inner() {
         match assignment.as_rule() {
@@ -25,10 +25,10 @@ pub fn parse_set_clause(
                 let key = scoping.tokenize(parts.next().unwrap().as_str());
 
                 let expr = plan_expr(scoping, parts.next().unwrap())?;
-                actions.push(SetAction::SingleAssign{
+                actions.push(SetAction::SingleAssign {
                     entity: scoping.lookup_or_allocrow(entity),
                     key,
-                    value: expr
+                    value: expr,
                 });
             }
             Rule::append_assignment => {
@@ -36,9 +36,9 @@ pub fn parse_set_clause(
                 let entity = scoping.tokenize(parts.next().unwrap().as_str());
 
                 let expr = plan_expr(scoping, parts.next().unwrap())?;
-                actions.push(SetAction::Append{
+                actions.push(SetAction::Append {
                     entity: scoping.lookup_or_allocrow(entity),
-                    value: expr
+                    value: expr,
                 });
             }
             Rule::overwrite_assignment => {
@@ -46,24 +46,22 @@ pub fn parse_set_clause(
                 let entity = scoping.tokenize(parts.next().unwrap().as_str());
 
                 let expr = plan_expr(scoping, parts.next().unwrap())?;
-                actions.push(SetAction::Overwrite{
+                actions.push(SetAction::Overwrite {
                     entity: scoping.lookup_or_allocrow(entity),
-                    value: expr
+                    value: expr,
                 });
             }
             _ => unreachable!("{:?}", assignment),
         }
     }
 
-    return Ok(actions)
+    return Ok(actions);
 }
-
-
 
 #[cfg(test)]
 mod tests {
     use crate::frontend::tests::plan;
-    use crate::frontend::{Expr, LogicalPlan, SetAction, MapEntryExpr};
+    use crate::frontend::{Expr, LogicalPlan, MapEntryExpr, SetAction};
     use crate::Error;
 
     #[test]
@@ -81,11 +79,12 @@ mod tests {
                     slot: p.slot(id_a),
                     labels: None
                 }),
-                actions: vec![SetAction::SingleAssign{
+                actions: vec![SetAction::SingleAssign {
                     entity: p.slot(id_a),
                     key: key_name,
                     value: Expr::String("bob".to_string())
-                }] }
+                }]
+            }
         );
         Ok(())
     }
@@ -138,9 +137,10 @@ mod tests {
                 }),
                 actions: vec![SetAction::Append {
                     entity: p.slot(id_a),
-                    value: Expr::Map(vec![
-                        MapEntryExpr{ key: key_name, val: Expr::String("baz".to_string()) },
-                    ]),
+                    value: Expr::Map(vec![MapEntryExpr {
+                        key: key_name,
+                        val: Expr::String("baz".to_string())
+                    },]),
                 }]
             }
         );

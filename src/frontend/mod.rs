@@ -17,16 +17,16 @@ use std::rc::Rc;
 
 mod expr;
 
+mod call_stmt;
 mod create_stmt;
 mod match_stmt;
 mod merge_stmt;
-mod with_stmt;
-mod call_stmt;
 mod set_stmt;
+mod with_stmt;
 
+use core::mem;
 use expr::plan_expr;
 pub use expr::{Expr, MapEntryExpr, Op};
-use core::mem;
 
 #[derive(Parser)]
 #[grammar = "cypher.pest"]
@@ -68,9 +68,7 @@ impl Frontend {
                 Rule::create_stmt => {
                     plan = create_stmt::plan_create(pc, plan, stmt)?;
                 }
-                Rule::set_stmt => {
-                    plan = set_stmt::plan_set(pc, plan, stmt)?
-                }
+                Rule::set_stmt => plan = set_stmt::plan_set(pc, plan, stmt)?,
                 Rule::merge_stmt => {
                     plan = merge_stmt::plan_merge(pc, plan, stmt)?;
                 }
@@ -88,7 +86,10 @@ impl Frontend {
             }
         }
 
-        println!("plan: {}", &plan.fmt_pretty(&"", &pc.scoping.tokens.borrow()));
+        println!(
+            "plan: {}",
+            &plan.fmt_pretty(&"", &pc.scoping.tokens.borrow())
+        );
 
         Ok(plan)
     }
@@ -334,8 +335,12 @@ impl LogicalPlan {
             }
             LogicalPlan::ExpandInto {
                 src,
-                left_node_slot, right_node_slot, dst_slot,
-                rel_type, dir } => {
+                left_node_slot,
+                right_node_slot,
+                dst_slot,
+                rel_type,
+                dir,
+            } => {
                 let next_indent = &format!("{}  ", ind);
                 format!("ExpandInto(\n{}src={}\n{}left_node_slot=Slot({})\n{}right_node_slot=Slot({})\n{}dst_slot=Slot({})\n{}rel_type={:?}\n{}dir={:?})",
                         ind, src.fmt_pretty(next_indent, t),
@@ -345,7 +350,12 @@ impl LogicalPlan {
                         ind, rel_type,
                         ind, dir)
             }
-            LogicalPlan::ExpandRel { src, src_rel_slot, start_node_slot: start_node, end_node_slot: end_node } => {
+            LogicalPlan::ExpandRel {
+                src,
+                src_rel_slot,
+                start_node_slot: start_node,
+                end_node_slot: end_node,
+            } => {
                 let next_indent = &format!("{}  ", ind);
                 format!("ExpandRel(\n{}src={}\n{}src_rel_slot=Slot({})\n{}start_node=Slot({})\n{}end_node=Slot({}))",
                         ind, src.fmt_pretty(next_indent, t),
@@ -424,7 +434,11 @@ impl LogicalPlan {
                     rhs.fmt_pretty(next_indent, t),
                 )
             }
-            LogicalPlan::ConditionalApply { lhs, rhs, conditions } => {
+            LogicalPlan::ConditionalApply {
+                lhs,
+                rhs,
+                conditions,
+            } => {
                 let next_indent = &format!("{}  ", ind);
                 format!(
                     "ConditionalApply(\n{}lhs={}\n{}rhs={}\n{}conditions=[{:?}])",
@@ -436,7 +450,11 @@ impl LogicalPlan {
                     conditions,
                 )
             }
-            LogicalPlan::AntiConditionalApply { lhs, rhs, conditions } => {
+            LogicalPlan::AntiConditionalApply {
+                lhs,
+                rhs,
+                conditions,
+            } => {
                 let next_indent = &format!("{}  ", ind);
                 format!(
                     "AntiConditionalApply(\n{}lhs={}\n{}rhs={}\n{}conditions=[{:?}])",
@@ -468,7 +486,11 @@ impl LogicalPlan {
                     actions,
                 )
             }
-            LogicalPlan::CartesianProduct { outer, inner, predicate } => {
+            LogicalPlan::CartesianProduct {
+                outer,
+                inner,
+                predicate,
+            } => {
                 let next_indent = &format!("{}  ", ind);
                 format!(
                     "CartesianProduct(\n{}outer={}\n{}inner={}\n{}predicate={:?})",
@@ -503,7 +525,7 @@ pub enum SetAction {
     Overwrite {
         entity: Slot,
         value: Expr,
-    }
+    },
 }
 
 // Specification of a node to create
@@ -586,9 +608,7 @@ pub struct Scope {
     named_identifiers: HashSet<Token>,
 }
 
-impl Scope {
-
-}
+impl Scope {}
 
 // Controls which scope Scoping delegates to, used when planning projections, where we toggle
 // between the two scopes the projection bridges
@@ -663,10 +683,13 @@ impl Scoping {
     }
 
     pub fn begin_new_scope(&mut self) {
-        let new_prior = mem::replace(&mut self._current, Scope {
-            slots: Default::default(),
-            named_identifiers: Default::default(),
-        });
+        let new_prior = mem::replace(
+            &mut self._current,
+            Scope {
+                slots: Default::default(),
+                named_identifiers: Default::default(),
+            },
+        );
         let old_prior = mem::replace(&mut self._prior, new_prior);
         if old_prior.slots.len() > 0 || old_prior.named_identifiers.len() > 0 {
             self.history.push(old_prior);
@@ -716,7 +739,7 @@ impl Scoping {
 
     // If the given id is a currently active stack reference, return the stack slot it's referencing
     fn lookup_stackref(&self, id: Token) -> Option<usize> {
-        self.stackrefs.get(&id).map(|r|*r)
+        self.stackrefs.get(&id).map(|r| *r)
     }
 
     fn tokenize(&mut self, contents: &str) -> Token {
@@ -730,7 +753,9 @@ impl Scoping {
         match self.mode {
             ScopingMode::Current => self._current.named_identifiers.insert(tok),
             ScopingMode::Prior => self._prior.named_identifiers.insert(tok),
-            ScopingMode::ProjectionMode => panic!("cannot declare new variables in ORDER BY clause"),
+            ScopingMode::ProjectionMode => {
+                panic!("cannot declare new variables in ORDER BY clause")
+            }
         }
     }
 
@@ -748,32 +773,31 @@ impl Scoping {
         match self.mode {
             ScopingMode::Current => self._current.named_identifiers.contains(&tok),
             ScopingMode::Prior => self._prior.named_identifiers.contains(&tok),
-            ScopingMode::ProjectionMode => self._prior.named_identifiers.contains(&tok) || self._current.named_identifiers.contains(&tok),
+            ScopingMode::ProjectionMode => {
+                self._prior.named_identifiers.contains(&tok)
+                    || self._current.named_identifiers.contains(&tok)
+            }
         }
     }
 
     pub fn lookup_or_allocrow(&mut self, tok: Token) -> usize {
         match self.mode {
-            ScopingMode::Current => {
-                match self._current.slots.get(&tok) {
-                    Some(slot) => *slot,
-                    None => {
-                        let slot = self.next_rowslot;
-                        self.next_rowslot += 1;
-                        self._current.slots.insert(tok, slot);
-                        slot
-                    }
+            ScopingMode::Current => match self._current.slots.get(&tok) {
+                Some(slot) => *slot,
+                None => {
+                    let slot = self.next_rowslot;
+                    self.next_rowslot += 1;
+                    self._current.slots.insert(tok, slot);
+                    slot
                 }
             },
-            ScopingMode::Prior => {
-                match self._prior.slots.get(&tok) {
-                    Some(slot) => *slot,
-                    None => {
-                        let slot = self.next_rowslot;
-                        self.next_rowslot += 1;
-                        self._prior.slots.insert(tok, slot);
-                        slot
-                    }
+            ScopingMode::Prior => match self._prior.slots.get(&tok) {
+                Some(slot) => *slot,
+                None => {
+                    let slot = self.next_rowslot;
+                    self.next_rowslot += 1;
+                    self._prior.slots.insert(tok, slot);
+                    slot
                 }
             },
             ScopingMode::ProjectionMode => {
@@ -784,7 +808,7 @@ impl Scoping {
                 } else {
                     panic!("Cannot allocate new row slots while in OrderBy scoping mode")
                 }
-            },
+            }
         }
     }
 }
@@ -1073,7 +1097,7 @@ pub(crate) mod tests {
     use crate::Type;
     use anyhow::Result;
     use std::cell::RefCell;
-    
+
     use std::rc::Rc;
 
     // Outcome of testing planning; the plan plus other related items to do checks on
@@ -1089,7 +1113,7 @@ pub(crate) mod tests {
             for scope in &self.scopes {
                 match scope.slots.get(&k) {
                     Some(s) => return *s,
-                    _ => ()
+                    _ => (),
                 }
             }
             let toks = self.tokens.borrow();
@@ -1120,7 +1144,7 @@ pub(crate) mod tests {
         let mut pc = PlanningContext::new(Rc::clone(&tokens), &backend_desc);
         let plan = frontend.plan_in_context(q, &mut pc);
 
-        let mut scopes= pc.scoping.all_scopes();
+        let mut scopes = pc.scoping.all_scopes();
         // Gotta learn linked lists in rust..
         scopes.reverse();
         match plan {
