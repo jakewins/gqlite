@@ -26,7 +26,7 @@ pub fn plan_create_patterngraph(pc: &mut PlanningContext, src: LogicalPlan, mut 
         let node = pg.v.remove(&id).ok_or(anyhow!("failed to parse pattern in query, please report this and include the query you are running"))?;
 
         nodes.push(NodeSpec {
-            slot: pc.get_or_alloc_slot(id),
+            slot: pc.scoping.lookup_or_allocrow(id),
             labels: node.labels,
             props: node.props,
         });
@@ -34,28 +34,28 @@ pub fn plan_create_patterngraph(pc: &mut PlanningContext, src: LogicalPlan, mut 
 
     for rel in pg.e {
         if !rel.anonymous {
-            pc.declare_tok(rel.identifier);
+            pc.scoping.declare_tok(rel.identifier);
         }
         match rel.dir {
             Some(Dir::Out) => {
                 rels.push(RelSpec {
-                    slot: pc.get_or_alloc_slot(rel.identifier),
+                    slot: pc.scoping.lookup_or_allocrow(rel.identifier),
                     rel_type: rel.rel_type.ok_or(anyhow!(
                         "Relationship patterns in CREATE must have a type specified"
                     ))?,
-                    start_node_slot: pc.get_or_alloc_slot(rel.left_node),
-                    end_node_slot: pc.get_or_alloc_slot(rel.right_node.unwrap()),
+                    start_node_slot: pc.scoping.lookup_or_allocrow(rel.left_node),
+                    end_node_slot: pc.scoping.lookup_or_allocrow(rel.right_node.unwrap()),
                     props: rel.props,
                 });
             }
             Some(Dir::In) => {
                 rels.push(RelSpec {
-                    slot: pc.get_or_alloc_slot(rel.identifier),
+                    slot: pc.scoping.lookup_or_allocrow(rel.identifier),
                     rel_type: rel.rel_type.ok_or(anyhow!(
                         "Relationship patterns in CREATE must have a type specified"
                     ))?,
-                    start_node_slot: pc.get_or_alloc_slot(rel.right_node.unwrap()),
-                    end_node_slot: pc.get_or_alloc_slot(rel.left_node),
+                    start_node_slot: pc.scoping.lookup_or_allocrow(rel.right_node.unwrap()),
+                    end_node_slot: pc.scoping.lookup_or_allocrow(rel.left_node),
                     props: vec![],
                 });
             }
@@ -336,7 +336,7 @@ mod tests {
                         labels: vec![],
                         props: vec![MapEntryExpr {
                             key: key_num,
-                            val: Expr::Prop(Box::new(Expr::Slot(p.slot(id_a))), vec![key_id])
+                            val: Expr::Prop(Box::new(Expr::RowRef(p.slot(id_a))), vec![key_id])
                         }]
                     }
                 ],

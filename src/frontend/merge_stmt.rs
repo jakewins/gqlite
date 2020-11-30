@@ -24,10 +24,10 @@ pub fn plan_merge(
     for on_x in pairs {
         match on_x.as_rule() {
             Rule::on_create_clause => {
-                on_create.append(&mut parse_set_clause(pc.scope_mut(), on_x)?)
+                on_create.append(&mut parse_set_clause(&mut pc.scoping, on_x)?)
             },
             Rule::on_match_clause => {
-                on_match.append(&mut parse_set_clause(pc.scope_mut(), on_x)?)
+                on_match.append(&mut parse_set_clause(&mut pc.scoping, on_x)?)
             },
             r => unreachable!("{:?}", r),
         }
@@ -44,11 +44,11 @@ pub fn plan_merge(
     // this list in the ConditionalApply/AntiConditionalApply plans below
     let mut pattern_slots = Vec::new();
     for id in &matchpg.unbound_identifiers {
-        pattern_slots.push(pc.get_or_alloc_slot(*id));
+        pattern_slots.push(pc.scoping.lookup_or_allocrow(*id));
     }
 
     let mut matchplan = LogicalPlan::Optional {
-        src: Box::new(plan_match_patterngraph(&mut pc, src, matchpg)?),
+        src: Box::new(plan_match_patterngraph(&mut pc, LogicalPlan::Argument, matchpg)?),
         slots: pattern_slots.clone(),
     };
     let mut createplan = plan_create_patterngraph(&mut pc, LogicalPlan::Argument, pg)?;
@@ -71,11 +71,25 @@ pub fn plan_merge(
         };
     }
 
-    Ok(LogicalPlan::AntiConditionalApply {
+    let mut mergeplan = LogicalPlan::AntiConditionalApply {
         lhs: Box::new(matchplan),
         rhs: Box::new(createplan),
         conditions: pattern_slots
-    })
+    };
+
+    match src {
+        LogicalPlan::Argument => (),
+        _ => {
+            // If the input is not Argument, that means we need to run the merge for each input
+            // row, which we do via an Apply plan
+            mergeplan = LogicalPlan::Apply {
+                lhs: Box::new(src ),
+                rhs: Box::new(mergeplan )
+            }
+        }
+    }
+
+    Ok(mergeplan)
 }
 
 #[cfg(test)]
@@ -110,7 +124,7 @@ ON MATCH SET n.updated = timestamp()")?;
                                 labels: Some(lbl_person)
                             }),
                             predicate: Expr::BinaryOp {
-                                left: Box::new(Expr::Prop(Box::new(Expr::Slot(slot_n)), vec![tok_name])),
+                                left: Box::new(Expr::Prop(Box::new(Expr::RowRef(slot_n)), vec![tok_name])),
                                 right: Box::new(Expr::Param(param_name)),
                                 op: Op::Eq
                             }
@@ -170,22 +184,24 @@ ON MATCH SET n.updated = timestamp()")?;
         let tok_type = p.tokenize("TYPE");
         assert_eq!(
             p.plan,
-            LogicalPlan::AntiConditionalApply {
+            LogicalPlan::Apply {
+                lhs: Box::new(LogicalPlan::CartesianProduct {
+                    outer: Box::new(LogicalPlan::NodeScan {
+                        src: Box::new(LogicalPlan::Argument),
+                        slot: p.slot(id_a),
+                        labels: None
+                    }),
+                    inner: Box::new(LogicalPlan::NodeScan {
+                        src: Box::new(LogicalPlan::Argument),
+                        slot: p.slot(id_b),
+                        labels: None
+                    }),
+                    predicate: Expr::Bool(true),
+                }),
+                rhs: Box::new(LogicalPlan::AntiConditionalApply {
                     lhs: Box::new(LogicalPlan::Optional {
                         src: Box::new(LogicalPlan::ExpandInto {
-                            src: Box::new(LogicalPlan::NestLoop {
-                                outer: Box::new(LogicalPlan::NodeScan {
-                                    src: Box::new(LogicalPlan::Argument),
-                                    slot: p.slot(id_a),
-                                    labels: None
-                                }),
-                                inner: Box::new(LogicalPlan::NodeScan {
-                                    src: Box::new(LogicalPlan::Argument),
-                                    slot: p.slot(id_b),
-                                    labels: None
-                                }),
-                                predicate: Expr::Bool(true),
-                            }),
+                            src: Box::new(LogicalPlan::Argument ),
                             left_node_slot: p.slot(id_a),
                             right_node_slot: p.slot(id_b),
                             dst_slot: p.slot(id_r),
@@ -193,19 +209,20 @@ ON MATCH SET n.updated = timestamp()")?;
                             dir: Some(Dir::Out)
                         }),
                         slots: vec![p.slot(id_r)]
-                }),
-                rhs: Box::new(LogicalPlan::Create {
-                    src: Box::new(LogicalPlan::Argument),
-                    nodes: vec![],
-                    rels: vec![RelSpec{
-                        slot: p.slot(id_r),
-                        rel_type: tok_type,
-                        start_node_slot: p.slot(id_a),
-                        end_node_slot: p.slot(id_b),
-                        props: vec![]
-                    }]
-                }),
-                conditions: vec![p.slot(id_r)]
+                    }),
+                    rhs: Box::new(LogicalPlan::Create {
+                        src: Box::new(LogicalPlan::Argument),
+                        nodes: vec![],
+                        rels: vec![RelSpec{
+                            slot: p.slot(id_r),
+                            rel_type: tok_type,
+                            start_node_slot: p.slot(id_a),
+                            end_node_slot: p.slot(id_b),
+                            props: vec![]
+                        }]
+                    }),
+                    conditions: vec![p.slot(id_r)]
+                })
             }
         );
         Ok(())

@@ -2,7 +2,7 @@
 // to expressions.
 
 use crate::backend::{Token, Tokens};
-use crate::frontend::{PlanningContext, Result, Rule, Scope};
+use crate::frontend::{PlanningContext, Result, Rule, Scoping};
 use crate::Slot;
 use pest::iterators::Pair;
 use std::collections::HashSet;
@@ -59,13 +59,28 @@ pub enum Expr {
     Map(Vec<MapEntryExpr>),
     List(Vec<Expr>),
 
-    // Lookup a property by id
+    // Lookup a property by a key known at query plan time, potentially nested several levels
     Prop(Box<Self>, Vec<Token>),
-    Slot(Slot),
+    // Lookup a property by a dynamically determined key
+    DynProp(Box<Self>, Box<Self>),
+
+    // Reference to a slot on the stack, used by expressions that introduce scopes
+    StackRef(usize),
+    // Reference to a slot in the current row
+    RowRef(Slot),
     Param(Token),
+
     FuncCall {
         name: Token,
         args: Vec<Expr>,
+    },
+
+    ListComprehension {
+        src: Box<Expr>,
+        // Each entry in src is stored in a temporary space in a logical stack, which is then
+        // referred to by map_expr
+        stackslot: usize,
+        map_expr: Box<Expr>,
     },
 
     // True if the Node in the specified Slot has the specified Label
@@ -77,7 +92,9 @@ impl Expr {
     pub fn is_aggregating(&self, aggregating_funcs: &HashSet<Token>) -> bool {
         match self {
             Expr::Prop(c, _) => c.is_aggregating(aggregating_funcs),
-            Expr::Slot(_) => false,
+            Expr::DynProp(b, p) => b.is_aggregating(aggregating_funcs) || p.is_aggregating(aggregating_funcs),
+            Expr::RowRef(_) => false,
+            Expr::StackRef(_) => false,
             Expr::Float(_) => false,
             Expr::Int(_) => false,
             Expr::String(_) => false,
@@ -97,12 +114,13 @@ impl Expr {
             }
             Expr::Param(_) => false,
             Expr::HasLabel(_, _) => false,
+            Expr::ListComprehension { src, stackslot: _, map_expr } => src.is_aggregating(aggregating_funcs) || map_expr.is_aggregating(aggregating_funcs),
         }
     }
 
     pub fn fmt_pretty(&self, _indent: &str, _t: &Tokens) -> String {
         match self {
-            Expr::Slot(s) => format!("Slot({})", s),
+            Expr::RowRef(s) => format!("Slot({})", s),
             _ => format!("Expr_NoPretty({:?})", self),
         }
     }
@@ -114,7 +132,7 @@ pub struct MapEntryExpr {
     pub val: Expr,
 }
 
-pub(super) fn plan_expr(scope: &mut Scope, expression: Pair<Rule>) -> Result<Expr> {
+pub(super) fn plan_expr(scope: &mut Scoping, expression: Pair<Rule>) -> Result<Expr> {
     let mut or_expressions = Vec::new();
     for inner in expression.into_inner() {
         match inner.as_rule() {
@@ -140,7 +158,7 @@ pub(super) fn plan_expr(scope: &mut Scope, expression: Pair<Rule>) -> Result<Exp
     }
 }
 
-fn plan_add_sub(scope: &mut Scope, item: Pair<Rule>) -> Result<Expr> {
+fn plan_add_sub(scope: &mut Scoping, item: Pair<Rule>) -> Result<Expr> {
     match item.as_rule() {
         Rule::add_sub_expr => {
             // let mut out = None;
@@ -176,7 +194,7 @@ fn plan_add_sub(scope: &mut Scope, item: Pair<Rule>) -> Result<Expr> {
 }
 
 // See plan_add_sub
-fn plan_mul_div(scope: &mut Scope, item: Pair<Rule>) -> Result<Expr> {
+fn plan_mul_div(scope: &mut Scoping, item: Pair<Rule>) -> Result<Expr> {
     match item.as_rule() {
         Rule::mult_div_expr => {
             let mut inners = item.into_inner();
@@ -201,7 +219,7 @@ fn plan_mul_div(scope: &mut Scope, item: Pair<Rule>) -> Result<Expr> {
     }
 }
 
-fn plan_term(scope: &mut Scope, term: Pair<Rule>) -> Result<Expr> {
+fn plan_term(scope: &mut Scoping, term: Pair<Rule>) -> Result<Expr> {
     match term.as_rule() {
         Rule::string => {
             let content = term
@@ -213,23 +231,42 @@ fn plan_term(scope: &mut Scope, term: Pair<Rule>) -> Result<Expr> {
         }
         Rule::id => {
             let tok = scope.tokenize(term.as_str());
-            return Ok(Expr::Slot(scope.get_or_alloc_slot(tok)));
+            if let Some(stackref) = scope.lookup_stackref(tok) {
+                return Ok(Expr::StackRef(stackref))
+            }
+            return Ok(Expr::RowRef(scope.lookup_or_allocrow(tok)));
         }
         Rule::prop_lookup => {
             let mut prop_lookup = term.into_inner();
-            let prop_lookup_expr = prop_lookup.next().unwrap();
-            let base = match prop_lookup_expr.as_rule() {
-                Rule::id => {
-                    let tok = scope.tokenize(prop_lookup_expr.as_str());
-                    Expr::Slot(scope.get_or_alloc_slot(tok))
-                }
-                _ => unreachable!(),
-            };
+            let base_expr = prop_lookup.next().unwrap();
+            let mut base = plan_term(scope, base_expr)?;
             let mut props = Vec::new();
             for p_inner in prop_lookup {
-                if let Rule::id = p_inner.as_rule() {
-                    props.push(scope.tokenize(p_inner.as_str()));
+                match p_inner.as_rule() {
+                    Rule::id => {
+                        props.push(scope.tokenize(p_inner.as_str()));
+                    }
+                    Rule::expr => {
+                        // Dynamic lookup. If we've got any static properties (eg. Rule::id above),
+                        // then that static lookup is the base for the dynamic lookup; eg.
+                        // foo.barstatic[some_expr()] would create a dynamic lookup of some_expr()
+                        // with foo.barstatic as the base. If props is empty, we just use the existing base
+                        let dyn_lookup_expr = plan_expr(scope, p_inner)?;
+                        if props.is_empty() {
+                            base = Expr::DynProp(Box::new(base), Box::new(dyn_lookup_expr))
+                        } else {
+                            base = Expr::DynProp(
+                                Box::new(Expr::Prop(Box::new(base), props)),
+                                Box::new(dyn_lookup_expr));
+                            props = Vec::new();
+                        }
+                    }
+                    _ => unreachable!(),
                 }
+            }
+            // Can happen if Rule::expr branch above is involved
+            if props.is_empty() {
+                return Ok(base)
             }
             return Ok(Expr::Prop(Box::new(base), props));
         }
@@ -252,6 +289,23 @@ fn plan_term(scope: &mut Scope, term: Pair<Rule>) -> Result<Expr> {
                 name,
                 args: Vec::new(),
             });
+        }
+        Rule::list_comprehension => {
+            let mut parts = term.into_inner();
+            let identifier = scope.tokenize(parts.next().unwrap().as_str());
+
+            scope.alloc_stack(identifier);
+
+            let src_expr = plan_expr(scope, parts.next().unwrap())?;
+            let map_expr = plan_expr(scope, parts.next().unwrap())?;
+
+            scope.dealloc_stack(identifier);
+
+            return Ok(Expr::ListComprehension {
+                src: Box::new(src_expr),
+                stackslot: 0,
+                map_expr: Box::new(map_expr),
+            })
         }
         Rule::list => {
             let mut items = Vec::new();
@@ -306,7 +360,7 @@ fn plan_term(scope: &mut Scope, term: Pair<Rule>) -> Result<Expr> {
 }
 
 pub fn parse_map_expression(
-    scope: &mut Scope,
+    scope: &mut Scoping,
     map_expr: Pair<Rule>,
 ) -> Result<Vec<MapEntryExpr>> {
     let mut out = Vec::new();
@@ -323,6 +377,7 @@ pub fn parse_map_expression(
                     .next()
                     .expect("Map pair must contain an expression");
                 let expr = plan_expr(scope, expr_token)?;
+                println!("PP: {:?}", expr);
                 out.push(MapEntryExpr {
                     key: identifier,
                     val: expr,
@@ -378,7 +433,7 @@ mod tests {
         {
             return Ok(PlanArtifacts {
                 expr: projections[0].expr.clone(),
-                slots: pc.scope().clone().slots,
+                slots: pc.scoping._current.clone().slots,
                 tokens: Rc::clone(&tokens),
             });
         } else {
@@ -509,6 +564,33 @@ mod tests {
                     val: Expr::String("baz".to_string())
                 }])
             }]),
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn plan_list_comprehension() -> Result<()> {
+        let p = plan("[key IN keys($r) | key + '->' + $r[key] ]")?;
+        let tok_keys = p.tokens.borrow_mut().tokenize("keys");
+        let param_r = p.tokens.borrow_mut().tokenize("$r");
+        assert_eq!(
+            p.expr,
+            Expr::ListComprehension {
+                src: Box::new(Expr::FuncCall {
+                    name: tok_keys,
+                    args: vec![Expr::Param(param_r)]
+                }),
+                stackslot: 0,
+                map_expr: Box::new(Expr::BinaryOp {
+                    left: Box::new(Expr::BinaryOp {
+                        left: Box::new(Expr::StackRef(0)),
+                        right: Box::new(Expr::String("->".to_string())),
+                        op: Op::Add
+                    }),
+                    right: Box::new(Expr::DynProp(Box::new(Expr::Param(param_r)), Box::new(Expr::StackRef(0)))),
+                    op: Op::Add
+                })
+            },
         );
         Ok(())
     }

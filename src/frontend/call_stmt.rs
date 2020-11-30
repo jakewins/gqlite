@@ -12,7 +12,7 @@ pub fn plan_call(
     for part in call_stmt.into_inner() {
         match part.as_rule() {
             Rule::function_id => {
-                name = Some(pc.tokenize(part.as_str()));
+                name = Some(pc.scoping.tokenize(part.as_str()));
             }
             Rule::arglist => {
                 args = Some(plan_args(pc, part)?);
@@ -36,7 +36,7 @@ fn plan_args(pc: &mut PlanningContext, arglist: Pair<Rule>) -> Result<Vec<Expr>>
     for part in arglist.into_inner() {
         match part.as_rule() {
             Rule::expr => {
-                out.push(plan_expr(pc.scope_mut(), part)?)
+                out.push(plan_expr(&mut pc.scoping, part)?)
             }
             _ => unreachable!(),
         }

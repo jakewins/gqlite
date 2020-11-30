@@ -2,6 +2,7 @@ use cucumber::{after, before, cucumber};
 use gqlite::gramdb::{GramCursor, GramDatabase};
 use gqlite::{Database, Val};
 use tempfile::tempfile;
+use std::collections::HashMap;
 
 #[macro_use]
 extern crate anyhow;
@@ -10,7 +11,7 @@ pub struct GraphProperties {
     node_count: i32,
     relationship_count: i32,
     labels_count: i32,
-    properties_count: i32,
+    properties: HashMap<String, Val>,
 }
 
 fn empty_db() -> GramDatabase {
@@ -39,7 +40,7 @@ impl std::default::Default for MyWorld {
                 node_count: 0,
                 relationship_count: 0,
                 labels_count: 0,
-                properties_count: 0,
+                properties: Default::default(),
             },
         }
     }
@@ -54,6 +55,7 @@ mod example_steps {
 
     use std::iter::Peekable;
     use std::str::Chars;
+    use std::collections::HashMap;
 
     macro_rules! ensure_eq {
         ($left:expr, $right:expr) => {{
@@ -223,7 +225,7 @@ mod example_steps {
         world.starting_graph_properties.node_count = count_nodes(world);
         world.starting_graph_properties.relationship_count = count_rels(world);
         world.starting_graph_properties.labels_count = count_labels(world);
-        world.starting_graph_properties.properties_count = count_properties(world);
+        world.starting_graph_properties.properties = gather_properties(world);
         result
     }
 
@@ -272,16 +274,20 @@ mod example_steps {
         ct as i32
     }
 
-    fn count_properties(world: &mut MyWorld) -> i32 {
+    // Creates a map of '<node|rel>.<id>.<key>' -> Val for all properties in the graph,
+    // used to determine properties being changed by comparing two invocations of this
+    fn gather_properties(world: &mut MyWorld) -> HashMap<String, Val> {
+        let mut out = HashMap::default();
         let mut cursor = world.graph.new_cursor();
         world
             .graph
             .run("MATCH (n) RETURN n", &mut cursor)
             .expect("should succeed");
-        let mut ct = 0;
         while let Some(r) = cursor.next().unwrap() {
             if let Val::Node(n) = &r.slots[0] {
-                ct += n.props.len()
+                for (k, v) in &n.props {
+                    out.insert(format!("node/{}/{}", n.id, k), v.clone());
+                }
             } else {
                 panic!("Query requesting nodes returned something else: {:?}", r)
             }
@@ -293,12 +299,46 @@ mod example_steps {
             .expect("should succeed");
         while let Some(r) = cursor.next().unwrap() {
             if let Val::Rel(n) = &r.slots[0] {
-                ct += n.props.len()
+                for (k, v) in &n.props {
+                    out.insert(format!("rel/{}/{}/{}/{}", n.start, n.rel_type, n.end, k), v.clone());
+                }
             } else {
                 panic!("Query requesting rels returned something else: {:?}", r)
             }
         }
-        ct as i32
+
+        out
+    }
+
+    fn count_added_properties(original: &HashMap<String, Val>, new: &HashMap<String, Val>) -> i32 {
+        let mut added = 0;
+        for (oldkey, oldval) in original.iter() {
+            if let Some(newval) = new.get(oldkey) {
+                if !oldval.eq(newval) {
+                    added += 1;
+                }
+            }
+        }
+        for (newkey, newval) in new.iter() {
+            if !original.contains_key(newkey) {
+                added += 1
+            }
+        }
+        added
+    }
+
+    fn count_removed_properties(original: &HashMap<String, Val>, new: &HashMap<String, Val>) -> i32  {
+        let mut removed = 0;
+        for (oldkey, oldval) in original.iter() {
+            if let Some(newval) = new.get(oldkey) {
+                if !oldval.eq(newval) {
+                    removed += 1;
+                }
+            } else {
+                removed += 1;
+            }
+        }
+        removed
     }
 
     fn count_nodes(world: &mut MyWorld) -> i32 {
@@ -333,10 +373,26 @@ mod example_steps {
                 count_labels(world) - world.starting_graph_properties.labels_count,
                 val.parse::<i32>().unwrap()
             ),
-            "+properties" => assert_eq!(
-                count_properties(world) - world.starting_graph_properties.properties_count,
-                val.parse::<i32>().unwrap()
-            ),
+            "+properties" => {
+                let new_props = gather_properties(world);
+                assert_eq!(
+                    count_added_properties(&world.starting_graph_properties.properties,
+                                           &new_props),
+                    val.parse::<i32>().unwrap()
+                )
+            },
+            "-properties" => {
+                let new_props = gather_properties(world);
+                eprintln!("OLD: {:?}", world.starting_graph_properties.properties);
+                eprintln!("NEW: {:?}", new_props);
+                let removed = count_removed_properties(&world.starting_graph_properties.properties,
+                                                       &new_props);
+                eprintln!("REM: {}", removed);
+                assert_eq!(
+                    removed,
+                    val.parse::<i32>().unwrap()
+                )
+            },
             _ => panic!(format!("unknown side effect: '{}'", kind)),
         }
     }
@@ -655,6 +711,11 @@ mod example_steps {
         };
 
         when "executing query:" |world, step| {
+            // Take actions
+            start_query(world, step)
+        };
+
+        when "executing control query:" |world, step| {
             // Take actions
             start_query(world, step)
         };

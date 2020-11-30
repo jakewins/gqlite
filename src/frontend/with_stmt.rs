@@ -1,6 +1,7 @@
 use super::{plan_expr, Expr, LogicalPlan, Pair, PlanningContext, Projection, Result, Rule};
 use pest::iterators::Pairs;
-use crate::frontend::Scope;
+use crate::frontend::{Scoping, ScopingMode};
+use core::mem;
 
 pub fn plan_with(
     pc: &mut PlanningContext,
@@ -78,7 +79,7 @@ pub fn plan_aggregation(
         // After the aggregation we still have a projection, for now at least, that
         // exists only to define the order and aliasing of the slots
         post_aggregation_projections.push(Projection {
-            expr: Expr::Slot(p.dst),
+            expr: Expr::RowRef(p.dst),
             alias: p.alias,
             dst: p.dst,
         })
@@ -134,18 +135,7 @@ fn parse_projections(pc: &mut PlanningContext, parts: Pairs<Rule>) -> Result<Pro
     let mut selection = None;
     let mut sort = None;
 
-    let mut prior_scope = pc.detach_scope();
-    let mut new_scope = pc.create_scope();
-
-    // We don't know which slots in the prior scope could feasibly be re-used until we're all the
-    // way at the end of parsing, so we start off reserving all the slots in the row the prior
-    // scope is using. For straight aliasing, we'll immediately reuse the slot, but for anything
-    // more involved, we'll keep growing the row.
-    //
-    // We should then move to try to compress slot assignments, but that is likely best done
-    // once we have the entire plan in hand? Look into register assignment at that point.
-    // It also becomes like.. that kind of optimization is likely more fitting to do in the backend.
-    new_scope.reserve_slots(prior_scope.num_slots());
+    pc.scoping.begin_new_scope();
 
     for part in parts {
         match part.as_rule() {
@@ -155,7 +145,7 @@ fn parse_projections(pc: &mut PlanningContext, parts: Pairs<Rule>) -> Result<Pro
             // WITH a as b, count(c); aka normal explicit projection
             Rule::projections => {
                 for projection in part.into_inner() {
-                    let p = parse_projection(projection, &mut prior_scope, &mut new_scope)?;
+                    let p = parse_projection(projection, &mut pc.scoping)?;
                     is_aggregating =
                         is_aggregating || p.expr.is_aggregating(&pc.backend_desc.aggregates);
                     projections.push(p);
@@ -163,20 +153,16 @@ fn parse_projections(pc: &mut PlanningContext, parts: Pairs<Rule>) -> Result<Pro
             }
             // WITH *
             Rule::project_all => {
-                for id in &prior_scope.named_identifiers {
-                    let slot = *prior_scope.slots.get(id).unwrap();
-                    new_scope.slots.insert(*id, slot);
+                for id in &pc.scoping._prior.named_identifiers {
+                    let slot = *pc.scoping._prior.slots.get(id).unwrap();
+                    pc.scoping._current.slots.insert(*id, slot);
                     projections.push(Projection {
-                        expr: Expr::Slot(slot),
+                        expr: Expr::RowRef(slot),
                         alias: *id,
-                        // TODO note that this adds a bunch of unecessary copying in all RETURN clauses and
-                        //      in cases where we use projections that just rename stuff (eg. WITH blah as
-                        //      x); we should consider making expr in Projection Optional, so it can be
-                        //      used for pure renaming, if benchmarking shows that's helpful.
                         dst: slot,
                     });
                 }
-                let tokens = pc.tokens.borrow();
+                let tokens = pc.scoping.tokens.borrow();
                 projections.sort_by(|a, b| {
                     let a_str = tokens.lookup(a.alias);
                     let b_str = tokens.lookup(b.alias);
@@ -188,37 +174,33 @@ fn parse_projections(pc: &mut PlanningContext, parts: Pairs<Rule>) -> Result<Pro
                     .into_inner()
                     .next()
                     .ok_or(anyhow!("WHERE contained unexpected part"))?;
-                selection = Some(plan_expr(&mut prior_scope, where_expr)?);
+                selection = Some(plan_expr(&mut pc.scoping, where_expr)?);
             }
             Rule::skip_clause => {
                 let skip_expr = part
                     .into_inner()
                     .next()
                     .ok_or(anyhow!("SKIP contained unexpected part"))?;
-                skip = Some(plan_expr(&mut prior_scope, skip_expr)?);
+                skip = Some(plan_expr(&mut pc.scoping, skip_expr)?);
             }
             Rule::limit_clause => {
                 let limit_expr = part
                     .into_inner()
                     .next()
                     .ok_or(anyhow!("LIMIT contained unexpected part"))?;
-                limit = Some(plan_expr(&mut prior_scope, limit_expr)?);
+                limit = Some(plan_expr(&mut pc.scoping, limit_expr)?);
             }
             Rule::order_clause => {
-                // Skip this for now; we don't support ORDER BY, but there are
-                // TCK specs that use ORDER BY where just ignoring it still passes the test
                 let mut out = Vec::new();
                 for sort_group in part.into_inner() {
                     let sort_expr = sort_group
                         .into_inner()
                         .next()
                         .ok_or(anyhow!("SORT contained unexpected part"))?;
-                    let planned_expr = plan_expr(&mut prior_scope, sort_expr)?;
-                    if is_aggregating || is_distinct {
-                        out.push(sort_expr_for_aggregation(&projections, planned_expr)?)
-                    } else {
-                        out.push(planned_expr);
-                    }
+                    let planned_sort_expr = plan_order_key_expression(&mut pc.scoping, &projections,sort_expr)?;
+                    println!("ORDER_CLAUSE: {:?} / {:?}", pc.scoping, planned_sort_expr);
+                    println!("ORDER_CLAUSE AGG: {:?}", projections);
+                    out.push(planned_sort_expr)
                 }
                 sort = Some(out);
             }
@@ -226,11 +208,8 @@ fn parse_projections(pc: &mut PlanningContext, parts: Pairs<Rule>) -> Result<Pro
         }
     }
 
-    pc.attach_scope(new_scope);
-    pc.scope_history.push(prior_scope);
-
     Ok(Projections {
-        projections: projections,
+        projections,
         is_distinct,
         is_aggregating,
         selection,
@@ -240,54 +219,66 @@ fn parse_projections(pc: &mut PlanningContext, parts: Pairs<Rule>) -> Result<Pro
     })
 }
 
-// Sort expressions are a bit painful; they can't refer to stuff that was made out-of-scope
-// by the preceding WITH/RETURN projection, if the projection contains aggregation.
-fn sort_expr_for_aggregation(projections: &Vec<Projection>, e: Expr) -> Result<Expr> {
-    // This is only allowed if the projections explicitly use this property,
-    // or the entity we're pulling the property off is an aggregate key
-    // otherwise it won't be available (since it won't survive across the aggregation)
+// See OrderByMode on Scoping
+fn plan_order_key_expression(scoping: &mut Scoping, projections: &Vec<Projection>, expression: Pair<Rule>) -> Result<Expr> {
+    // Enter special ORDER BY scoping mode, see OrderByMode
+    let original_scoping_mode = mem::replace(&mut scoping.mode, ScopingMode::OrderByMode);
+    let maybe_sortkey = plan_expr(scoping, expression);
+    scoping.mode = original_scoping_mode;
+    let sortkey = maybe_sortkey?;
+
     for proj in projections {
         // Sort expression is explicitly the exact same as expression used in aggregation
-        if e == proj.expr {
-            return Ok(Expr::Slot(proj.dst));
+        if sortkey == proj.expr {
+            return Ok(Expr::RowRef(proj.dst));
         }
 
-        match &e {
+        match &sortkey {
             Expr::Prop(entity, _) => {
-                // Sort expression is a property of a map or entity we're using as aggregate key
+                // Sort expression is a property of a map or entity we're using in the projection
                 if **entity == proj.expr {
-                    return Ok(e);
+                    return Ok(sortkey);
                 }
             }
+            // Sort key is a slot produced by the projection
+            Expr::RowRef(slot) => {
+                if *slot == proj.dst {
+                    return Ok(sortkey)
+                }
+            }
+
             _ => (),
         }
     }
 
-    bail!("Can't sort by {:?}, because the planner can't tell if it is used in DISTINCT or aggregation, so is not sure if it is visible to the sorting step", e)
+    bail!("Can't sort by {:?}, because the planner can't tell if it is used in DISTINCT or aggregation, so is not sure if it is visible to the sorting step", sortkey)
 }
 
-fn parse_projection(projection: Pair<Rule>, prior_scope: &mut Scope, new_scope: &mut Scope) -> Result<Projection> {
+fn parse_projection(projection: Pair<Rule>, scoping: &mut Scoping) -> Result<Projection> {
     let default_alias = projection.as_str();
     let mut parts = projection.into_inner();
-    let expr = parts.next().map(|p| plan_expr(prior_scope, p)).unwrap()?;
+
+    scoping.mode = ScopingMode::Prior;
+    let expr = parts.next().map(|p| plan_expr(scoping, p)).unwrap()?;
+    scoping.mode = ScopingMode::Current;
 
     let alias = parts
         .next()
         .and_then(|p| match p.as_rule() {
-            Rule::id => Some(new_scope.declare(p.as_str())),
+            Rule::id => Some(scoping.declare(p.as_str())),
             _ => None,
         })
-        .unwrap_or_else(|| new_scope.declare(default_alias.trim_end()));
+        .unwrap_or_else(|| scoping.declare(default_alias.trim_end()));
 
     // If we're just renaming stuff, don't bother assigning new slots, just rename the existing one
-    if let Expr::Slot(slot) = expr {
-        new_scope.slots.insert(alias, slot);
+    if let Expr::RowRef(slot) = expr {
+        scoping._current.slots.insert(alias, slot);
     };
 
     Ok(Projection {
         expr,
         alias,
-        dst: new_scope.get_or_alloc_slot(alias),
+        dst: scoping.lookup_or_allocrow(alias),
     })
 }
 
@@ -311,7 +302,7 @@ mod tests {
                     labels: None,
                 }),
                 projections: vec![Projection {
-                    expr: Expr::Slot(p.slot(id_n)),
+                    expr: Expr::RowRef(p.slot(id_n)),
                     alias: id_n,
                     dst: p.slot(id_n),
                 }],
@@ -335,7 +326,7 @@ mod tests {
                     labels: None,
                 }),
                 projections: vec![Projection {
-                    expr: Expr::Slot(p.slot(id_n)),
+                    expr: Expr::RowRef(p.slot(id_n)),
                     alias: id_p,
                     dst: p.slot(id_p),
                 }],
@@ -361,7 +352,7 @@ mod tests {
                             dst: p.slot(id_p),
                         }],
                     }),
-                    sort_by: vec![Expr::Slot(p.slot(id_p))]
+                    sort_by: vec![Expr::RowRef(p.slot(id_p))]
                 }),
                 skip: Some(Expr::Int(1)),
                 limit: None,
@@ -387,7 +378,7 @@ mod tests {
                         labels: None,
                     }),
                     projections: vec![Projection {
-                        expr: Expr::Slot(p.slot(id_n)),
+                        expr: Expr::RowRef(p.slot(id_n)),
                         alias: id_p,
                         dst: p.slot(id_p),
                     }],
@@ -419,17 +410,17 @@ mod tests {
             projections,
             vec![
                 Projection {
-                    expr: Expr::Slot(p.slot(id_b)),
+                    expr: Expr::RowRef(p.slot(id_b)),
                     alias: id_b,
                     dst: p.slot(id_b),
                 },
                 Projection {
-                    expr: Expr::Slot(p.slot(id_tmp)),
+                    expr: Expr::RowRef(p.slot(id_tmp)),
                     alias: id_tmp,
                     dst: p.slot(id_tmp),
                 },
                 Projection {
-                    expr: Expr::Slot(p.slot(id_r)),
+                    expr: Expr::RowRef(p.slot(id_r)),
                     alias: id_r,
                     dst: p.slot(id_r),
                 }
@@ -457,7 +448,7 @@ mod tests {
             projections,
             vec![
                 Projection {
-                    expr: Expr::Slot(p.slot(id_b)),
+                    expr: Expr::RowRef(p.slot(id_b)),
                     alias: id_b,
                     dst: p.slot(id_b),
                 },
@@ -467,7 +458,7 @@ mod tests {
                     dst: p.slot(id_one),
                 },
                 Projection {
-                    expr: Expr::Slot(p.slot(id_r)),
+                    expr: Expr::RowRef(p.slot(id_r)),
                     alias: id_r,
                     dst: p.slot(id_r),
                 }
@@ -491,12 +482,12 @@ mod tests {
                         labels: None,
                     }),
                     projections: vec![Projection {
-                        expr: Expr::Prop(Box::new(Expr::Slot(p.slot(id_n))), vec![key_name]),
+                        expr: Expr::Prop(Box::new(Expr::RowRef(p.slot(id_n))), vec![key_name]),
                         alias: key_name,
                         dst: p.slot(key_name),
                     }],
                 }),
-                sort_by: vec![Expr::Slot(p.slot(key_name))]
+                sort_by: vec![Expr::RowRef(p.slot(key_name))]
             }
         );
         Ok(())
@@ -519,7 +510,7 @@ mod tests {
                             slot: 0,
                             labels: None,
                         }),
-                        grouping: vec![(Expr::Slot(p.slot(id_n)), p.slot(id_n))],
+                        grouping: vec![(Expr::RowRef(p.slot(id_n)), p.slot(id_n))],
                         aggregations: vec![(
                             Expr::FuncCall {
                                 name: fn_count,
@@ -530,18 +521,18 @@ mod tests {
                     }),
                     projections: vec![
                         Projection {
-                            expr: Expr::Slot(p.slot(id_n)),
+                            expr: Expr::RowRef(p.slot(id_n)),
                             alias: id_n,
                             dst: p.slot(id_n),
                         },
                         Projection {
-                            expr: Expr::Slot(p.slot(id_count_call)),
+                            expr: Expr::RowRef(p.slot(id_count_call)),
                             alias: id_count_call,
                             dst: p.slot(id_count_call),
                         }
                     ],
                 }),
-                sort_by: vec![Expr::Slot(p.slot(id_count_call))]
+                sort_by: vec![Expr::RowRef(p.slot(id_count_call))]
             }
         );
         Ok(())
@@ -550,7 +541,7 @@ mod tests {
     #[test]
     fn plan_with_order_repeating_aliased_aggregated_expression() -> Result<(), Error> {
         // Not sure at all that this is the right thing here, but basically:
-        // If you've got a query that does some aggregation, and the orders by the aggregate
+        // If you've got a query that does some aggregation, and then orders by the aggregate
         // key, it is legal to use the expression you used in the aggregation in the order by
         // rather than the alias. Eg. you can do the query in this test. But you can't do
         // *other* expressions, like you couldn't do n.age here.
@@ -569,18 +560,18 @@ mod tests {
                             labels: None,
                         }),
                         grouping: vec![(
-                            Expr::Prop(Box::new(Expr::Slot(p.slot(id_n))), vec![key_name]),
+                            Expr::Prop(Box::new(Expr::RowRef(p.slot(id_n))), vec![key_name]),
                             p.slot(key_name)
                         )],
                         aggregations: vec![]
                     }),
                     projections: vec![Projection {
-                        expr: Expr::Slot(p.slot(key_name)),
+                        expr: Expr::RowRef(p.slot(key_name)),
                         alias: key_name,
                         dst: p.slot(key_name),
                     }],
                 }),
-                sort_by: vec![Expr::Slot(p.slot(key_name))]
+                sort_by: vec![Expr::RowRef(p.slot(key_name))]
             }
         );
         Ok(())
@@ -603,17 +594,17 @@ mod tests {
                             slot: 0,
                             labels: None,
                         }),
-                        grouping: vec![(Expr::Slot(p.slot(id_n)), p.slot(id_n))],
+                        grouping: vec![(Expr::RowRef(p.slot(id_n)), p.slot(id_n))],
                         aggregations: vec![]
                     }),
                     projections: vec![Projection {
-                        expr: Expr::Slot(p.slot(id_n)),
+                        expr: Expr::RowRef(p.slot(id_n)),
                         alias: id_n,
                         dst: p.slot(id_n),
                     }],
                 }),
                 sort_by: vec![Expr::Prop(
-                    Box::new(Expr::Slot(p.slot(id_n))),
+                    Box::new(Expr::RowRef(p.slot(id_n))),
                     vec![key_name]
                 )]
             }
@@ -640,14 +631,14 @@ mod tests {
                         labels: None,
                     }),
                     projections: vec![Projection {
-                        expr: Expr::Slot(p.slot(id_n)),
+                        expr: Expr::RowRef(p.slot(id_n)),
                         alias: id_n,
                         dst: p.slot(id_n),
                     }],
                 }),
                 predicate: Expr::BinaryOp {
                     left: Box::new(Expr::Prop(
-                        Box::new(Expr::Slot(p.slot(id_n))),
+                        Box::new(Expr::RowRef(p.slot(id_n))),
                         vec![key_name]
                     )),
                     right: Box::new(Expr::String("bob".to_string())),
@@ -683,13 +674,13 @@ mod tests {
                             dir: Some(Dir::Out),
                         }),
                         projections: vec![Projection {
-                            expr: Expr::Slot(p.slot(id_a)),
+                            expr: Expr::RowRef(p.slot(id_a)),
                             alias: id_a,
                             dst: p.slot(id_a),
                         }],
                     }),
                     projections: vec![Projection {
-                        expr: Expr::Slot(p.slot(id_a)),
+                        expr: Expr::RowRef(p.slot(id_a)),
                         alias: id_a,
                         dst: p.slot(id_a),
                     }]
@@ -715,7 +706,7 @@ mod tests {
                         labels: None,
                     }),
                     projections: vec![Projection {
-                        expr: Expr::Slot(p.slot(id_n)),
+                        expr: Expr::RowRef(p.slot(id_n)),
                         alias: id_n,
                         dst: p.slot(id_n),
                     }]
@@ -751,7 +742,7 @@ mod tests {
                         )]
                     }),
                     projections: vec![Projection {
-                        expr: Expr::Slot(p.slot(alias)),
+                        expr: Expr::RowRef(p.slot(alias)),
                         alias,
                         dst: p.slot(alias),
                     }]
@@ -779,13 +770,13 @@ mod tests {
                             labels: None,
                         }),
                         grouping: vec![(
-                            Expr::Prop(Box::new(Expr::Slot(p.slot(id_n))), vec![prop_name]),
-                            1
+                                           Expr::Prop(Box::new(Expr::RowRef(p.slot(id_n))), vec![prop_name]),
+                                           1
                         ),],
                         aggregations: vec![]
                     }),
                     projections: vec![Projection {
-                        expr: Expr::Slot(p.slot(alias)),
+                        expr: Expr::RowRef(p.slot(alias)),
                         alias,
                         dst: p.slot(alias),
                     }]
@@ -818,13 +809,13 @@ mod tests {
                         aggregations: vec![(
                             Expr::FuncCall {
                                 name: fn_count,
-                                args: vec![Expr::Slot(p.slot(id_n))]
+                                args: vec![Expr::RowRef(p.slot(id_n))]
                             },
                             p.slot(col_count_n)
                         )]
                     }),
                     projections: vec![Projection {
-                        expr: Expr::Slot(p.slot(col_count_n)),
+                        expr: Expr::RowRef(p.slot(col_count_n)),
                         alias: col_count_n,
                         dst: p.slot(col_count_n),
                     }]
@@ -856,13 +847,13 @@ mod tests {
                         aggregations: vec![(
                             Expr::FuncCall {
                                 name: fn_count,
-                                args: vec![Expr::Slot(p.slot(id_n))]
+                                args: vec![Expr::RowRef(p.slot(id_n))]
                             },
                             p.slot(col_count_n)
                         )]
                     }),
                     projections: vec![Projection {
-                        expr: Expr::Slot(p.slot(col_count_n)),
+                        expr: Expr::RowRef(p.slot(col_count_n)),
                         alias: col_count_n,
                         dst: p.slot(col_count_n),
                     }]
@@ -897,12 +888,12 @@ mod tests {
                         }),
                         grouping: vec![
                             (
-                                Expr::Prop(Box::new(Expr::Slot(p.slot(id_n))), vec![key_age]),
+                                Expr::Prop(Box::new(Expr::RowRef(p.slot(id_n))), vec![key_age]),
                                 p.slot(col_n_age)
                             ),
                             (
                                 Expr::Prop(
-                                    Box::new(Expr::Slot(p.slot(id_n))),
+                                    Box::new(Expr::RowRef(p.slot(id_n))),
                                     vec![key_occupation]
                                 ),
                                 p.slot(col_n_occupation)
@@ -911,24 +902,24 @@ mod tests {
                         aggregations: vec![(
                             Expr::FuncCall {
                                 name: fn_count,
-                                args: vec![Expr::Slot(p.slot(id_n))]
+                                args: vec![Expr::RowRef(p.slot(id_n))]
                             },
                             p.slot(col_count_n)
                         )]
                     }),
                     projections: vec![
                         Projection {
-                            expr: Expr::Slot(p.slot(col_n_age)),
+                            expr: Expr::RowRef(p.slot(col_n_age)),
                             alias: col_n_age,
                             dst: p.slot(col_n_age),
                         },
                         Projection {
-                            expr: Expr::Slot(p.slot(col_n_occupation)),
+                            expr: Expr::RowRef(p.slot(col_n_occupation)),
                             alias: col_n_occupation,
                             dst: p.slot(col_n_occupation),
                         },
                         Projection {
-                            expr: Expr::Slot(p.slot(col_count_n)),
+                            expr: Expr::RowRef(p.slot(col_count_n)),
                             alias: col_count_n,
                             dst: p.slot(col_count_n),
                         },

@@ -1,20 +1,19 @@
 use super::{Expr, LogicalPlan, Pair, PlanningContext, Result, Rule};
 use crate::backend::Token;
 use crate::frontend::expr::plan_expr;
-use crate::frontend::{SetAction, Scope};
+use crate::frontend::{SetAction, Scoping, Scope};
 
 pub fn plan_set(
     pc: &mut PlanningContext,
     src: LogicalPlan,
     set_stmt: Pair<Rule>,
 ) -> Result<LogicalPlan> {
-    let mut scope = pc.scope_mut();
-    let mut actions = parse_set_clause(scope, set_stmt)?;
+    let mut actions = parse_set_clause(&mut pc.scoping, set_stmt)?;
     return Ok(LogicalPlan::SetProperties { src: Box::new(src), actions })
 }
 
 pub fn parse_set_clause(
-    scope: &mut Scope,
+    scoping: &mut Scoping,
     set_stmt: Pair<Rule>,
 ) -> Result<Vec<SetAction>> {
     let mut actions = Vec::new();
@@ -22,33 +21,33 @@ pub fn parse_set_clause(
         match assignment.as_rule() {
             Rule::single_assignment => {
                 let mut parts = assignment.into_inner();
-                let entity = scope.tokenize(parts.next().unwrap().as_str());
-                let key = scope.tokenize(parts.next().unwrap().as_str());
+                let entity = scoping.tokenize(parts.next().unwrap().as_str());
+                let key = scoping.tokenize(parts.next().unwrap().as_str());
 
-                let expr = plan_expr(scope, parts.next().unwrap())?;
+                let expr = plan_expr(scoping, parts.next().unwrap())?;
                 actions.push(SetAction::SingleAssign{
-                    entity: scope.get_or_alloc_slot(entity),
+                    entity: scoping.lookup_or_allocrow(entity),
                     key,
                     value: expr
                 });
             }
             Rule::append_assignment => {
                 let mut parts = assignment.into_inner();
-                let entity = scope.tokenize(parts.next().unwrap().as_str());
+                let entity = scoping.tokenize(parts.next().unwrap().as_str());
 
-                let expr = plan_expr(scope, parts.next().unwrap())?;
+                let expr = plan_expr(scoping, parts.next().unwrap())?;
                 actions.push(SetAction::Append{
-                    entity: scope.get_or_alloc_slot(entity),
+                    entity: scoping.lookup_or_allocrow(entity),
                     value: expr
                 });
             }
             Rule::overwrite_assignment => {
                 let mut parts = assignment.into_inner();
-                let entity = scope.tokenize(parts.next().unwrap().as_str());
+                let entity = scoping.tokenize(parts.next().unwrap().as_str());
 
-                let expr = plan_expr(scope, parts.next().unwrap())?;
+                let expr = plan_expr(scoping, parts.next().unwrap())?;
                 actions.push(SetAction::Overwrite{
-                    entity: scope.get_or_alloc_slot(entity),
+                    entity: scoping.lookup_or_allocrow(entity),
                     value: expr
                 });
             }
@@ -101,7 +100,7 @@ mod tests {
         assert_eq!(
             p.plan,
             LogicalPlan::SetProperties {
-                src: Box::new(LogicalPlan::NestLoop {
+                src: Box::new(LogicalPlan::CartesianProduct {
                     outer: Box::new(LogicalPlan::NodeScan {
                         src: Box::new(LogicalPlan::Argument),
                         slot: p.slot(id_a),
@@ -116,7 +115,7 @@ mod tests {
                 }),
                 actions: vec![SetAction::Overwrite {
                     entity: p.slot(id_a),
-                    value: Expr::Slot(p.slot(id_b)),
+                    value: Expr::RowRef(p.slot(id_b)),
                 }]
             }
         );

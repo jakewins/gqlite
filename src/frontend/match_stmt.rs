@@ -23,7 +23,7 @@ pub fn plan_match(
 
         let (_, node) = pg.v.iter().next().unwrap();
 
-        let node_slot = pc.get_or_alloc_slot(node.identifier);
+        let node_slot = pc.scoping.lookup_or_allocrow(node.identifier);
         return Ok(LogicalPlan::Optional {
             src: Box::new(LogicalPlan::NodeScan {
                 src: Box::new(src),
@@ -74,9 +74,9 @@ pub fn plan_match_patterngraph(pc: &mut PlanningContext, src: LogicalPlan, mut p
             //      rel, one with the start node as `a`, one with the start node as `b`.
             plan = LogicalPlan::ExpandRel {
                 src: Box::new(plan),
-                src_rel_slot: pc.get_or_alloc_slot(rel.identifier),
-                start_node_slot: pc.get_or_alloc_slot(left_node.identifier),
-                end_node_slot: pc.get_or_alloc_slot(right_node.identifier)
+                src_rel_slot: pc.scoping.lookup_or_allocrow(rel.identifier),
+                start_node_slot: pc.scoping.lookup_or_allocrow(left_node.identifier),
+                end_node_slot: pc.scoping.lookup_or_allocrow(right_node.identifier)
             };
 
             rel.solved = true;
@@ -147,11 +147,11 @@ pub fn plan_match_patterngraph(pc: &mut PlanningContext, src: LogicalPlan, mut p
                 rel.solved = true;
                 solved_any = true;
 
-                let dst = pc.get_or_alloc_slot(right_id);
+                let dst = pc.scoping.lookup_or_allocrow(right_id);
                 let expand = LogicalPlan::Expand {
                     src: Box::new(plan),
-                    src_slot: pc.get_or_alloc_slot(left_id),
-                    rel_slot: pc.get_or_alloc_slot(rel.identifier),
+                    src_slot: pc.scoping.lookup_or_allocrow(left_id),
+                    rel_slot: pc.scoping.lookup_or_allocrow(rel.identifier),
                     dst_slot: dst,
                     rel_type: rel.rel_type,
                     dir: rel.dir,
@@ -164,11 +164,11 @@ pub fn plan_match_patterngraph(pc: &mut PlanningContext, src: LogicalPlan, mut p
                 rel.solved = true;
                 solved_any = true;
 
-                let dst = pc.get_or_alloc_slot(left_id);
+                let dst = pc.scoping.lookup_or_allocrow(left_id);
                 let expand = LogicalPlan::Expand {
                     src: Box::new(plan),
-                    src_slot: pc.get_or_alloc_slot(right_id),
-                    rel_slot: pc.get_or_alloc_slot(rel.identifier),
+                    src_slot: pc.scoping.lookup_or_allocrow(right_id),
+                    rel_slot: pc.scoping.lookup_or_allocrow(rel.identifier),
                     dst_slot: dst,
                     rel_type: rel.rel_type,
                     dir: rel.dir.map(Dir::reverse),
@@ -178,11 +178,11 @@ pub fn plan_match_patterngraph(pc: &mut PlanningContext, src: LogicalPlan, mut p
                 // Both sides are solved, need to find rel that bridges them.
                 rel.solved = true;
                 solved_any = true;
-                let dst_slot = pc.get_or_alloc_slot(rel.identifier);
+                let dst_slot = pc.scoping.lookup_or_allocrow(rel.identifier);
                 plan = LogicalPlan::ExpandInto {
                     src: Box::new(plan),
-                    left_node_slot: pc.get_or_alloc_slot(left_id),
-                    right_node_slot: pc.get_or_alloc_slot(right_id),
+                    left_node_slot: pc.scoping.lookup_or_allocrow(left_id),
+                    right_node_slot: pc.scoping.lookup_or_allocrow(right_id),
                     dst_slot,
                     rel_type: rel.rel_type,
                     dir: rel.dir
@@ -205,7 +205,7 @@ pub fn plan_match_patterngraph(pc: &mut PlanningContext, src: LogicalPlan, mut p
                 v.solved = true;
 
                 let inner = Box::new(plan_match_node(pc, v, LogicalPlan::Argument)?);
-                plan = LogicalPlan::NestLoop {
+                plan = LogicalPlan::CartesianProduct {
                     outer: Box::new(plan),
                     inner,
                     predicate: Expr::Bool(true),
@@ -249,7 +249,7 @@ fn plan_match_node(
         bail!("Multiple label match not yet implemented")
     }
     // Getting all possible nodes..
-    let node_slot = pc.get_or_alloc_slot(v.identifier);
+    let node_slot = pc.scoping.lookup_or_allocrow(v.identifier);
     let mut plan = LogicalPlan::NodeScan {
         src: Box::new(src),
         slot: node_slot,
@@ -261,7 +261,7 @@ fn plan_match_node(
         let mut and_terms = Vec::new();
         for e in &v.props {
             and_terms.push(Expr::BinaryOp {
-                left: Box::new(Expr::Prop(Box::new(Expr::Slot(node_slot)), vec![e.key])),
+                left: Box::new(Expr::Prop(Box::new(Expr::RowRef(node_slot)), vec![e.key])),
                 right: Box::new(e.val.clone()),
                 op: Op::Eq,
             })
@@ -291,7 +291,7 @@ mod tests {
     fn plan_match_with_anonymous_rel_type() -> Result<(), Error> {
         let mut p = plan("MATCH (n:Person)-->(o)")?;
         let lbl_person = p.tokenize("Person");
-        let id_anon = p.tokenize("AnonRel#0");
+        let id_anon = p.tokenize("$anonrel0");
         let id_n = p.tokenize("n");
         let id_o = p.tokenize("o");
 
@@ -397,7 +397,7 @@ mod tests {
                     }),
                     projections: vec![
                         Projection{
-                            expr: Expr::Slot(p.slot(id_r)),
+                            expr: Expr::RowRef(p.slot(id_r)),
                             alias: id_r,
                             dst: p.slot(id_r)
                         }
@@ -428,7 +428,7 @@ mod tests {
                     }),
                     predicate: Expr::BinaryOp {
                         left: Box::new(Expr::Prop(
-                            Box::new(Expr::Slot(p.slot(id_n))),
+                            Box::new(Expr::RowRef(p.slot(id_n))),
                             vec![key_name]
                         )),
                         right: Box::new(Expr::String("David".to_string())),
@@ -463,7 +463,7 @@ mod tests {
                         slots: vec![p.slot(id_n)]
                     }),
                     projections: vec![Projection {
-                        expr: Expr::Slot(p.slot(id_n)),
+                        expr: Expr::RowRef(p.slot(id_n)),
                         alias: id_n,
                         dst: p.slot(id_n)
                     }]
@@ -484,7 +484,7 @@ mod tests {
             p.plan,
             LogicalPlan::ProduceResult {
                 src: Box::new(LogicalPlan::Project {
-                    src: Box::new(LogicalPlan::NestLoop {
+                    src: Box::new(LogicalPlan::CartesianProduct {
                         outer: Box::new(LogicalPlan::NodeScan {
                             src: Box::new(LogicalPlan::Argument),
                             slot: p.slot(id_a),
@@ -501,12 +501,12 @@ mod tests {
                     }),
                     projections: vec![
                         Projection {
-                            expr: Expr::Slot(p.slot(id_a)),
+                            expr: Expr::RowRef(p.slot(id_a)),
                             alias: id_a,
                             dst: p.slot(id_a)
                         },
                         Projection {
-                            expr: Expr::Slot(p.slot(id_b)),
+                            expr: Expr::RowRef(p.slot(id_b)),
                             alias: id_b,
                             dst: p.slot(id_b)
                         }
