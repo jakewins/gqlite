@@ -2045,7 +2045,8 @@ impl Operator for Apply {
     fn next(&mut self, ctx: &mut Context, out: &mut GramRow) -> Result<bool> {
         if !self.initialized {
             self.initialized = true;
-            if !self.lhs.next(ctx, out)? {
+            let next = self.lhs.next(ctx, out)?;
+            if !next {
                 return Ok(false);
             }
             self.rhs.reset()
@@ -2058,7 +2059,8 @@ impl Operator for Apply {
 
             // Exhausted rhs, fetch next lhs
 
-            if !self.lhs.next(ctx, out)? {
+            let next = self.lhs.next(ctx, out)?;
+            if !next {
                 return Ok(false);
             }
             self.rhs.reset()
@@ -2079,6 +2081,7 @@ impl Operator for AntiConditionalApply {
         self.lhs.reset();
         self.rhs.reset();
     }
+
     fn next(&mut self, ctx: &mut Context, out: &mut GramRow) -> Result<bool> {
         loop {
             if !self.lhs.next(ctx, out)? {
@@ -2097,6 +2100,10 @@ impl Operator for AntiConditionalApply {
             }
 
             if anticondition_passed {
+                println!(
+                    "anticond passed: conds={:?} / row = {:?}",
+                    self.conditions, out
+                );
                 self.rhs.reset();
                 if self.rhs.next(ctx, out)? {
                     return Ok(true);
@@ -2455,7 +2462,6 @@ fn append_node(
     println!("--- About to write ---");
     println!("{}", gram_string);
     println!("------");
-    // TODO: actually write to the file:
 
     ctx.file
         .borrow_mut()
@@ -3023,12 +3029,14 @@ mod tests {
                     ]),
                 ]),
             )])),
-        );
+        )
+        .unwrap();
         while cursor.next().unwrap().is_some() {
             // ..
         }
 
-        g.eval(f.plan("MATCH (n) RETURN n").unwrap(), &mut cursor, None);
+        g.eval(f.plan("MATCH (n) RETURN n").unwrap(), &mut cursor, None)
+            .unwrap();
         while cursor.next().unwrap().is_some() {
             println!("{:?}", cursor.projection)
         }

@@ -972,6 +972,8 @@ fn parse_pattern_graph(pc: &mut PlanningContext, patterns: Pair<Rule>) -> Result
                                 if is_new {
                                     pg.unbound_identifiers.push(current_node.identifier)
                                 }
+                            } else if current_node.anonymous {
+                                pg.unbound_identifiers.push(current_node.identifier)
                             }
                             prior_node_id = Some(current_node.identifier);
                             pg.merge_node(current_node);
@@ -992,6 +994,8 @@ fn parse_pattern_graph(pc: &mut PlanningContext, patterns: Pair<Rule>) -> Result
                                 if is_new {
                                     pg.unbound_identifiers.push(current_rel.identifier)
                                 }
+                            } else if current_rel.anonymous {
+                                pg.unbound_identifiers.push(current_rel.identifier)
                             }
                             prior_rel = Some(current_rel);
                             prior_node_id = None

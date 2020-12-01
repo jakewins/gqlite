@@ -231,4 +231,48 @@ ON MATCH SET n.updated = timestamp()",
         );
         Ok(())
     }
+
+    #[test]
+    fn plan_merge_with_matching_prior_anon_create() -> Result<(), Error> {
+        let mut p = plan("CREATE (:X) MERGE (:X)")?;
+
+        let id_a = p.tokenize("a");
+        let id_b = p.tokenize("b");
+        let lbl_x = p.tokenize("X");
+        assert_eq!(
+            p.plan,
+            LogicalPlan::Apply {
+                lhs: Box::new(LogicalPlan::Create {
+                    src: Box::new(LogicalPlan::Argument),
+                    nodes: vec![NodeSpec {
+                        slot: 0,
+                        labels: vec![lbl_x],
+                        props: vec![]
+                    }],
+                    rels: vec![]
+                }),
+                rhs: Box::new(LogicalPlan::AntiConditionalApply {
+                    lhs: Box::new(LogicalPlan::Optional {
+                        src: Box::new(LogicalPlan::NodeScan {
+                            src: Box::new(LogicalPlan::Argument),
+                            slot: 1,
+                            labels: Some(lbl_x)
+                        }),
+                        slots: vec![1]
+                    }),
+                    rhs: Box::new(LogicalPlan::Create {
+                        src: Box::new(LogicalPlan::Argument),
+                        nodes: vec![NodeSpec {
+                            slot: 1,
+                            labels: vec![lbl_x],
+                            props: vec![]
+                        }],
+                        rels: vec![]
+                    }),
+                    conditions: vec![1]
+                })
+            }
+        );
+        Ok(())
+    }
 }
