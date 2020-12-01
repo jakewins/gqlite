@@ -52,7 +52,7 @@ mod tests {
     fn plan_call_with_parameter() -> Result<(), Error> {
         let mut p = plan("CALL dbms.cluster.routing.getRoutingTable($context)")?;
         let get_routing_table = p.tokenize("dbms.cluster.routing.getRoutingTable");
-        let p_context = p.tokenize("$context");
+        let p_context = p.tokenize("context");
 
         assert_eq!(
             p.plan,

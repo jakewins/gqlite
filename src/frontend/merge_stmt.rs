@@ -107,7 +107,7 @@ ON MATCH SET n.updated = timestamp()",
 
         let lbl_person = p.tokenize("Person");
         let tok_name = p.tokenize("name");
-        let param_name = p.tokenize("$name");
+        let param_name = p.tokenize("name");
         let key_created = p.tokenize("created");
         let key_updated = p.tokenize("updated");
         let id_n = p.tokenize("n");

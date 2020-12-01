@@ -10,19 +10,23 @@ add_sub_op = ${ "-" | "+" }
 mult_div_expr = { term ~ (mult_div_op ~ term)* }
 mult_div_op = ${ "*" | "/" }
 
-term = _{ binary_op | atom }
+term = _{ binary_op | is_null | is_not_null | atom }
 
 // Need something where like blah() * b.name / 12 + count(*) is handled right
 binary_op = { atom ~ op ~ atom }
 op = ${ "=" | ">" | "<>" }
 
-atom = _{ bool | science | float | int | prop_lookup | count_call | func_call | string | param | id | list_comprehension | list | map | "(" ~ expr ~ ")" }
+is_null = { atom ~ ^"IS" ~ ^"NULL" }
+is_not_null = { atom ~ ^"IS" ~ ^"NOT" ~ ^"NULL" }
+
+atom = _{ bool | science | float | int | prop_lookup | count_call | func_call | string | param_wrap | id | list_comprehension | list | map | "(" ~ expr ~ ")" }
 
 id = ${ ( ASCII_ALPHA | "_" | "-" ) ~ ( ASCII_ALPHANUMERIC | "_" | "-" )* }
 
-param = ${ "$" ~ id }
+param_wrap = _{ "$" ~ param }
+param = ${ id }
 
-prop_lookup = { (id | param) ~ (("." ~ id) | ("[" ~ expr ~ "]"))+ }
+prop_lookup = { (id | param_wrap) ~ (("." ~ id) | ("[" ~ expr ~ "]"))+ }
 
 // TODO: Use function_id and arglist here
 func_call = { id ~ "(" ~ (expr ~ ("," ~ expr)*)? ~ ")" }

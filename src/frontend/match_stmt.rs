@@ -12,25 +12,29 @@ pub fn plan_match(
     println!("PG: {:?}", pg);
 
     if pg.optional {
-        // We currently only handle a singular case here, OPTIONAL MATCH with a single unbound node:
-        if !pg.e.is_empty() {
-            bail!("gqlite does not yet support OPTIONAL MATCH with relationships, sorry")
+        // Optional match is basically just MATCH with a single row if there's no match,
+        // where all unbound outputs are nulled. We just need to get a list of which slots
+        // to clear out:
+        let mut optional_slots = Vec::new();
+
+        for v in pg.v.values() {
+            if !v.solved {
+                optional_slots.push(pc.scoping.lookup_or_allocrow(v.identifier));
+            }
+        }
+        for e in &pg.e {
+            if !e.solved {
+                optional_slots.push(pc.scoping.lookup_or_allocrow(e.identifier));
+            }
         }
 
-        if pg.predicate.is_some() {
-            bail!("gqlite does not yet support OPTIONAL MATCH with WHERE clause, sorry")
-        }
+        // Now we plan the match like a normal one
+        let match_plan = plan_match_patterngraph(pc, src, pg)?;
 
-        let (_, node) = pg.v.iter().next().unwrap();
-
-        let node_slot = pc.scoping.lookup_or_allocrow(node.identifier);
+        // And just return it in an Optional operator that'll clear the unbound slots:
         return Ok(LogicalPlan::Optional {
-            src: Box::new(LogicalPlan::NodeScan {
-                src: Box::new(src),
-                slot: node_slot,
-                labels: node.labels.first().cloned(),
-            }),
-            slots: vec![node_slot],
+            src: Box::new(match_plan),
+            slots: optional_slots,
         });
     }
 
@@ -472,6 +476,45 @@ mod tests {
                     }]
                 }),
                 fields: vec![(id_n, p.slot(id_n))]
+            }
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn plan_optional_match_with_rels() -> Result<(), Error> {
+        let mut p = plan("OPTIONAL MATCH (a)-[r:KNOWS]->(b) RETURN r")?;
+        let id_r = p.tokenize("r");
+        let id_a = p.tokenize("a");
+        let id_b = p.tokenize("b");
+        let reltype_knows = p.tokenize("KNOWS");
+
+        assert_eq!(
+            p.plan,
+            LogicalPlan::ProduceResult {
+                src: Box::new(LogicalPlan::Project {
+                    src: Box::new(LogicalPlan::Optional {
+                        src: Box::new(LogicalPlan::Expand {
+                            src: Box::new(LogicalPlan::NodeScan {
+                                src: Box::new(LogicalPlan::Argument),
+                                slot: p.slot(id_a),
+                                labels: None
+                            }),
+                            src_slot: p.slot(id_a),
+                            rel_slot: p.slot(id_r),
+                            dst_slot: p.slot(id_b),
+                            rel_type: Some(reltype_knows),
+                            dir: Some(Dir::Out)
+                        }),
+                        slots: vec![0, 1, 2]
+                    }),
+                    projections: vec![Projection {
+                        expr: Expr::RowRef(p.slot(id_r)),
+                        alias: id_r,
+                        dst: p.slot(id_r)
+                    }]
+                }),
+                fields: vec![(id_r, p.slot(id_r))]
             }
         );
         Ok(())

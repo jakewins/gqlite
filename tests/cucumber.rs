@@ -1,7 +1,7 @@
 use cucumber::{after, before, cucumber};
 use gqlite::gramdb::{GramCursor, GramDatabase};
 use gqlite::{Database, Val};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use tempfile::tempfile;
 
 #[macro_use]
@@ -10,7 +10,7 @@ extern crate anyhow;
 pub struct GraphProperties {
     node_count: i32,
     relationship_count: i32,
-    labels_count: i32,
+    labels: HashSet<String>,
     properties: HashMap<String, Val>,
 }
 
@@ -23,6 +23,12 @@ pub struct MyWorld {
     starting_graph_properties: GraphProperties,
     parameters: Vec<(String, Val)>,
     result: GramCursor,
+
+    assertion_config: AssertionConfig,
+}
+
+pub struct AssertionConfig {
+    ignore_list_element_order: bool,
 }
 
 impl cucumber::World for MyWorld {}
@@ -39,21 +45,24 @@ impl std::default::Default for MyWorld {
             starting_graph_properties: GraphProperties {
                 node_count: 0,
                 relationship_count: 0,
-                labels_count: 0,
+                labels: Default::default(),
                 properties: Default::default(),
+            },
+            assertion_config: AssertionConfig {
+                ignore_list_element_order: false,
             },
         }
     }
 }
 
 mod example_steps {
-    use super::{empty_db, MyWorld};
+    use super::{empty_db, AssertionConfig, MyWorld};
     use anyhow::Result;
     use cucumber::{steps, Step};
     use gqlite::gramdb::GramCursor;
     use gqlite::{Error, Val};
 
-    use std::collections::HashMap;
+    use std::collections::{HashMap, HashSet};
     use std::iter::Peekable;
     use std::str::Chars;
 
@@ -105,10 +114,26 @@ mod example_steps {
         pub fn to_val(&self) -> Val {
             match self {
                 ValMatcher::Int(v) => Val::Int(*v),
-                v => panic!("Don't know how to convert {:?} to val", v),
+                ValMatcher::String(v) => Val::String(v.to_owned()),
+                ValMatcher::Bool(v) => Val::Bool(*v),
+                ValMatcher::Map(entries) => {
+                    let mut out = Vec::with_capacity(entries.len());
+                    for (k, v) in entries {
+                        out.push((k.to_owned(), v.to_val()))
+                    }
+                    Val::Map(out)
+                }
+                ValMatcher::List(entries) => {
+                    let mut out = Vec::with_capacity(entries.len());
+                    for v in entries {
+                        out.push(v.to_val())
+                    }
+                    Val::List(out)
+                }
+                v => panic!("ValMatcher don't know how to convert {:?} to val", v),
             }
         }
-        pub fn test_eq(&self, v: Val) -> Result<()> {
+        pub fn test_eq(&self, cfg: &AssertionConfig, v: Val) -> Result<()> {
             match self {
                 ValMatcher::Int(e) => {
                     // The TCK writes float results in a way that doesn't let us distinguish
@@ -134,7 +159,7 @@ mod example_steps {
                             for (ak, av) in &actual {
                                 if ak == k {
                                     found = true;
-                                    ev.test_eq(av.clone())?;
+                                    ev.test_eq(cfg, av.clone())?;
                                 }
                             }
                             if !found {
@@ -155,8 +180,31 @@ mod example_steps {
                                 actual
                             )
                         }
-                        for i in 0..expected.len() {
-                            expected[i].test_eq(actual[i].clone())?;
+                        if cfg.ignore_list_element_order {
+                            let mut actual_remaining = actual.clone();
+                            for ev in expected {
+                                let index = actual_remaining
+                                    .iter()
+                                    .position(|av| match ev.test_eq(cfg, av.clone()) {
+                                        Ok(_) => true,
+                                        _ => false,
+                                    })
+                                    .unwrap_or_else(|| {
+                                        panic!("Expected '{:?}' in list {:?}", ev, expected)
+                                    });
+                                actual_remaining.remove(index);
+                            }
+                            if !actual_remaining.is_empty() {
+                                bail!(
+                                    "expected {:?} to equal {:?}, in any order",
+                                    actual,
+                                    expected
+                                );
+                            }
+                        } else {
+                            for i in 0..expected.len() {
+                                expected[i].test_eq(cfg, actual[i].clone())?;
+                            }
                         }
                         Ok(())
                     }
@@ -173,7 +221,7 @@ mod example_steps {
                             for (ek, ev) in props {
                                 if ek == k {
                                     found = true;
-                                    ev.test_eq(prop_val.clone())?;
+                                    ev.test_eq(cfg, prop_val.clone())?;
                                 }
                             }
                             if !found {
@@ -218,13 +266,17 @@ mod example_steps {
 
     fn run_preparatory_query(world: &mut MyWorld, step: &Step) -> Result<(), Error> {
         let mut cursor = world.graph.new_cursor();
-        let result = world.graph.run(&step.docstring().unwrap(), &mut cursor);
+        let result = world.graph.run(
+            &step.docstring().unwrap(),
+            &mut cursor,
+            Some(&Val::Map(world.parameters.clone())),
+        );
         while let Some(_) = cursor.next()? {
             // consume
         }
         world.starting_graph_properties.node_count = count_nodes(world);
         world.starting_graph_properties.relationship_count = count_rels(world);
-        world.starting_graph_properties.labels_count = count_labels(world);
+        world.starting_graph_properties.labels = gather_labels(world);
         world.starting_graph_properties.properties = gather_properties(world);
         result
     }
@@ -232,8 +284,10 @@ mod example_steps {
     fn set_parameters(world: &mut MyWorld, step: &Step) -> Result<(), Error> {
         let mut table = step.table().unwrap().clone();
         let pkey = table.header[0].to_string();
-        let pval = str_to_val(&mut table.header[1].chars().peekable()).to_val();
-        world.parameters.push((pkey, pval));
+        if !pkey.is_empty() {
+            let pval = str_to_val(&mut table.header[1].chars().peekable()).to_val();
+            world.parameters.push((pkey, pval));
+        }
         for mut row in table.rows {
             let pkey = row[0].to_string();
             let pval = str_to_val(&mut row[1].chars().peekable()).to_val();
@@ -245,7 +299,11 @@ mod example_steps {
     fn start_query(world: &mut MyWorld, step: &Step) {
         world
             .graph
-            .run(&step.docstring().unwrap(), &mut world.result)
+            .run(
+                &step.docstring().unwrap(),
+                &mut world.result,
+                Some(&Val::Map(world.parameters.clone())),
+            )
             .expect("Should not fail")
     }
 
@@ -261,7 +319,7 @@ mod example_steps {
         let mut cursor = world.graph.new_cursor();
         world
             .graph
-            .run("MATCH (n) RETURN n", &mut cursor)
+            .run("MATCH (n) RETURN n", &mut cursor, None)
             .expect("should succeed");
         let mut ct = 0;
         while let Some(r) = cursor.next().unwrap() {
@@ -274,6 +332,25 @@ mod example_steps {
         ct as i32
     }
 
+    fn gather_labels(world: &mut MyWorld) -> HashSet<String> {
+        let mut out = HashSet::new();
+        let mut cursor = world.graph.new_cursor();
+        world
+            .graph
+            .run("MATCH (n) RETURN n", &mut cursor, None)
+            .expect("should succeed");
+        while let Some(r) = cursor.next().unwrap() {
+            if let Val::Node(n) = &r.slots[0] {
+                for l in &n.labels {
+                    out.insert(l.to_owned());
+                }
+            } else {
+                panic!("Query requesting nodes returned something else: {:?}", r)
+            }
+        }
+        out
+    }
+
     // Creates a map of '<node|rel>.<id>.<key>' -> Val for all properties in the graph,
     // used to determine properties being changed by comparing two invocations of this
     fn gather_properties(world: &mut MyWorld) -> HashMap<String, Val> {
@@ -281,7 +358,7 @@ mod example_steps {
         let mut cursor = world.graph.new_cursor();
         world
             .graph
-            .run("MATCH (n) RETURN n", &mut cursor)
+            .run("MATCH (n) RETURN n", &mut cursor, None)
             .expect("should succeed");
         while let Some(r) = cursor.next().unwrap() {
             if let Val::Node(n) = &r.slots[0] {
@@ -295,7 +372,7 @@ mod example_steps {
 
         world
             .graph
-            .run("MATCH ()-[r]->() RETURN r", &mut cursor)
+            .run("MATCH ()-[r]->() RETURN r", &mut cursor, None)
             .expect("should succeed");
         while let Some(r) = cursor.next().unwrap() {
             if let Val::Rel(n) = &r.slots[0] {
@@ -351,7 +428,7 @@ mod example_steps {
         let mut cursor = world.graph.new_cursor();
         world
             .graph
-            .run("MATCH (n) RETURN n", &mut cursor)
+            .run("MATCH (n) RETURN n", &mut cursor, None)
             .expect("should succeed");
         count_rows(&mut cursor).unwrap()
     }
@@ -360,7 +437,11 @@ mod example_steps {
         let mut cursor = world.graph.new_cursor();
         world
             .graph
-            .run("MATCH (n)-->() RETURN n", &mut cursor)
+            .run(
+                "MATCH (n)-->() RETURN n",
+                &mut cursor,
+                Some(&Val::Map(world.parameters.clone())),
+            )
             .expect("should succeed");
         count_rows(&mut cursor).unwrap()
     }
@@ -375,10 +456,15 @@ mod example_steps {
                 count_rels(world) - world.starting_graph_properties.relationship_count,
                 val.parse::<i32>().unwrap()
             ),
-            "+labels" => assert_eq!(
-                count_labels(world) - world.starting_graph_properties.labels_count,
-                val.parse::<i32>().unwrap()
-            ),
+            "+labels" => {
+                let current_labels = gather_labels(world);
+                let original_labels = &world.starting_graph_properties.labels;
+                assert_eq!(
+                    (current_labels.len() - original_labels.len()) as i32,
+                    val.parse::<i32>().unwrap(),
+                    "+labels",
+                )
+            }
             "+properties" => {
                 let new_props = gather_properties(world);
                 assert_eq!(
@@ -388,13 +474,10 @@ mod example_steps {
             }
             "-properties" => {
                 let new_props = gather_properties(world);
-                eprintln!("OLD: {:?}", world.starting_graph_properties.properties);
-                eprintln!("NEW: {:?}", new_props);
                 let removed = count_removed_properties(
                     &world.starting_graph_properties.properties,
                     &new_props,
                 );
-                eprintln!("REM: {}", removed);
                 assert_eq!(removed, val.parse::<i32>().unwrap())
             }
             _ => panic!(format!("unknown side effect: '{}'", kind)),
@@ -429,10 +512,13 @@ mod example_steps {
         }
 
         for mut row in table.rows {
-            if let Some(actual) = world.result.next().unwrap() {
+            let result = world.result.next();
+            if let Some(actual) = result.unwrap() {
                 for slot in 0..row.len() {
-                    str_to_val(&mut row[slot].chars().peekable())
-                        .test_eq(actual.slots[slot].clone())
+                    let expected_val = str_to_val(&mut row[slot].chars().peekable());
+                    let actual = actual.slots[slot].clone();
+                    expected_val
+                        .test_eq(&world.assertion_config, actual)
                         .unwrap();
                 }
             } else {
@@ -479,7 +565,7 @@ mod example_steps {
                 let mut row_copy = row.clone();
                 for slot in 0..row.len() {
                     let slot_equal = str_to_val(&mut row_copy[slot].chars().peekable())
-                        .test_eq(actual.slots[slot].clone());
+                        .test_eq(&world.assertion_config, actual.slots[slot].clone());
                     if slot_equal.is_err() {
                         row_equal = slot_equal;
                         break;
@@ -735,6 +821,12 @@ mod example_steps {
 
         then "the result should be, in order:" |mut world, step| {
             assert_result(&mut world, &step)
+        };
+
+        then "the result should be (ignoring element order for lists):" |mut world, step| {
+            world.assertion_config.ignore_list_element_order = true;
+            assert_result(&mut world, &step);
+            world.assertion_config.ignore_list_element_order = false
         };
 
         then "the side effects should be:" |world, step| {

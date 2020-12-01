@@ -40,6 +40,7 @@ impl FromStr for Op {
 pub enum Expr {
     And(Vec<Self>),
     Or(Vec<Self>),
+    Not(Box<Self>),
 
     // An operator that takes two expressions as its arguments, for instance
     // "a = b" or "a > b".
@@ -85,6 +86,7 @@ pub enum Expr {
 
     // True if the Node in the specified Slot has the specified Label
     HasLabel(Slot, Token),
+    IsNull(Box<Expr>),
 }
 
 impl Expr {
@@ -110,6 +112,7 @@ impl Expr {
             }
             Expr::And(terms) => terms.iter().any(|c| c.is_aggregating(aggregating_funcs)),
             Expr::Or(terms) => terms.iter().any(|c| c.is_aggregating(aggregating_funcs)),
+            Expr::Not(e) => e.is_aggregating(aggregating_funcs),
             Expr::Bool(_) => false,
             Expr::BinaryOp { left, right, .. } => {
                 left.is_aggregating(aggregating_funcs) | right.is_aggregating(aggregating_funcs)
@@ -119,6 +122,7 @@ impl Expr {
             Expr::ListComprehension { src, map_expr, .. } => {
                 src.is_aggregating(aggregating_funcs) || map_expr.is_aggregating(aggregating_funcs)
             }
+            Expr::IsNull(inner) => inner.is_aggregating(aggregating_funcs),
         }
     }
 
@@ -358,6 +362,14 @@ fn plan_term(scope: &mut Scoping, term: Pair<Rule>) -> Result<Expr> {
             plan_expr(scope, term)
         }
         Rule::param => Ok(Expr::Param(scope.tokenize(term.as_str()))),
+        Rule::is_null => Ok(Expr::IsNull(Box::new(plan_term(
+            scope,
+            term.into_inner().next().unwrap(),
+        )?))),
+        Rule::is_not_null => Ok(Expr::Not(Box::new(Expr::IsNull(Box::new(plan_term(
+            scope,
+            term.into_inner().next().unwrap(),
+        )?))))),
         _ => panic!("({:?}): {}", term.as_rule(), term.as_str()),
     }
 }
@@ -476,6 +488,19 @@ mod tests {
     }
 
     #[test]
+    fn plan_is_null() -> Result<()> {
+        assert_eq!(
+            plan("a IS NULL")?.expr,
+            Expr::IsNull(Box::new(Expr::RowRef(0)))
+        );
+        assert_eq!(
+            plan("a IS NOT NULL")?.expr,
+            Expr::Not(Box::new(Expr::IsNull(Box::new(Expr::RowRef(0)))))
+        );
+        Ok(())
+    }
+
+    #[test]
     fn plan_boolean_logic() -> Result<()> {
         assert_eq!(plan("true")?.expr, Expr::Bool(true));
         assert_eq!(plan("false")?.expr, Expr::Bool(false));
@@ -575,7 +600,7 @@ mod tests {
     fn plan_list_comprehension() -> Result<()> {
         let p = plan("[key IN keys($r) | key + '->' + $r[key] ]")?;
         let tok_keys = p.tokens.borrow_mut().tokenize("keys");
-        let param_r = p.tokens.borrow_mut().tokenize("$r");
+        let param_r = p.tokens.borrow_mut().tokenize("r");
         assert_eq!(
             p.expr,
             Expr::ListComprehension {
