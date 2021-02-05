@@ -392,7 +392,6 @@ pub fn parse_map_expression(
                     .next()
                     .expect("Map pair must contain an expression");
                 let expr = plan_expr(scope, expr_token)?;
-                println!("PP: {:?}", expr);
                 out.push(MapEntryExpr {
                     key: identifier,
                     val: expr,

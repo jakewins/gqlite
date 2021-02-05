@@ -10,7 +10,24 @@ pub fn plan_with(
 ) -> Result<LogicalPlan> {
     let parts = stmt.into_inner();
     let projections = parse_projections(pc, parts)?;
-    plan_parsed_with(pc, src, projections)
+    let mut plan = plan_parsed_with(pc, src, projections)?;
+
+    // WITH statements introduce logical "happens before" / "happens after" execution constraints;
+    // side-effects from stuff above the WITH are visible after it.
+    // Enforcing this logical order is potentially extremely expensive, and so we really don't
+    // want to do it unless we have to.
+
+    // The ordering enforcement is only needed if there are side-effects without ordering
+    // guarantees "upstream" in the plan
+    if pc.unordered_sideffects.len() > 0 {
+        let sideffects = mem::replace(&mut pc.unordered_sideffects, Default::default());
+        plan = LogicalPlan::Barrier {
+            src: Box::new(plan),
+            spec: sideffects,
+        }
+    }
+
+    Ok(plan)
 }
 
 // This is shared between the RETURN and WITH plan functions
@@ -291,8 +308,9 @@ fn parse_projection(projection: Pair<Rule>, scoping: &mut Scoping) -> Result<Pro
 #[cfg(test)]
 mod tests {
     use crate::frontend::tests::plan;
-    use crate::frontend::{Dir, Expr, LogicalPlan, Op, Projection};
+    use crate::frontend::{Dir, Expr, LogicalPlan, Op, Projection, NodeSpec, SideEffect};
     use crate::Error;
+    use std::collections::HashSet;
 
     #[test]
     fn plan_noop_with() -> Result<(), Error> {
@@ -304,6 +322,7 @@ mod tests {
             LogicalPlan::Project {
                 src: Box::new(LogicalPlan::NodeScan {
                     src: Box::new(LogicalPlan::Argument),
+                    scope: 1,
                     slot: 0,
                     labels: None,
                 }),
@@ -328,6 +347,7 @@ mod tests {
             LogicalPlan::Project {
                 src: Box::new(LogicalPlan::NodeScan {
                     src: Box::new(LogicalPlan::Argument),
+                    scope: 1,
                     slot: 0,
                     labels: None,
                 }),
@@ -335,6 +355,85 @@ mod tests {
                     expr: Expr::RowRef(p.slot(id_n)),
                     alias: id_p,
                     dst: p.slot(id_p),
+                }],
+            }
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn plan_with_visible_sideffects_has_barrier() -> Result<(), Error> {
+        let mut p = plan("CREATE (n) WITH 1 as p")?;
+
+        let id_n = p.tokenize("n");
+        let id_p = p.tokenize("p");
+        assert_eq!(
+            p.plan,
+            LogicalPlan::Barrier {
+                src: Box::new(LogicalPlan::Project {
+                    src: Box::new(LogicalPlan::Create {
+                        src: Box::new(LogicalPlan::Argument),
+                        scope: 1,
+                        nodes: vec![NodeSpec{
+                            slot: 0,
+                            labels: vec![],
+                            props: vec![]
+                        }],
+                        rels: vec![]
+                    }),
+                    projections: vec![Projection {
+                        expr: Expr::Int(1),
+                        alias: id_p,
+                        dst: p.slot(id_p),
+                    }],
+                }),
+                spec: [SideEffect::AnyNode].iter().cloned().collect(),
+            }
+        );
+        Ok(())
+    }
+
+
+    #[test]
+    fn plan_with_two_withs_only_has_one_barrier() -> Result<(), Error> {
+        let mut p = plan("CREATE (n) WITH 1 as p MATCH (m) WITH 2 as o")?;
+
+        let id_n = p.tokenize("n");
+        let id_m = p.tokenize("m");
+        let id_p = p.tokenize("p");
+        let id_o = p.tokenize("o");
+        assert_eq!(
+            p.plan,
+            LogicalPlan::Project {
+                src: Box::new(LogicalPlan::NodeScan {
+                    src: Box::new(LogicalPlan::Barrier {
+                        src: Box::new(LogicalPlan::Project {
+                            src: Box::new(LogicalPlan::Create {
+                                src: Box::new(LogicalPlan::Argument),
+                                scope: 1,
+                                nodes: vec![NodeSpec{
+                                    slot: 0,
+                                    labels: vec![],
+                                    props: vec![]
+                                }],
+                                rels: vec![]
+                            }),
+                            projections: vec![Projection {
+                                expr: Expr::Int(1),
+                                alias: id_p,
+                                dst: p.slot(id_p),
+                            }],
+                        }),
+                        spec: [SideEffect::AnyNode].iter().cloned().collect(),
+                    }),
+                    scope: 2,
+                    slot: p.slot(id_m),
+                    labels: None
+                }),
+                projections: vec![Projection {
+                    expr: Expr::Int(2),
+                    alias: id_o,
+                    dst: p.slot(id_o),
                 }],
             }
         );
@@ -368,6 +467,7 @@ mod tests {
     }
 
     // TODO technically the project is not needed here.. we're just renaming references..
+    // TODO the barrier is also not needed
     #[test]
     fn plan_with_limit() -> Result<(), Error> {
         let mut p = plan("MATCH (n) WITH n as p LIMIT 1")?;
@@ -380,6 +480,7 @@ mod tests {
                 src: Box::new(LogicalPlan::Project {
                     src: Box::new(LogicalPlan::NodeScan {
                         src: Box::new(LogicalPlan::Argument),
+                        scope: 1,
                         slot: 0,
                         labels: None,
                     }),
@@ -494,6 +595,7 @@ mod tests {
                 src: Box::new(LogicalPlan::Project {
                     src: Box::new(LogicalPlan::NodeScan {
                         src: Box::new(LogicalPlan::Argument),
+                        scope: 1,
                         slot: 0,
                         labels: None,
                     }),
@@ -523,6 +625,7 @@ mod tests {
                     src: Box::new(LogicalPlan::Aggregate {
                         src: Box::new(LogicalPlan::NodeScan {
                             src: Box::new(LogicalPlan::Argument),
+                            scope: 1,
                             slot: 0,
                             labels: None,
                         }),
@@ -572,6 +675,7 @@ mod tests {
                     src: Box::new(LogicalPlan::Aggregate {
                         src: Box::new(LogicalPlan::NodeScan {
                             src: Box::new(LogicalPlan::Argument),
+                            scope: 1,
                             slot: 0,
                             labels: None,
                         }),
@@ -607,6 +711,7 @@ mod tests {
                     src: Box::new(LogicalPlan::Aggregate {
                         src: Box::new(LogicalPlan::NodeScan {
                             src: Box::new(LogicalPlan::Argument),
+                            scope: 1,
                             slot: 0,
                             labels: None,
                         }),
@@ -643,6 +748,7 @@ mod tests {
                 src: Box::new(LogicalPlan::Project {
                     src: Box::new(LogicalPlan::NodeScan {
                         src: Box::new(LogicalPlan::Argument),
+                        scope: 1,
                         slot: 0,
                         labels: None,
                     }),
@@ -676,6 +782,7 @@ mod tests {
                 src: Box::new(LogicalPlan::Project {
                     src: Box::new(LogicalPlan::NodeScan {
                         src: Box::new(LogicalPlan::Argument),
+                        scope: 1,
                         slot: 0,
                         labels: None,
                     }),
@@ -713,9 +820,11 @@ mod tests {
                         src: Box::new(LogicalPlan::Expand {
                             src: Box::new(LogicalPlan::NodeScan {
                                 src: Box::new(LogicalPlan::Argument),
+                                scope: 1,
                                 slot: p.slot(id_a),
                                 labels: None,
                             }),
+                            scope: 1,
                             src_slot: p.slot(id_a),
                             rel_slot: 2,
                             dst_slot: p.slot(id_z),
@@ -751,6 +860,7 @@ mod tests {
                 src: Box::new(LogicalPlan::Project {
                     src: Box::new(LogicalPlan::NodeScan {
                         src: Box::new(LogicalPlan::Argument),
+                        scope: 1,
                         slot: 0,
                         labels: None,
                     }),
@@ -778,6 +888,7 @@ mod tests {
                     src: Box::new(LogicalPlan::Aggregate {
                         src: Box::new(LogicalPlan::NodeScan {
                             src: Box::new(LogicalPlan::Argument),
+                            scope: 1,
                             slot: 0,
                             labels: None,
                         }),
@@ -815,6 +926,7 @@ mod tests {
                     src: Box::new(LogicalPlan::Aggregate {
                         src: Box::new(LogicalPlan::NodeScan {
                             src: Box::new(LogicalPlan::Argument),
+                            scope: 1,
                             slot: 0,
                             labels: None,
                         }),
@@ -851,6 +963,7 @@ mod tests {
                     src: Box::new(LogicalPlan::Aggregate {
                         src: Box::new(LogicalPlan::NodeScan {
                             src: Box::new(LogicalPlan::Argument),
+                            scope: 1,
                             slot: 0,
                             labels: Some(lbl_person)
                         }),
@@ -889,6 +1002,7 @@ mod tests {
                     src: Box::new(LogicalPlan::Aggregate {
                         src: Box::new(LogicalPlan::NodeScan {
                             src: Box::new(LogicalPlan::Argument),
+                            scope: 1,
                             slot: 0,
                             labels: None
                         }),
@@ -932,6 +1046,7 @@ mod tests {
                     src: Box::new(LogicalPlan::Aggregate {
                         src: Box::new(LogicalPlan::NodeScan {
                             src: Box::new(LogicalPlan::Argument),
+                            scope: 1,
                             slot: 0,
                             labels: Some(lbl_person)
                         }),

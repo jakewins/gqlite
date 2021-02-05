@@ -1,6 +1,6 @@
 use cucumber::{after, before, cucumber};
 use gqlite::gramdb::{GramCursor, GramDatabase};
-use gqlite::{Database, Val};
+use gqlite::{Database, Val, Result};
 use std::collections::{HashMap, HashSet};
 use tempfile::tempfile;
 
@@ -22,6 +22,8 @@ pub struct MyWorld {
     graph: GramDatabase,
     starting_graph_properties: GraphProperties,
     parameters: Vec<(String, Val)>,
+
+    query_outcome: Result<()>,
     result: GramCursor,
 
     assertion_config: AssertionConfig,
@@ -40,6 +42,7 @@ impl std::default::Default for MyWorld {
         let cursor = db.new_cursor();
         MyWorld {
             graph: db,
+            query_outcome: Ok(()),
             result: cursor,
             parameters: Vec::new(),
             starting_graph_properties: GraphProperties {
@@ -107,6 +110,7 @@ mod example_steps {
         },
         Rel {
             reltype: String,
+            props: Vec<(String, ValMatcher)>,
         },
     }
 
@@ -253,8 +257,24 @@ mod example_steps {
                         bail!("Expected a node, found {:?}", v);
                     }
                 }
-                ValMatcher::Rel { reltype } => {
+                ValMatcher::Rel { reltype, props } => {
                     if let Val::Rel(r) = v {
+                        if r.props.len() != props.len() {
+                            bail!("Rel has different number of properties from spec, expected {:?}, got {:?}",
+                                   props, r.props);
+                        }
+                        for (k, prop_val) in &r.props {
+                            let mut found = false;
+                            for (ek, ev) in props {
+                                if ek == k {
+                                    found = true;
+                                    ev.test_eq(cfg, prop_val.clone())?;
+                                }
+                            }
+                            if !found {
+                                bail!("Node has unspecified property {}", k);
+                            }
+                        }
                         ensure_eq!(reltype, &r.rel_type)
                     } else {
                         bail!("Expected a rel, found {:?}", v);
@@ -297,14 +317,14 @@ mod example_steps {
     }
 
     fn start_query(world: &mut MyWorld, step: &Step) {
-        world
+        world.query_outcome = world
             .graph
             .run(
                 &step.docstring().unwrap(),
                 &mut world.result,
                 Some(&Val::Map(world.parameters.clone())),
-            )
-            .expect("Should not fail")
+            );
+
     }
 
     fn count_rows(result: &mut GramCursor) -> Result<i32, Error> {
@@ -445,7 +465,6 @@ mod example_steps {
             .expect("should succeed");
         count_rows(&mut cursor).unwrap()
     }
-
     fn assert_side_effect(world: &mut MyWorld, kind: &str, val: &str) {
         match kind {
             "+nodes" => assert_eq!(
@@ -639,6 +658,7 @@ mod example_steps {
 
         fn parse_rel(chars: &mut Peekable<Chars>) -> ValMatcher {
             let mut reltype = None;
+            let mut props = Vec::new();
             loop {
                 match chars.peek() {
                     Some(':') => {
@@ -649,10 +669,52 @@ mod example_steps {
                         chars.next().unwrap();
                         return ValMatcher::Rel {
                             reltype: reltype.unwrap(),
+                            props,
                         };
+                    }
+                    Some(' ') => {
+                        chars.next().unwrap();
+                    }
+                    Some('{') => {
+                        chars.next().unwrap();
+                        props = parse_map_entries(chars);
                     }
                     _ => panic!("unknown rel part: {:?}", chars),
                 }
+            }
+        }
+
+        fn parse_map_entries(chars: &mut Peekable<Chars>) -> Vec<(String, ValMatcher)> {
+            let mut entries = Vec::new();
+            loop {
+                // Parse entry identifier..
+                let mut identifier = None;
+                loop {
+                    match chars.peek() {
+                        Some('}') => {
+                            chars.next().unwrap();
+                            return entries;
+                        }
+                        Some('a'..='z') => identifier = Some(parse_identifier(chars)),
+                        Some(':') => {
+                            chars.next().unwrap();
+                            break;
+                        }
+                        Some(' ') => {
+                            chars.next().unwrap();
+                            ()
+                        }
+                        Some(',') => {
+                            chars.next().unwrap();
+                            ()
+                        }
+                        _ => panic!(format!("unknown map portion: '{:?}'", chars)),
+                    }
+                }
+
+                // Parse entry value..
+                let value = str_to_val(chars);
+                entries.push((identifier.unwrap(), value))
             }
         }
 
@@ -716,37 +778,7 @@ mod example_steps {
                 }
                 '{' => {
                     chars.next().unwrap();
-                    let mut entries = Vec::new();
-                    loop {
-                        // Parse entry identifier..
-                        let mut identifier = None;
-                        loop {
-                            match chars.peek() {
-                                Some('}') => {
-                                    chars.next().unwrap();
-                                    return ValMatcher::Map(entries);
-                                }
-                                Some('a'..='z') => identifier = Some(parse_identifier(chars)),
-                                Some(':') => {
-                                    chars.next().unwrap();
-                                    break;
-                                }
-                                Some(' ') => {
-                                    chars.next().unwrap();
-                                    ()
-                                }
-                                Some(',') => {
-                                    chars.next().unwrap();
-                                    ()
-                                }
-                                _ => panic!(format!("unknown map portion: '{:?}'", chars)),
-                            }
-                        }
-
-                        // Parse entry value..
-                        let value = str_to_val(chars);
-                        entries.push((identifier.unwrap(), value))
-                    }
+                    return ValMatcher::Map(parse_map_entries(chars));
                 }
                 '(' => {
                     chars.next().unwrap();
@@ -811,22 +843,34 @@ mod example_steps {
         };
 
         then "the result should be empty" |world, _step| {
-            // Check that the outcomes to be observed have occurred
+            world.query_outcome.as_ref().expect("query should succeed");
             assert_eq!(0, count_rows(&mut world.result).unwrap());
         };
 
         then "the result should be, in any order:" |mut world, step| {
+            world.query_outcome.as_ref().expect("query should succeed");
             assert_result_in_any_order(&mut world, &step)
         };
 
         then "the result should be, in order:" |mut world, step| {
+            world.query_outcome.as_ref().expect("query should succeed");
             assert_result(&mut world, &step)
         };
 
         then "the result should be (ignoring element order for lists):" |mut world, step| {
+            world.query_outcome.as_ref().expect("query should succeed");
             world.assertion_config.ignore_list_element_order = true;
             assert_result(&mut world, &step);
             world.assertion_config.ignore_list_element_order = false
+        };
+
+        then "a SyntaxError should be raised at compile time: RequiresDirectedRelationship" |mut world, step| {
+            match world.query_outcome.as_ref() {
+            Err(e) => {
+                // TODO, we've not implemented good error codes / messages
+            }
+            _ => assert_eq!(false, true, "expected query to fail")
+            }
         };
 
         then "the side effects should be:" |world, step| {

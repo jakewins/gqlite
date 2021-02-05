@@ -103,15 +103,33 @@ impl Frontend {
 // The pipeline has a single logical "row" - a vector of value slots - that's shared
 // by all operators; the various things the operators do refer to slots in the row,
 // like registers in a CPU.
-#[derive(Debug, PartialEq)]
+//
+// # Scope
+// This deals with intra-query and intra-transaction visibility of modifications; each WITH
+// statement introduces a new scope by incrementing the counter, plan nodes that look at or
+// create graph data must take into account the scope; specifically they don't "see" actions
+// taken by higher-numbered scopes.
+//
+// Example:
+//
+//   MATCH () CREATE ()  // Scope 0; can see things that existed before the query started
+//   WITH *              // New scope introduced
+//   MATCH () CREATE ()  // Scope 1: Can see scope 0 plus everything scope 0 sees
+//
+// Notably, reads in scope N can't see writes in scope N; this avoids infinite loops from
+// seeing your own writes, and creates predictability about which writes you'll see when.
+//
+#[derive(Debug, PartialEq, Clone)]
 pub enum LogicalPlan {
     // Terminates each branch in the plan tree; yields one row, which may have been
     // pre-populated with content. Can be reset to yield one more row, and so on, used
     // by plans like Apply that re-run one branch of the tree multiple times
     Argument,
 
+    // List all visible nodes that match `labels`, and put them one-at-a-time in slot
     NodeScan {
         src: Box<Self>,
+        scope: u8,
         slot: usize,
         labels: Option<Token>,
     },
@@ -120,6 +138,7 @@ pub enum LogicalPlan {
     // each rel and node pair found in rel_slot and dst_slot
     Expand {
         src: Box<Self>,
+        scope: u8,
         src_slot: usize,
         rel_slot: usize,
         dst_slot: usize,
@@ -130,6 +149,7 @@ pub enum LogicalPlan {
     // Given a known relationship, produce the nodes it connects
     ExpandRel {
         src: Box<Self>,
+        scope: u8,
         src_rel_slot: usize,
 
         start_node_slot: usize,
@@ -140,6 +160,7 @@ pub enum LogicalPlan {
     // eg. MATCH (a), (b) WITH a, b MATCH (a)-[r]-(b)
     ExpandInto {
         src: Box<Self>,
+        scope: u8,
         left_node_slot: usize,
         right_node_slot: usize,
         dst_slot: usize,
@@ -160,12 +181,14 @@ pub enum LogicalPlan {
     },
     Create {
         src: Box<Self>,
+        scope: u8,
         nodes: Vec<NodeSpec>,
         rels: Vec<RelSpec>,
     },
-    SetProperties {
+    UpdateEntity {
         src: Box<Self>,
-        actions: Vec<SetAction>,
+        scope: u8,
+        actions: Vec<UpdateAction>,
     },
 
     // For each row in lhs, reset the argument in rhs and yield from rhs until exhausted
@@ -198,6 +221,7 @@ pub enum LogicalPlan {
         // Iff all these slots are null after executing lhs, execute rhs
         conditions: Vec<Slot>,
     },
+
     Aggregate {
         src: Box<Self>,
         // These projections together make up a grouping key, so if you have a query like
@@ -214,6 +238,17 @@ pub enum LogicalPlan {
         // Note that this may be empty, eg in the case of RETURN DISTINCT a.name.
         aggregations: Vec<(Expr, Slot)>,
     },
+
+    // Side-effects, ie. modifications to the graph, done by src must be visible to operators
+    // downstream. Note that this is *all* src, not just per-row. Conceptually this is meant to
+    // be kind of like a memory barrier or memory fence like you'd use in CPU land.
+    Barrier {
+        src: Box<Self>,
+        // These are the side-effects this barrier is ordering; if downstream operations can
+        // ensure they are not affected by these, then the barrier can be ignored
+        spec: HashSet<SideEffect>,
+    },
+
     Unwind {
         src: Box<Self>,
         list_expr: Expr,
@@ -288,13 +323,11 @@ impl LogicalPlan {
                 }
                 format!(
                     "Project(\n{}src={},\n{}projections=[{}])",
-                    ind,
-                    src.fmt_pretty(&format!("{}  ", next_indent), t),
-                    ind,
-                    proj,
+                    ind, src.fmt_pretty(&format!("{}  ", next_indent), t),
+                    ind, proj,
                 )
             }
-            LogicalPlan::NodeScan { src, slot, labels } => {
+            LogicalPlan::NodeScan { src, scope, slot, labels } => {
                 let next_indent = &format!("{}  ", ind);
                 let mut lblstr = String::new();
                 for (i, p) in labels.iter().enumerate() {
@@ -304,9 +337,10 @@ impl LogicalPlan {
                     lblstr.push_str(t.lookup(*p).unwrap_or("?"))
                 }
                 format!(
-                    "NodeScan(\n{}src={}\n{}slot=Slot({})\n{}labels=[{}])",
+                    "NodeScan(\n{}src={}\n{}scope={}\n{}slot=Slot({})\n{}labels=[{}])",
                     ind,
                     src.fmt_pretty(next_indent, t),
+                    ind, scope,
                     ind,
                     slot,
                     ind,
@@ -315,6 +349,7 @@ impl LogicalPlan {
             }
             LogicalPlan::Expand {
                 src,
+                scope,
                 src_slot,
                 rel_slot,
                 dst_slot,
@@ -322,8 +357,9 @@ impl LogicalPlan {
                 dir,
             } => {
                 let next_indent = &format!("{}  ", ind);
-                format!("Expand(\n{}src={}\n{}src_slot=Slot({})\n{}rel_slot=Slot({})\n{}dst_slot=Slot({}),\n{}rel_type={},\n{}dir={})",
+                format!("Expand(\n{}src={}\n{}src={}\n{}src_slot=Slot({})\n{}rel_slot=Slot({})\n{}dst_slot=Slot({}),\n{}rel_type={},\n{}dir={})",
                         ind, src.fmt_pretty(next_indent, t),
+                        ind, scope,
                         ind, src_slot,
                         ind, rel_slot,
                         ind, dst_slot,
@@ -335,6 +371,7 @@ impl LogicalPlan {
             }
             LogicalPlan::ExpandInto {
                 src,
+                scope,
                 left_node_slot,
                 right_node_slot,
                 dst_slot,
@@ -342,8 +379,9 @@ impl LogicalPlan {
                 dir,
             } => {
                 let next_indent = &format!("{}  ", ind);
-                format!("ExpandInto(\n{}src={}\n{}left_node_slot=Slot({})\n{}right_node_slot=Slot({})\n{}dst_slot=Slot({})\n{}rel_type={:?}\n{}dir={:?})",
+                format!("ExpandInto(\n{}src={}\n{}src={}\n{}left_node_slot=Slot({})\n{}right_node_slot=Slot({})\n{}dst_slot=Slot({})\n{}rel_type={:?}\n{}dir={:?})",
                         ind, src.fmt_pretty(next_indent, t),
+                        ind, scope,
                         ind, left_node_slot,
                         ind, right_node_slot,
                         ind, dst_slot,
@@ -352,24 +390,27 @@ impl LogicalPlan {
             }
             LogicalPlan::ExpandRel {
                 src,
+                scope,
                 src_rel_slot,
                 start_node_slot: start_node,
                 end_node_slot: end_node,
             } => {
                 let next_indent = &format!("{}  ", ind);
-                format!("ExpandRel(\n{}src={}\n{}src_rel_slot=Slot({})\n{}start_node=Slot({})\n{}end_node=Slot({}))",
+                format!("ExpandRel(\n{}src={}\n{}scope={}\n{}src_rel_slot=Slot({})\n{}start_node=Slot({})\n{}end_node=Slot({}))",
                         ind, src.fmt_pretty(next_indent, t),
+                        ind, scope,
                         ind, src_rel_slot,
                         ind, start_node,
                         ind, end_node)
             }
             LogicalPlan::Argument => "Argument()".to_string(),
-            LogicalPlan::Create { src, nodes, rels } => {
+            LogicalPlan::Create { src, scope, nodes, rels } => {
                 let next_indent = &format!("{}  ", ind);
                 format!(
-                    "Create(\n{}src={},\n{}nodes={},\n{}rels={})",
+                    "Create(\n{}src={},\n{}scope={},\n{}nodes={},\n{}rels={})",
                     ind,
                     src.fmt_pretty(&format!("{}  ", next_indent), t),
+                    ind, scope,
                     ind,
                     format!("{:?}", nodes),
                     ind,
@@ -476,12 +517,13 @@ impl LogicalPlan {
                     slots,
                 )
             }
-            LogicalPlan::SetProperties { src, actions } => {
+            LogicalPlan::UpdateEntity { src, scope, actions } => {
                 let next_indent = &format!("{}  ", ind);
                 format!(
-                    "SetProperties(\n{}src={}\n{}actions=[{:?}])",
+                    "SetProperties(\n{}src={}\n{}scope={}\n{}actions=[{:?}])",
                     ind,
                     src.fmt_pretty(next_indent, t),
+                    ind, scope,
                     ind,
                     actions,
                 )
@@ -502,14 +544,26 @@ impl LogicalPlan {
                     predicate,
                 )
             }
+            LogicalPlan::Barrier {
+                src, spec
+            } => {
+                let next_indent = &format!("{}  ", ind);
+                format!(
+                    "Barrier(\n{}src={}\n{}predicate={:?})",
+                    ind,
+                    src.fmt_pretty(next_indent, t),
+                    ind,
+                    spec,
+                )
+            }
             _ => format!("NoPretty({:?})", self),
         }
     }
 }
 
 // Spec for modifying a property on some entity
-#[derive(Debug, PartialEq)]
-pub enum SetAction {
+#[derive(Debug, PartialEq, Clone)]
+pub enum UpdateAction {
     // SET a.blah = 1
     SingleAssign {
         entity: Slot,
@@ -526,10 +580,15 @@ pub enum SetAction {
         entity: Slot,
         value: Expr,
     },
+    // SET a:User
+    AppendLabel {
+        entity: Slot,
+        label: Token,
+    },
 }
 
 // Specification of a node to create
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Clone)]
 pub struct NodeSpec {
     pub slot: usize,
     pub labels: Vec<Token>,
@@ -537,7 +596,7 @@ pub struct NodeSpec {
 }
 
 // Specification of a rel to create
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Clone)]
 pub struct RelSpec {
     pub slot: usize,
     pub rel_type: Token,
@@ -601,6 +660,11 @@ impl Projection {
 
 #[derive(Debug, Clone, Default)]
 pub struct Scope {
+    // This is the number that ends up in the .scope value for plan nodes in this scope
+    // Note that we're really mixing two things here: "scope" as in "which identifiers can I
+    // see" and scope as in "what version of the graph am I looking at"; we should probably
+    // disambiguate better.
+    number: u8,
     // Mapping of names used in the query string to slots in the row being processed
     slots: HashMap<Token, usize>,
     // Identifiers that the user has explictly declared. Eg in MATCH "(a)-->(b)" there are
@@ -664,10 +728,12 @@ impl Scoping {
         Scoping {
             history: Default::default(),
             _prior: Scope {
+                number: 0,
                 slots: Default::default(),
                 named_identifiers: Default::default(),
             },
             _current: Scope {
+                number: 1,
                 slots: Default::default(),
                 named_identifiers: Default::default(),
             },
@@ -683,9 +749,11 @@ impl Scoping {
     }
 
     pub fn begin_new_scope(&mut self) {
+        let new_scope_no = self._current.number + 1;
         let new_prior = mem::replace(
             &mut self._current,
             Scope {
+                number: new_scope_no,
                 slots: Default::default(),
                 named_identifiers: Default::default(),
             },
@@ -705,6 +773,16 @@ impl Scoping {
         out.push(self._prior.clone());
         out.push(self._current.clone());
         out
+    }
+
+    pub fn current_scope_no(&self) -> u8 {
+        match self.mode {
+            ScopingMode::Current => self._current.number,
+            ScopingMode::Prior => self._prior.number,
+            ScopingMode::ProjectionMode => {
+                panic!("..")
+            }
+        }
     }
 
     pub fn new_anon_rel(&mut self) -> Token {
@@ -817,6 +895,10 @@ impl Scoping {
 pub struct PlanningContext<'i> {
     scoping: Scoping,
 
+    // At the current state in the planning process, these are side-effects that occur
+    // upstream in the plan we've built, that have no ordering guarantees
+    unordered_sideffects: HashSet<SideEffect>,
+
     // Description of the backend this query is being planned for; intention is that this will
     // eventually contain things like listings of indexes etc. Once it does, it'll also need to
     // include a digest or a version that gets embedded with the planned query, because the query
@@ -828,9 +910,21 @@ impl<'i> PlanningContext<'i> {
     fn new(tokens: Rc<RefCell<Tokens>>, bd: &'i BackendDesc) -> Self {
         PlanningContext {
             scoping: Scoping::new(tokens),
+            unordered_sideffects: Default::default(),
             backend_desc: bd,
         }
     }
+}
+
+// Tracks side-effects the query will generate as we plan it; this is used to determine
+// when and where we need to insert logical barriers to ensure side-effects are seen by
+// downstream parts of the plan.
+#[derive(Debug, Copy, Clone, Eq, PartialEq, Hash)]
+pub enum SideEffect {
+    // Node created, deleted, labels added, labels removed or properties modified
+    AnyNode,
+    // Rel created, deleted or properties modified
+    AnyRel,
 }
 
 fn plan_unwind(

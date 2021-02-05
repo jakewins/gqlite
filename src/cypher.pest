@@ -96,10 +96,14 @@ projection = { expr ~ (^"AS" ~ id)? }
 projections = { projection ~ ( "," ~ projection )* }
 project_all = { "*" }
 
-single_assignment = { id ~ "." ~ id ~ "=" ~ expr  }
+// this thing with the parens is not right; what we really should do, I *think*,
+// is to say that a single assignment is prop_lookup ~ "=" ~ expr; but I want
+// to see how far the TCK pushes me in that direction
+single_assignment = { ( id | ("(" ~ id ~ ")"))~ "." ~ id ~ "=" ~ expr  }
 overwrite_assignment = { id ~ "=" ~ expr }
 append_assignment = { id ~ "+=" ~ expr }
-assignment = _{ append_assignment | overwrite_assignment | single_assignment }
+label_assignment = { id ~ ":" ~ label }
+assignment = _{ append_assignment | overwrite_assignment | single_assignment | label_assignment }
 assignments = _{ assignment ~ ("," ~ assignment)* }
 
 distinct_clause = { ^"DISTINCT" }
@@ -123,7 +127,7 @@ create_stmt = { ^"CREATE" ~ patterns }
 set_stmt = { ^"SET" ~ assignments }
 merge_stmt = { ^"MERGE" ~ merge_patterns ~ (on_create_clause | on_match_clause)* }
 match_stmt = { optional_clause? ~ ^"MATCH" ~ patterns ~ where_clause? }
-with_stmt = { ^"WITH" ~ distinct_clause? ~ projections ~ where_clause? ~ order_clause? ~ skip_clause? ~ limit_clause? }
+with_stmt = { ^"WITH" ~ distinct_clause? ~ ( projections | project_all ) ~ where_clause? ~ order_clause? ~ skip_clause? ~ limit_clause? }
 unwind_stmt = { ^"UNWIND" ~ expr ~ ^"AS" ~ id }
 call_stmt = { ^"CALL" ~ function_id ~  "(" ~ arglist? ~ ")" }
 return_stmt = { ^"RETURN" ~ distinct_clause? ~ ( projections | project_all ) ~ order_clause? ~ skip_clause? ~ limit_clause? }

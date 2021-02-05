@@ -1,7 +1,7 @@
 use super::{
     parse_pattern_graph, Dir, LogicalPlan, NodeSpec, Pair, PlanningContext, RelSpec, Result, Rule,
 };
-use crate::frontend::PatternGraph;
+use crate::frontend::{PatternGraph, SideEffect};
 
 pub fn plan_create(
     mut pc: &mut PlanningContext,
@@ -29,11 +29,16 @@ pub fn plan_create_patterngraph(
 
         let node = pg.v.remove(&id).ok_or_else(||anyhow!("failed to parse pattern in query, please report this and include the query you are running"))?;
 
+        pc.unordered_sideffects.insert(SideEffect::AnyNode);
         nodes.push(NodeSpec {
             slot: pc.scoping.lookup_or_allocrow(id),
             labels: node.labels,
             props: node.props,
         });
+    }
+
+    if ! pg.e.is_empty() {
+        pc.unordered_sideffects.insert(SideEffect::AnyRel);
     }
 
     for rel in pg.e {
@@ -69,6 +74,7 @@ pub fn plan_create_patterngraph(
 
     Ok(LogicalPlan::Create {
         src: Box::new(src),
+        scope: pc.scoping.current_scope_no(),
         nodes,
         rels,
     })
@@ -90,6 +96,7 @@ mod tests {
             p.plan,
             LogicalPlan::Create {
                 src: Box::new(LogicalPlan::Argument),
+                scope: 1,
                 nodes: vec![NodeSpec {
                     slot: p.slot(id_n),
                     labels: vec![lbl_person],
@@ -110,6 +117,7 @@ mod tests {
             p.plan,
             LogicalPlan::Create {
                 src: Box::new(LogicalPlan::Argument),
+                scope: 1,
                 nodes: vec![NodeSpec {
                     slot: p.slot(id_n),
                     labels: vec![],
@@ -133,6 +141,7 @@ mod tests {
             p.plan,
             LogicalPlan::Create {
                 src: Box::new(LogicalPlan::Argument),
+                scope: 1,
                 nodes: vec![NodeSpec {
                     slot: p.slot(id_n),
                     labels: vec![lbl_person, lbl_actor],
@@ -155,6 +164,7 @@ mod tests {
             p.plan,
             LogicalPlan::Create {
                 src: Box::new(LogicalPlan::Argument),
+                scope: 1,
                 nodes: vec![NodeSpec {
                     slot: p.slot(id_n),
                     labels: vec![lbl_person],
@@ -181,6 +191,7 @@ mod tests {
             p.plan,
             LogicalPlan::Create {
                 src: Box::new(LogicalPlan::Argument),
+                scope: 1,
                 nodes: vec![NodeSpec {
                     slot: p.slot(id_n),
                     labels: vec![lbl_person],
@@ -209,6 +220,7 @@ mod tests {
             p.plan,
             LogicalPlan::Create {
                 src: Box::new(LogicalPlan::Argument),
+                scope: 1,
                 nodes: vec![
                     NodeSpec {
                         slot: p.slot(id_a),
@@ -251,6 +263,7 @@ mod tests {
             p.plan,
             LogicalPlan::Create {
                 src: Box::new(LogicalPlan::Argument),
+                scope: 1,
                 nodes: vec![NodeSpec {
                     slot: p.slot(id_n),
                     labels: vec![lbl_person],
@@ -285,9 +298,11 @@ mod tests {
             LogicalPlan::Create {
                 src: Box::new(LogicalPlan::NodeScan {
                     src: Box::new(LogicalPlan::Argument),
+                    scope: 1,
                     slot: p.slot(id_n),
                     labels: Some(lbl_person),
                 }),
+                scope: 1,
                 nodes: vec![
                     // Note there is just one node here, the planner should understand "n" already exists
                     NodeSpec {
@@ -326,6 +341,7 @@ mod tests {
             p.plan,
             LogicalPlan::Create {
                 src: Box::new(LogicalPlan::Argument),
+                scope: 1,
                 nodes: vec![
                     NodeSpec {
                         slot: p.slot(id_a),
@@ -364,9 +380,11 @@ mod tests {
             LogicalPlan::Create {
                 src: Box::new(LogicalPlan::NodeScan {
                     src: Box::new(LogicalPlan::Argument),
+                    scope: 1,
                     slot: p.slot(id_n),
                     labels: Some(lbl_person),
                 }),
+                scope: 1,
                 nodes: vec![
                     // Note there is just one node here, the planner should understand "n" already exists
                     NodeSpec {

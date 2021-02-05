@@ -1,5 +1,5 @@
 use super::{parse_pattern_graph, LogicalPlan, Pair, PlanningContext, Result, Rule};
-use crate::frontend::SetAction;
+use crate::frontend::UpdateAction;
 
 use crate::frontend::create_stmt::plan_create_patterngraph;
 use crate::frontend::match_stmt::plan_match_patterngraph;
@@ -15,8 +15,8 @@ pub fn plan_merge(
 
     let pg = parse_pattern_graph(pc, patterns)?;
 
-    let mut on_create: Vec<SetAction> = Vec::new();
-    let mut on_match: Vec<SetAction> = Vec::new();
+    let mut on_create: Vec<UpdateAction> = Vec::new();
+    let mut on_match: Vec<UpdateAction> = Vec::new();
 
     for on_x in pairs {
         match on_x.as_rule() {
@@ -53,8 +53,9 @@ pub fn plan_merge(
     let mut createplan = plan_create_patterngraph(&mut pc, LogicalPlan::Argument, pg)?;
 
     if !on_create.is_empty() {
-        createplan = LogicalPlan::SetProperties {
+        createplan = LogicalPlan::UpdateEntity {
             src: Box::new(createplan),
+            scope: pc.scoping.current_scope_no(),
             actions: on_create,
         }
     }
@@ -62,8 +63,9 @@ pub fn plan_merge(
     if !on_match.is_empty() {
         matchplan = LogicalPlan::ConditionalApply {
             lhs: Box::new(matchplan),
-            rhs: Box::new(LogicalPlan::SetProperties {
+            rhs: Box::new(LogicalPlan::UpdateEntity {
                 src: Box::new(LogicalPlan::Argument),
+                scope: pc.scoping.current_scope_no(),
                 actions: on_match,
             }),
             conditions: pattern_slots.clone(),
@@ -94,7 +96,7 @@ pub fn plan_merge(
 #[cfg(test)]
 mod tests {
     use crate::frontend::tests::plan;
-    use crate::frontend::{Dir, Expr, LogicalPlan, MapEntryExpr, NodeSpec, Op, RelSpec, SetAction};
+    use crate::frontend::{Dir, Expr, LogicalPlan, MapEntryExpr, NodeSpec, Op, RelSpec, UpdateAction};
     use crate::Error;
 
     #[test]
@@ -121,6 +123,7 @@ ON MATCH SET n.updated = timestamp()",
                         src: Box::new(LogicalPlan::Selection {
                             src: Box::new(LogicalPlan::NodeScan {
                                 src: Box::new(LogicalPlan::Argument),
+                                scope: 1,
                                 slot: slot_n,
                                 labels: Some(lbl_person)
                             }),
@@ -135,9 +138,10 @@ ON MATCH SET n.updated = timestamp()",
                         }),
                         slots: vec![slot_n]
                     }),
-                    rhs: Box::new(LogicalPlan::SetProperties {
+                    rhs: Box::new(LogicalPlan::UpdateEntity {
                         src: Box::new(LogicalPlan::Argument),
-                        actions: vec![SetAction::SingleAssign {
+                        scope: 1,
+                        actions: vec![UpdateAction::SingleAssign {
                             entity: slot_n,
                             key: key_updated,
                             value: Expr::FuncCall {
@@ -149,9 +153,10 @@ ON MATCH SET n.updated = timestamp()",
                     conditions: vec![slot_n]
                 }),
                 // TODO: This SetProperties should be folded into the Create
-                rhs: Box::new(LogicalPlan::SetProperties {
+                rhs: Box::new(LogicalPlan::UpdateEntity {
                     src: Box::new(LogicalPlan::Create {
                         src: Box::new(LogicalPlan::Argument),
+                        scope: 1,
                         nodes: vec![NodeSpec {
                             slot: slot_n,
                             labels: vec![lbl_person],
@@ -162,7 +167,8 @@ ON MATCH SET n.updated = timestamp()",
                         }],
                         rels: vec![]
                     }),
-                    actions: vec![SetAction::SingleAssign {
+                    scope: 1,
+                    actions: vec![UpdateAction::SingleAssign {
                         entity: slot_n,
                         key: key_created,
                         value: Expr::FuncCall {
@@ -192,11 +198,13 @@ ON MATCH SET n.updated = timestamp()",
                 lhs: Box::new(LogicalPlan::CartesianProduct {
                     outer: Box::new(LogicalPlan::NodeScan {
                         src: Box::new(LogicalPlan::Argument),
+                        scope: 1,
                         slot: p.slot(id_a),
                         labels: None
                     }),
                     inner: Box::new(LogicalPlan::NodeScan {
                         src: Box::new(LogicalPlan::Argument),
+                        scope: 1,
                         slot: p.slot(id_b),
                         labels: None
                     }),
@@ -206,6 +214,7 @@ ON MATCH SET n.updated = timestamp()",
                     lhs: Box::new(LogicalPlan::Optional {
                         src: Box::new(LogicalPlan::ExpandInto {
                             src: Box::new(LogicalPlan::Argument),
+                            scope: 1,
                             left_node_slot: p.slot(id_a),
                             right_node_slot: p.slot(id_b),
                             dst_slot: p.slot(id_r),
@@ -216,6 +225,7 @@ ON MATCH SET n.updated = timestamp()",
                     }),
                     rhs: Box::new(LogicalPlan::Create {
                         src: Box::new(LogicalPlan::Argument),
+                        scope: 1,
                         nodes: vec![],
                         rels: vec![RelSpec {
                             slot: p.slot(id_r),
@@ -244,6 +254,7 @@ ON MATCH SET n.updated = timestamp()",
             LogicalPlan::Apply {
                 lhs: Box::new(LogicalPlan::Create {
                     src: Box::new(LogicalPlan::Argument),
+                    scope: 1,
                     nodes: vec![NodeSpec {
                         slot: 0,
                         labels: vec![lbl_x],
@@ -255,6 +266,7 @@ ON MATCH SET n.updated = timestamp()",
                     lhs: Box::new(LogicalPlan::Optional {
                         src: Box::new(LogicalPlan::NodeScan {
                             src: Box::new(LogicalPlan::Argument),
+                            scope: 1,
                             slot: 1,
                             labels: Some(lbl_x)
                         }),
@@ -262,6 +274,7 @@ ON MATCH SET n.updated = timestamp()",
                     }),
                     rhs: Box::new(LogicalPlan::Create {
                         src: Box::new(LogicalPlan::Argument),
+                        scope: 1,
                         nodes: vec![NodeSpec {
                             slot: 1,
                             labels: vec![lbl_x],

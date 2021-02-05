@@ -9,7 +9,7 @@ pub fn plan_match(
 ) -> Result<LogicalPlan> {
     let pg = parse_pattern_graph(pc, match_stmt)?;
 
-    println!("PG: {:?}", pg);
+    // println!("PG: {:?}", pg);
 
     if pg.optional {
         // Optional match is basically just MATCH with a single row if there's no match,
@@ -46,6 +46,7 @@ pub fn plan_match_patterngraph(
     src: LogicalPlan,
     mut pg: PatternGraph,
 ) -> Result<LogicalPlan> {
+    let scope = pc.scoping.current_scope_no();
     fn filter_expand(expand: LogicalPlan, slot: Token, labels: &[Token]) -> LogicalPlan {
         let labels = labels
             .iter()
@@ -82,6 +83,7 @@ pub fn plan_match_patterngraph(
             //      rel, one with the start node as `a`, one with the start node as `b`.
             plan = LogicalPlan::ExpandRel {
                 src: Box::new(plan),
+                scope,
                 src_rel_slot: pc.scoping.lookup_or_allocrow(rel.identifier),
                 start_node_slot: pc.scoping.lookup_or_allocrow(left_node.identifier),
                 end_node_slot: pc.scoping.lookup_or_allocrow(right_node.identifier),
@@ -158,6 +160,7 @@ pub fn plan_match_patterngraph(
                 let dst = pc.scoping.lookup_or_allocrow(right_id);
                 let expand = LogicalPlan::Expand {
                     src: Box::new(plan),
+                    scope,
                     src_slot: pc.scoping.lookup_or_allocrow(left_id),
                     rel_slot: pc.scoping.lookup_or_allocrow(rel.identifier),
                     dst_slot: dst,
@@ -175,6 +178,7 @@ pub fn plan_match_patterngraph(
                 let dst = pc.scoping.lookup_or_allocrow(left_id);
                 let expand = LogicalPlan::Expand {
                     src: Box::new(plan),
+                    scope,
                     src_slot: pc.scoping.lookup_or_allocrow(right_id),
                     rel_slot: pc.scoping.lookup_or_allocrow(rel.identifier),
                     dst_slot: dst,
@@ -189,6 +193,7 @@ pub fn plan_match_patterngraph(
                 let dst_slot = pc.scoping.lookup_or_allocrow(rel.identifier);
                 plan = LogicalPlan::ExpandInto {
                     src: Box::new(plan),
+                    scope,
                     left_node_slot: pc.scoping.lookup_or_allocrow(left_id),
                     right_node_slot: pc.scoping.lookup_or_allocrow(right_id),
                     dst_slot,
@@ -260,6 +265,7 @@ fn plan_match_node(
     let node_slot = pc.scoping.lookup_or_allocrow(v.identifier);
     let mut plan = LogicalPlan::NodeScan {
         src: Box::new(src),
+        scope: pc.scoping.current_scope_no(),
         slot: node_slot,
         labels: v.labels.first().cloned(),
     };
@@ -308,9 +314,11 @@ mod tests {
             LogicalPlan::Expand {
                 src: Box::new(LogicalPlan::NodeScan {
                     src: Box::new(LogicalPlan::Argument),
+                    scope: 1,
                     slot: p.slot(id_n),
                     labels: Some(lbl_person),
                 }),
+                scope: 1,
                 src_slot: p.slot(id_n),
                 rel_slot: p.slot(id_anon),
                 dst_slot: p.slot(id_o),
@@ -336,9 +344,11 @@ mod tests {
                 src: Box::new(LogicalPlan::Expand {
                     src: Box::new(LogicalPlan::NodeScan {
                         src: Box::new(LogicalPlan::Argument),
+                        scope: 1,
                         slot: p.slot(id_o),
                         labels: Some(lbl_person),
                     }),
+                    scope: 1,
                     src_slot: p.slot(id_o),
                     rel_slot: p.slot(id_r),
                     dst_slot: p.slot(id_n),
@@ -362,6 +372,7 @@ mod tests {
             LogicalPlan::Selection {
                 src: Box::new(LogicalPlan::NodeScan {
                     src: Box::new(LogicalPlan::Argument),
+                    scope: 1,
                     slot: p.slot(id_n),
                     labels: None,
                 }),
@@ -394,9 +405,11 @@ mod tests {
                     src: Box::new(LogicalPlan::Expand {
                         src: Box::new(LogicalPlan::NodeScan {
                             src: Box::new(LogicalPlan::Argument),
+                            scope: 1,
                             slot: p.slot(id_x),
                             labels: None
                         }),
+                        scope: 1,
                         src_slot: 0,
                         rel_slot: p.slot(id_r),
                         dst_slot: p.slot(id_y),
@@ -409,6 +422,7 @@ mod tests {
                         dst: p.slot(id_r)
                     }]
                 }),
+                scope: 2,
                 src_rel_slot: p.slot(id_r),
                 start_node_slot: p.slot(id_a),
                 end_node_slot: p.slot(id_b)
@@ -430,6 +444,7 @@ mod tests {
                 src: Box::new(LogicalPlan::Selection {
                     src: Box::new(LogicalPlan::NodeScan {
                         src: Box::new(LogicalPlan::Argument),
+                        scope: 1,
                         slot: p.slot(id_n),
                         labels: None,
                     }),
@@ -442,6 +457,7 @@ mod tests {
                         op: Op::Eq
                     }
                 }),
+                scope: 1,
                 src_slot: p.slot(id_n),
                 rel_slot: 2,
                 dst_slot: p.slot(id_m),
@@ -464,6 +480,7 @@ mod tests {
                     src: Box::new(LogicalPlan::Optional {
                         src: Box::new(LogicalPlan::NodeScan {
                             src: Box::new(LogicalPlan::Argument),
+                            scope: 1,
                             slot: p.slot(id_n),
                             labels: None,
                         }),
@@ -497,9 +514,11 @@ mod tests {
                         src: Box::new(LogicalPlan::Expand {
                             src: Box::new(LogicalPlan::NodeScan {
                                 src: Box::new(LogicalPlan::Argument),
+                                scope: 1,
                                 slot: p.slot(id_a),
                                 labels: None
                             }),
+                            scope: 1,
                             src_slot: p.slot(id_a),
                             rel_slot: p.slot(id_r),
                             dst_slot: p.slot(id_b),
@@ -533,11 +552,13 @@ mod tests {
                     src: Box::new(LogicalPlan::CartesianProduct {
                         outer: Box::new(LogicalPlan::NodeScan {
                             src: Box::new(LogicalPlan::Argument),
+                            scope: 1,
                             slot: p.slot(id_a),
                             labels: None,
                         }),
                         inner: Box::new(LogicalPlan::NodeScan {
                             src: Box::new(LogicalPlan::Argument),
+                            scope: 1,
                             slot: p.slot(id_b),
                             labels: None,
                         }),
