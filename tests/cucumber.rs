@@ -471,8 +471,16 @@ mod example_steps {
                 count_nodes(world) - world.starting_graph_properties.node_count,
                 val.parse::<i32>().unwrap()
             ),
+            "-nodes" => assert_eq!(
+                world.starting_graph_properties.node_count - count_nodes(world),
+                val.parse::<i32>().unwrap()
+            ),
             "+relationships" => assert_eq!(
                 count_rels(world) - world.starting_graph_properties.relationship_count,
+                val.parse::<i32>().unwrap()
+            ),
+            "-relationships" => assert_eq!(
+                world.starting_graph_properties.relationship_count - count_rels(world),
                 val.parse::<i32>().unwrap()
             ),
             "+labels" => {
@@ -480,6 +488,15 @@ mod example_steps {
                 let original_labels = &world.starting_graph_properties.labels;
                 assert_eq!(
                     (current_labels.len() - original_labels.len()) as i32,
+                    val.parse::<i32>().unwrap(),
+                    "+labels",
+                )
+            }
+            "-labels" => {
+                let current_labels = gather_labels(world);
+                let original_labels = &world.starting_graph_properties.labels;
+                assert_eq!(
+                    (original_labels.len() - current_labels.len()) as i32,
                     val.parse::<i32>().unwrap(),
                     "+labels",
                 )

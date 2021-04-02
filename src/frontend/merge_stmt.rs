@@ -1,9 +1,9 @@
-use super::{parse_pattern_graph, LogicalPlan, Pair, PlanningContext, Result, Rule};
-use crate::frontend::UpdateAction;
+use super::{UpdateAction, LogicalPlan, Pair, PlanningContext, Result, Rule};
+use super::patterns::{parse_pattern_graph};
 
-use crate::frontend::create_stmt::plan_create_patterngraph;
-use crate::frontend::match_stmt::plan_match_patterngraph;
-use crate::frontend::set_stmt::parse_set_clause;
+use super::create_stmt::plan_create_patterngraph;
+use super::match_stmt::plan_match_patterngraph;
+use super::set_stmt::parse_set_clause;
 
 pub fn plan_merge(
     mut pc: &mut PlanningContext,
@@ -53,7 +53,7 @@ pub fn plan_merge(
     let mut createplan = plan_create_patterngraph(&mut pc, LogicalPlan::Argument, pg)?;
 
     if !on_create.is_empty() {
-        createplan = LogicalPlan::UpdateEntity {
+        createplan = LogicalPlan::Update {
             src: Box::new(createplan),
             scope: pc.scoping.current_scope_no(),
             actions: on_create,
@@ -63,7 +63,7 @@ pub fn plan_merge(
     if !on_match.is_empty() {
         matchplan = LogicalPlan::ConditionalApply {
             lhs: Box::new(matchplan),
-            rhs: Box::new(LogicalPlan::UpdateEntity {
+            rhs: Box::new(LogicalPlan::Update {
                 src: Box::new(LogicalPlan::Argument),
                 scope: pc.scoping.current_scope_no(),
                 actions: on_match,
@@ -138,10 +138,10 @@ ON MATCH SET n.updated = timestamp()",
                         }),
                         slots: vec![slot_n]
                     }),
-                    rhs: Box::new(LogicalPlan::UpdateEntity {
+                    rhs: Box::new(LogicalPlan::Update {
                         src: Box::new(LogicalPlan::Argument),
                         scope: 1,
-                        actions: vec![UpdateAction::SingleAssign {
+                        actions: vec![UpdateAction::PropAssign {
                             entity: slot_n,
                             key: key_updated,
                             value: Expr::FuncCall {
@@ -153,7 +153,7 @@ ON MATCH SET n.updated = timestamp()",
                     conditions: vec![slot_n]
                 }),
                 // TODO: This SetProperties should be folded into the Create
-                rhs: Box::new(LogicalPlan::UpdateEntity {
+                rhs: Box::new(LogicalPlan::Update {
                     src: Box::new(LogicalPlan::Create {
                         src: Box::new(LogicalPlan::Argument),
                         scope: 1,
@@ -168,7 +168,7 @@ ON MATCH SET n.updated = timestamp()",
                         rels: vec![]
                     }),
                     scope: 1,
-                    actions: vec![UpdateAction::SingleAssign {
+                    actions: vec![UpdateAction::PropAssign {
                         entity: slot_n,
                         key: key_created,
                         value: Expr::FuncCall {
@@ -246,8 +246,6 @@ ON MATCH SET n.updated = timestamp()",
     fn plan_merge_with_matching_prior_anon_create() -> Result<(), Error> {
         let mut p = plan("CREATE (:X) MERGE (:X)")?;
 
-        let id_a = p.tokenize("a");
-        let id_b = p.tokenize("b");
         let lbl_x = p.tokenize("X");
         assert_eq!(
             p.plan,

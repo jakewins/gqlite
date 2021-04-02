@@ -9,7 +9,7 @@ pub fn plan_set(
     set_stmt: Pair<Rule>,
 ) -> Result<LogicalPlan> {
     let actions = parse_set_clause(&mut pc.scoping, set_stmt)?;
-    Ok(LogicalPlan::UpdateEntity {
+    Ok(LogicalPlan::Update {
         src: Box::new(src),
         scope: pc.scoping.current_scope_no(),
         actions,
@@ -26,7 +26,7 @@ pub fn parse_set_clause(scoping: &mut Scoping, set_stmt: Pair<Rule>) -> Result<V
                 let key = scoping.tokenize(parts.next().unwrap().as_str());
 
                 let expr = plan_expr(scoping, parts.next().unwrap())?;
-                actions.push(UpdateAction::SingleAssign {
+                actions.push(UpdateAction::PropAssign {
                     entity: scoping.lookup_or_allocrow(entity),
                     key,
                     value: expr,
@@ -37,7 +37,7 @@ pub fn parse_set_clause(scoping: &mut Scoping, set_stmt: Pair<Rule>) -> Result<V
                 let entity = scoping.tokenize(parts.next().unwrap().as_str());
 
                 let expr = plan_expr(scoping, parts.next().unwrap())?;
-                actions.push(UpdateAction::Append {
+                actions.push(UpdateAction::PropAppend {
                     entity: scoping.lookup_or_allocrow(entity),
                     value: expr,
                 });
@@ -47,7 +47,7 @@ pub fn parse_set_clause(scoping: &mut Scoping, set_stmt: Pair<Rule>) -> Result<V
                 let entity = scoping.tokenize(parts.next().unwrap().as_str());
 
                 let expr = plan_expr(scoping, parts.next().unwrap())?;
-                actions.push(UpdateAction::Overwrite {
+                actions.push(UpdateAction::PropOverwrite {
                     entity: scoping.lookup_or_allocrow(entity),
                     value: expr,
                 });
@@ -56,7 +56,7 @@ pub fn parse_set_clause(scoping: &mut Scoping, set_stmt: Pair<Rule>) -> Result<V
                 let mut parts = assignment.into_inner();
                 let entity = scoping.tokenize(parts.next().unwrap().as_str());
                 let label = scoping.tokenize(parts.next().unwrap().as_str());
-                actions.push(UpdateAction::AppendLabel {
+                actions.push(UpdateAction::LabelSet {
                     entity: scoping.lookup_or_allocrow(entity),
                     label
                 })
@@ -83,7 +83,7 @@ mod tests {
 
         assert_eq!(
             p.plan,
-            LogicalPlan::UpdateEntity {
+            LogicalPlan::Update {
                 src: Box::new(LogicalPlan::NodeScan {
                     src: Box::new(LogicalPlan::Argument),
                     scope: 1,
@@ -91,7 +91,7 @@ mod tests {
                     labels: None
                 }),
                 scope: 1,
-                actions: vec![UpdateAction::SingleAssign {
+                actions: vec![UpdateAction::PropAssign {
                     entity: p.slot(id_a),
                     key: key_name,
                     value: Expr::String("bob".to_string())
@@ -110,7 +110,7 @@ mod tests {
 
         assert_eq!(
             p.plan,
-            LogicalPlan::UpdateEntity {
+            LogicalPlan::Update {
                 src: Box::new(LogicalPlan::CartesianProduct {
                     outer: Box::new(LogicalPlan::NodeScan {
                         src: Box::new(LogicalPlan::Argument),
@@ -127,7 +127,7 @@ mod tests {
                     predicate: Expr::Bool(true),
                 }),
                 scope: 1,
-                actions: vec![UpdateAction::Overwrite {
+                actions: vec![UpdateAction::PropOverwrite {
                     entity: p.slot(id_a),
                     value: Expr::RowRef(p.slot(id_b)),
                 }]
@@ -144,7 +144,7 @@ mod tests {
 
         assert_eq!(
             p.plan,
-            LogicalPlan::UpdateEntity {
+            LogicalPlan::Update {
                 src: Box::new(LogicalPlan::NodeScan {
                     src: Box::new(LogicalPlan::Argument),
                     scope: 1,
@@ -152,7 +152,7 @@ mod tests {
                     labels: None
                 }),
                 scope: 1,
-                actions: vec![UpdateAction::Append {
+                actions: vec![UpdateAction::PropAppend {
                     entity: p.slot(id_a),
                     value: Expr::Map(vec![MapEntryExpr {
                         key: key_name,
@@ -172,7 +172,7 @@ mod tests {
 
         assert_eq!(
             p.plan,
-            LogicalPlan::UpdateEntity {
+            LogicalPlan::Update {
                 src: Box::new(LogicalPlan::NodeScan {
                     src: Box::new(LogicalPlan::Argument),
                     scope: 1,
@@ -180,7 +180,7 @@ mod tests {
                     labels: None
                 }),
                 scope: 1,
-                actions: vec![UpdateAction::AppendLabel {
+                actions: vec![UpdateAction::LabelSet {
                     entity: p.slot(id_a),
                     label: lbl_hello,
                 }],

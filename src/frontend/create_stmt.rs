@@ -1,7 +1,8 @@
 use super::{
-    parse_pattern_graph, Dir, LogicalPlan, NodeSpec, Pair, PlanningContext, RelSpec, Result, Rule,
+    Dir, LogicalPlan, NodeSpec, Pair, PlanningContext, RelSpec, Result, Rule,
+    SideEffect,
 };
-use crate::frontend::{PatternGraph, SideEffect};
+use super::patterns::{PatternGraph, parse_pattern_graph};
 
 pub fn plan_create(
     mut pc: &mut PlanningContext,

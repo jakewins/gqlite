@@ -10,15 +10,16 @@ use crate::Slot;
 use anyhow::Result;
 use pest::iterators::Pair;
 use std::cell::RefCell;
-use std::collections::hash_map::Entry;
 use std::collections::{HashMap, HashSet};
 use std::fmt::Debug;
 use std::rc::Rc;
 
 mod expr;
+mod patterns;
 
 mod call_stmt;
 mod create_stmt;
+mod delete_stmt;
 mod match_stmt;
 mod merge_stmt;
 mod set_stmt;
@@ -67,6 +68,9 @@ impl Frontend {
                 }
                 Rule::create_stmt => {
                     plan = create_stmt::plan_create(pc, plan, stmt)?;
+                }
+                Rule::delete_stmt => {
+                    plan = delete_stmt::plan_delete(pc, plan, stmt)?;
                 }
                 Rule::set_stmt => plan = set_stmt::plan_set(pc, plan, stmt)?,
                 Rule::merge_stmt => {
@@ -185,7 +189,7 @@ pub enum LogicalPlan {
         nodes: Vec<NodeSpec>,
         rels: Vec<RelSpec>,
     },
-    UpdateEntity {
+    Update {
         src: Box<Self>,
         scope: u8,
         actions: Vec<UpdateAction>,
@@ -517,7 +521,7 @@ impl LogicalPlan {
                     slots,
                 )
             }
-            LogicalPlan::UpdateEntity { src, scope, actions } => {
+            LogicalPlan::Update { src, scope, actions } => {
                 let next_indent = &format!("{}  ", ind);
                 format!(
                     "SetProperties(\n{}src={}\n{}scope={}\n{}actions=[{:?}])",
@@ -561,27 +565,35 @@ impl LogicalPlan {
     }
 }
 
-// Spec for modifying a property on some entity
+// Update actions the Update plan can perform
 #[derive(Debug, PartialEq, Clone)]
 pub enum UpdateAction {
+    // DELETE n
+    DeleteEntity {
+        entity: Expr,
+    },
+    // DETACH DELETE n
+    DetachDelete {
+        node: Expr,
+    },
     // SET a.blah = 1
-    SingleAssign {
+    PropAssign {
         entity: Slot,
         key: Token,
         value: Expr,
     },
     // SET a += b or SET a += { 'a': "Map" }
-    Append {
+    PropAppend {
         entity: Slot,
         value: Expr,
     },
     // SET a = b or SET a = { 'a': "Map" }
-    Overwrite {
+    PropOverwrite {
         entity: Slot,
         value: Expr,
     },
     // SET a:User
-    AppendLabel {
+    LabelSet {
         entity: Slot,
         label: Token,
     },
@@ -611,7 +623,7 @@ pub enum Dir {
     In,
 }
 impl Dir {
-    fn reverse(self) -> Self {
+    pub(crate) fn reverse(self) -> Self {
         match self {
             Dir::Out => Dir::In,
             Dir::In => Dir::Out,
@@ -670,6 +682,8 @@ pub struct Scope {
     // Identifiers that the user has explictly declared. Eg in MATCH "(a)-->(b)" there are
     // three identifiers: a, b and an anonymous rel identifier. "a" and "b" are "named" here.
     named_identifiers: HashSet<Token>,
+    // Named static expressions, used (currently) only to store named paths
+    aliases: HashMap<Token, Expr>,
 }
 
 impl Scope {}
@@ -731,11 +745,13 @@ impl Scoping {
                 number: 0,
                 slots: Default::default(),
                 named_identifiers: Default::default(),
+                aliases: Default::default()
             },
             _current: Scope {
                 number: 1,
                 slots: Default::default(),
                 named_identifiers: Default::default(),
+                aliases: Default::default()
             },
             mode: ScopingMode::Current,
             stackrefs: Default::default(),
@@ -756,6 +772,7 @@ impl Scoping {
                 number: new_scope_no,
                 slots: Default::default(),
                 named_identifiers: Default::default(),
+                aliases: Default::default()
             },
         );
         let old_prior = mem::replace(&mut self._prior, new_prior);
@@ -822,6 +839,48 @@ impl Scoping {
 
     fn tokenize(&mut self, contents: &str) -> Token {
         self.tokens.borrow_mut().tokenize(contents)
+    }
+
+    // So.. this is kind of a hack to defer a potential generalization. Up until this point in the
+    // implementation, every identifier refers to a value in a slot. This concept is being introduced
+    // to support an invariant: named paths.
+    //
+    // In this query:
+    //
+    //   MATCH p=(a)-->(b)--(c)
+    //
+    // All the values that make up the path p are already values in slots. `p` is just a name for
+    // those slots together in a certain order, as far as the implementation is concerned.
+    // Said another way: All identifiers we have dealt with so far are names for slots, but named
+    // paths are not, named paths are names for a sequence of slots.
+    //
+    // The way I see it, there are three options:
+    // 1) We store paths in slots, as a vector of RowRefs.
+    // 2) We make all identifiers actually resolve to expressions, 99% of them being RowRefs
+    // 3) We keep paths as a special snowflake
+    //
+    // I'm doing (3) because I think it'll be easy to throw away when we learn more. I'm avoiding
+    // (1) because, at least when writing this, there's no easy way to stick static values into
+    // runtime rows other than parameters, and that gets very confusing to use for this.
+    fn alias(&mut self, id: Token, expr: Expr) {
+        self.declare_tok(id);
+        match self.mode {
+            ScopingMode::Current => self._current.aliases.insert(id, expr),
+            ScopingMode::Prior => self._prior.aliases.insert(id, expr),
+            ScopingMode::ProjectionMode => {
+                panic!("cannot alias variables in ORDER BY clause")
+            }
+        };
+    }
+
+    fn lookup_alias(&self, id: Token) -> Option<&Expr> {
+        match self.mode {
+            ScopingMode::Current => self._current.aliases.get(&id ),
+            ScopingMode::Prior => self._prior.aliases.get(&id ),
+            ScopingMode::ProjectionMode => {
+                self._current.aliases.get(&id).or_else(||self._prior.aliases.get(&id))
+            }
+        }
     }
 
     // Declare a named identifier in the current scope if it isn't already;
@@ -948,243 +1007,6 @@ fn plan_unwind(
         src: Box::new(src),
         list_expr,
         alias,
-    })
-}
-
-#[derive(Debug, PartialEq, Clone)]
-pub struct PatternNode {
-    identifier: Token,
-    labels: Vec<Token>,
-    props: Vec<MapEntryExpr>,
-    // In the pattern, was this node assigned an identifier?
-    // eg. in "MATCH (a)-->()", the second node is anonymous; it will have
-    // been assigned an anonymous identifier
-    anonymous: bool,
-    // This is mutated as the pattern is solved. Initially bound nodes - nodes we already
-    // know about from before the MATCH, like in `MATCH (a) WITH a MATCH (a)-->(b)` - are
-    // marked solved. As the pattern solver works it incrementally marks more and more stuff
-    // solved.
-    solved: bool,
-}
-
-impl PatternNode {
-    fn merge(&mut self, _other: &PatternNode) {}
-}
-
-#[derive(Debug, PartialEq, Clone)]
-pub struct PatternRel {
-    identifier: Token,
-    rel_type: Option<Token>,
-    left_node: Token,
-    right_node: Option<Token>,
-    // From the perspective of the left node, is this pattern inbound or outbound?
-    dir: Option<Dir>,
-    props: Vec<MapEntryExpr>,
-    // See PatternNode#anonymous
-    anonymous: bool,
-    // See PatternNode#solved
-    solved: bool,
-}
-
-#[derive(Debug, Default, Clone)]
-pub struct PatternGraph {
-    v: HashMap<Token, PatternNode>,
-    v_order: Vec<Token>,
-    e: Vec<PatternRel>,
-
-    // Nodes and rels introduced in this pattern; eg for
-    //
-    //   MATCH (n) WITH n MATCH (n)-[r]->(p)
-    //
-    // In MATCH (n)-[r]->(p), `r` and `p` are new identifiers and would show up in this list.
-    unbound_identifiers: Vec<Token>,
-
-    // If this pattern is an OPTIONAL MATCH
-    optional: bool,
-
-    // The following expression must be true for the pattern to match; this can be a
-    // deeply nested combination of Expr::And / Expr::Or. The pattern parser does not guarantee
-    // it is a boolean expression.
-    //
-    // TODO: Currently this contains the entire WHERE clause, forcing evaluation of the WHERE
-    //       predicates once all the expands and scans have been done. This can cause catastrophic
-    //       cases, compared to if predicates where evaluated earlier in the plan.
-    //
-    // Imagine a cartesian join like:
-    //
-    //   MATCH (a:User {id: "a"}), (b:User {id: "b"})
-    //
-    // vs the same thing expressed as
-    //
-    //   MATCH (a:User), (b:User)
-    //   WHERE a.id = "a" AND b.id = "b"
-    //
-    // The first will filter `a` down to 1 row before doing the cartesian product over `b`,
-    // while the latter will first do the cartesian product of *all nodes in the database* and
-    // then filter. The difference is something like 6 orders of magnitude of comparisons made.
-    //
-    // Long story short: We want a way to "lift" predicates out of this filter when we plan MATCH,
-    // so that we filter stuff down as early as possible.
-    predicate: Option<Expr>,
-}
-
-impl PatternGraph {
-    fn merge_node(&mut self, n: PatternNode) {
-        let entry = self.v.entry(n.identifier);
-        match entry {
-            Entry::Occupied(mut on) => {
-                on.get_mut().merge(&n);
-            }
-            Entry::Vacant(entry) => {
-                self.v_order.push(*entry.key());
-                entry.insert(n);
-            }
-        };
-    }
-
-    fn merge_rel(&mut self, r: PatternRel) {
-        self.e.push(r)
-    }
-}
-
-fn parse_pattern_graph(pc: &mut PlanningContext, patterns: Pair<Rule>) -> Result<PatternGraph> {
-    let mut pg: PatternGraph = PatternGraph::default();
-
-    for part in patterns.into_inner() {
-        match part.as_rule() {
-            Rule::optional_clause => pg.optional = true,
-            Rule::pattern => {
-                let mut prior_node_id = None;
-                let mut prior_rel: Option<PatternRel> = None;
-                // For each node and rel segment of eg: (n:Message)-[:KNOWS]->()
-                for segment in part.into_inner() {
-                    match segment.as_rule() {
-                        Rule::node => {
-                            let current_node = parse_pattern_node(pc, segment)?;
-                            if !current_node.anonymous && !current_node.solved {
-                                let is_new = pc.scoping.declare_tok(current_node.identifier);
-                                if is_new {
-                                    pg.unbound_identifiers.push(current_node.identifier)
-                                }
-                            } else if current_node.anonymous {
-                                pg.unbound_identifiers.push(current_node.identifier)
-                            }
-                            prior_node_id = Some(current_node.identifier);
-                            pg.merge_node(current_node);
-                            if let Some(mut rel) = prior_rel {
-                                rel.right_node = prior_node_id;
-                                pg.merge_rel(rel);
-                                prior_rel = None
-                            }
-                        }
-                        Rule::rel => {
-                            let current_rel = parse_pattern_rel(
-                                pc,
-                                prior_node_id.expect("pattern rel must be preceded by node"),
-                                segment,
-                            )?;
-                            if !current_rel.anonymous && !current_rel.solved {
-                                let is_new = pc.scoping.declare_tok(current_rel.identifier);
-                                if is_new {
-                                    pg.unbound_identifiers.push(current_rel.identifier)
-                                }
-                            } else if current_rel.anonymous {
-                                pg.unbound_identifiers.push(current_rel.identifier)
-                            }
-                            prior_rel = Some(current_rel);
-                            prior_node_id = None
-                        }
-                        _ => unreachable!(),
-                    }
-                }
-            }
-            Rule::where_clause => {
-                pg.predicate = Some(plan_expr(
-                    &mut pc.scoping,
-                    part.into_inner()
-                        .next()
-                        .expect("where clause must contain a predicate"),
-                )?)
-            }
-            _ => unreachable!(),
-        }
-    }
-
-    Ok(pg)
-}
-
-// Figures out what step we need to find the specified node
-fn parse_pattern_node(pc: &mut PlanningContext, pattern_node: Pair<Rule>) -> Result<PatternNode> {
-    let mut identifier = None;
-    let mut labels = Vec::new();
-    let mut props = Vec::new();
-    for part in pattern_node.into_inner() {
-        match part.as_rule() {
-            Rule::id => identifier = Some(pc.scoping.tokenize(part.as_str())),
-            Rule::label => {
-                for label in part.into_inner() {
-                    labels.push(pc.scoping.tokenize(label.as_str()));
-                }
-            }
-            Rule::map => {
-                props = expr::parse_map_expression(&mut pc.scoping, part)?;
-            }
-            _ => panic!("don't know how to handle: {}", part),
-        }
-    }
-
-    let anonymous = identifier.is_none();
-    let id = identifier.unwrap_or_else(|| pc.scoping.new_anon_node());
-    labels.sort_unstable();
-    labels.dedup();
-    let is_bound = pc.scoping.is_declared(id);
-    Ok(PatternNode {
-        identifier: id,
-        labels,
-        props,
-        anonymous,
-        solved: is_bound,
-    })
-}
-
-fn parse_pattern_rel(
-    pc: &mut PlanningContext,
-    left_node: Token,
-    pattern_rel: Pair<Rule>,
-) -> Result<PatternRel> {
-    let mut identifier = None;
-    let mut rel_type = None;
-    let mut dir = None;
-    let mut props = Vec::new();
-    for part in pattern_rel.into_inner() {
-        match part.as_rule() {
-            Rule::id => identifier = Some(pc.scoping.tokenize(part.as_str())),
-            Rule::rel_type => rel_type = Some(pc.scoping.tokenize(part.as_str())),
-            Rule::left_arrow => dir = Some(Dir::In),
-            Rule::right_arrow => {
-                if dir.is_some() {
-                    bail!("relationship can't be directed in both directions. If you want to find relationships in either direction, leave the arrows out")
-                }
-                dir = Some(Dir::Out)
-            }
-            Rule::map => {
-                props = expr::parse_map_expression(&mut pc.scoping, part)?;
-            }
-            _ => unreachable!(),
-        }
-    }
-    let anonymous = identifier.is_none();
-    let id = identifier.unwrap_or_else(|| pc.scoping.new_anon_rel());
-    let is_bound = pc.scoping.is_declared(id);
-    Ok(PatternRel {
-        left_node,
-        right_node: None,
-        identifier: id,
-        rel_type,
-        dir,
-        props,
-        anonymous,
-        solved: is_bound,
     })
 }
 

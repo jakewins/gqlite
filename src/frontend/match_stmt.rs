@@ -1,6 +1,6 @@
-use super::{parse_pattern_graph, Dir, Expr, LogicalPlan, Pair, PlanningContext, Result, Rule};
+use super::{Dir, Expr, LogicalPlan, Pair, PlanningContext, Result, Rule, Op};
 use crate::backend::Token;
-use crate::frontend::{Op, PatternGraph, PatternNode};
+use super::patterns::{PatternGraph, PatternNode, parse_pattern_graph};
 
 pub fn plan_match(
     pc: &mut PlanningContext,
@@ -239,6 +239,13 @@ pub fn plan_match_patterngraph(
         if !solved_any {
             panic!("Failed to solve pattern: {:?}", pg)
         }
+    }
+
+    // 4: Store any names for patterns the user asked for, so we know what they mean later on
+    for named_pattern in &pg.named_patterns {
+        // Convert to an expression, now that we know all the parts are solved and can be referenced
+        let pathslots: Vec<usize> = named_pattern.parts.iter().map(|tok| pc.scoping.lookup_or_allocrow(*tok) ).collect();
+        pc.scoping.alias(named_pattern.identifier, Expr::Path(pathslots));
     }
 
     // Finally, add the pattern-wide predicate to filter the result of the pattern match
@@ -580,6 +587,57 @@ mod tests {
                     ]
                 }),
                 fields: vec![(id_a, p.slot(id_a)), (id_b, p.slot(id_b))]
+            }
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn plan_path_match() -> Result<(), Error> {
+        let mut p = plan("MATCH p=(a)-[r1:KNOWS]->(b)-[r2:KNOWS]->(c) RETURN p")?;
+        let id_r1 = p.tokenize("r1");
+        let id_r2 = p.tokenize("r2");
+        let id_p = p.tokenize("p");
+        let id_a = p.tokenize("a");
+        let id_b = p.tokenize("b");
+        let id_c = p.tokenize("c");
+        let reltype_knows = p.tokenize("KNOWS");
+
+        // TODO this is actually incorrect I think - cypher rules say r1 must != r2, but we don't
+        //      enforce that here. Lets see if the TCK catches that.
+        assert_eq!(
+            p.plan,
+            LogicalPlan::ProduceResult {
+                src: Box::new(LogicalPlan::Project {
+                    src: Box::new(LogicalPlan::Expand {
+                        src: Box::new(LogicalPlan::Expand {
+                            src: Box::new(LogicalPlan::NodeScan {
+                                src: Box::new(LogicalPlan::Argument),
+                                scope: 1,
+                                slot: p.slot(id_a),
+                                labels: None
+                            }),
+                            scope: 1,
+                            src_slot: p.slot(id_a),
+                            rel_slot: p.slot(id_r1),
+                            dst_slot: p.slot(id_b),
+                            rel_type: Some(reltype_knows),
+                            dir: Some(Dir::Out)
+                        }),
+                        scope: 1,
+                        src_slot: p.slot(id_b),
+                        rel_slot: p.slot(id_r2),
+                        dst_slot: p.slot(id_c),
+                        rel_type: Some(reltype_knows),
+                        dir: Some(Dir::Out)
+                    }),
+                    projections: vec![Projection {
+                        expr: Expr::Path(vec![p.slot(id_a), p.slot(id_r1), p.slot(id_b), p.slot(id_r2), p.slot(id_c)]),
+                        alias: id_p,
+                        dst: p.slot(id_p)
+                    }]
+                }),
+                fields: vec![(id_p, p.slot(id_p))]
             }
         );
         Ok(())

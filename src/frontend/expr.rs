@@ -65,6 +65,11 @@ pub enum Expr {
     // Lookup a property by a dynamically determined key
     DynProp(Box<Self>, Box<Self>),
 
+    // The slots in the vector are alternating node/rel values.
+    // Eg. MATCH p=(a)-[r]->(b)-[t]-(c) RETURN p, the vector will point to the slots each of
+    // those identifiers are stored in.
+    Path(Vec<Slot>),
+
     // Reference to a slot on the stack, used by expressions that introduce scopes
     StackRef(usize),
     // Reference to a slot in the current row
@@ -123,6 +128,7 @@ impl Expr {
                 src.is_aggregating(aggregating_funcs) || map_expr.is_aggregating(aggregating_funcs)
             }
             Expr::IsNull(inner) => inner.is_aggregating(aggregating_funcs),
+            Expr::Path(_) => false,
         }
     }
 
@@ -241,6 +247,9 @@ fn plan_term(scope: &mut Scoping, term: Pair<Rule>) -> Result<Expr> {
             let tok = scope.tokenize(term.as_str());
             if let Some(stackref) = scope.lookup_stackref(tok) {
                 return Ok(Expr::StackRef(stackref));
+            }
+            if let Some(alias) = scope.lookup_alias(tok) {
+                return Ok(alias.clone())
             }
             Ok(Expr::RowRef(scope.lookup_or_allocrow(tok)))
         }

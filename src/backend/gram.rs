@@ -104,30 +104,40 @@ impl GramBackend {
                     tokens: self.tokens.clone(),
                 }))
             }
-            LogicalPlan::UpdateEntity { src, scope: _, actions } => {
+            LogicalPlan::Update { src, scope: _, actions } => {
                 let mut out_actions = Vec::with_capacity(actions.len());
                 for action in actions {
                     match action {
-                        frontend::UpdateAction::SingleAssign { entity, key, value } => out_actions
+                        frontend::UpdateAction::PropAssign { entity, key, value } => out_actions
                             .push(UpdateAction::SingleAssign {
                                 entity,
                                 key,
                                 value: self.convert_expr(value),
                             }),
-                        frontend::UpdateAction::Append { entity, value } => {
+                        frontend::UpdateAction::PropAppend { entity, value } => {
                             out_actions.push(UpdateAction::Append {
                                 entity,
                                 value: self.convert_expr(value),
                             })
                         }
-                        frontend::UpdateAction::Overwrite { entity, value } => {
+                        frontend::UpdateAction::PropOverwrite { entity, value } => {
                             out_actions.push(UpdateAction::Overwrite {
                                 entity,
                                 value: self.convert_expr(value),
                             })
                         }
-                        frontend::UpdateAction::AppendLabel { entity, label: label } => {
+                        frontend::UpdateAction::LabelSet { entity, label: label } => {
                             out_actions.push(UpdateAction::AppendLabel { entity, label })
+                        }
+                        frontend::UpdateAction::DeleteEntity { entity: node } => {
+                            out_actions.push(UpdateAction::DeleteEntity {
+                                entity: self.convert_expr(node),
+                            })
+                        }
+                        frontend::UpdateAction::DetachDelete { node } => {
+                            out_actions.push(UpdateAction::DetachDelete{
+                                node: self.convert_expr(node),
+                            })
                         }
                     }
                 }
@@ -348,8 +358,11 @@ impl GramBackend {
                     )
                 }
             }
+            frontend::Expr::Map(es) => {
+
+            }
             _ => panic!(
-                "The gram backend does not support this expression type yet: {:?}",
+                "The gram backend does not support this expression type in aggregations yet: {:?}",
                 expr
             ),
         }
@@ -431,6 +444,10 @@ impl GramBackend {
                 Expr::Map(items)
             }
 
+            frontend::Expr::Path(es) => {
+                Expr::Path(es)
+            }
+
             frontend::Expr::FuncCall { name, args } => {
                 // TODO lol
                 let convargs = args.iter().map(|i| self.convert_expr(i.clone())).collect();
@@ -453,7 +470,6 @@ impl GramBackend {
                 Expr::And(terms.iter().map(|e| self.convert_expr(e.clone())).collect())
             }
             frontend::Expr::Not(e) => Expr::Not(Box::new(self.convert_expr(*e))),
-
             frontend::Expr::HasLabel(slot, label) => Expr::HasLabel { slot, label },
             frontend::Expr::IsNull(term) => Expr::IsNull(Box::new(self.convert_expr(*term))),
             _ => panic!(
@@ -636,6 +652,9 @@ enum Expr {
     List(Vec<Expr>),
     Map(Vec<(Token, Expr)>),
 
+    // Always odd, alternating node/rel/node
+    Path(Vec<Slot>),
+
     ListComprehension {
         src: Box<Expr>,
         // The temporary value of each entry in src gets stored in this local stack slot,
@@ -720,14 +739,15 @@ impl Expr {
             Expr::Prop(expr, keys) => Expr::eval_prop(ctx, row, expr, keys),
             Expr::DynProp(expr, key) => {
                 let keyval = key.eval(ctx, row)?;
-                if let GramVal::Lit(Val::String(keystr)) = keyval {
-                    let tok = ctx.tokens.borrow_mut().tokenize(keystr.as_str());
-                    Expr::eval_prop(ctx, row, expr, &[tok])
-                } else {
-                    bail!(
-                        "Don't know how to look up map entries by non-string keys: {:?}",
-                        keyval
-                    )
+                match keyval {
+                    GramVal::Lit(Val::String(keystr)) => {
+                        let tok = ctx.tokens.borrow_mut().tokenize(keystr.as_str());
+                        Expr::eval_prop(ctx, row, expr, &[tok])
+                    }
+                    GramVal::Lit(Val::Int(index)) => {
+                        Ok(expr.eval(ctx, row)?.get_index(index as usize)?.clone())
+                    }
+                    x => bail!("Don't know how to index / look up key: {:?}", x)
                 }
             }
             Expr::RowRef(slot) => Ok(row.slots[*slot].clone()), // TODO not this
@@ -746,6 +766,24 @@ impl Expr {
                     out.push((e.0, e.1.eval(ctx, row)?));
                 }
                 Ok(GramVal::Map(out))
+            }
+            Expr::Path(es) => {
+                let num_segments = (es.len() - 1) / 2;
+                let mut out = Vec::with_capacity(num_segments);
+
+                let start = unwrap_node_id(&row.slots[es[0]]).unwrap();
+                let mut i = 1;
+                while i < es.len() {
+                    let r = unwrap_rel_index(&row.slots[es[i]]).unwrap();
+                    let o = unwrap_node_id(&row.slots[es[i+1]]).unwrap();
+                    out.push((r, o));
+                    i += 2;
+                }
+
+                Ok(GramVal::Path {
+                    start,
+                    rest: out
+                })
             }
             Expr::Gt(a, b) => {
                 let a_val = a.eval(ctx, row)?;
@@ -955,6 +993,9 @@ enum GramVal {
     Map(Vec<(Token, GramVal)>),
     Node { id: usize },
     Rel { node_id: usize, rel_index: usize },
+    // Don't know about this.. lots of considerations. But TL;DR: Right now this is something like
+    // `start` is the first node id, and may be all there is. There is then 0 or more (rel_index, other_node) pairs.
+    Path{ start: usize, rest: Vec<(usize, usize)> }
 }
 
 impl GramVal {
@@ -1034,6 +1075,18 @@ impl GramVal {
                     props,
                 })
             }
+            GramVal::Path { .. } => {
+                panic!("gram backend can't project paths, yet")
+            }
+        }
+    }
+
+    fn get_index(&self, index: usize) -> Result<&GramVal> {
+        match self {
+            GramVal::List(items) => {
+                Ok(&items[index])
+            }
+            x => bail!("Don't know how to index into a {:?}", x)
         }
     }
 
@@ -1117,6 +1170,7 @@ impl Display for GramVal {
             GramVal::Rel { node_id, rel_index } => {
                 f.write_str(&format!("Rel({}/{})", node_id, rel_index))
             }
+            GramVal::Path { .. } => f.write_str(&format!("Path(<serialization not implemented in gram backend yet>)"))
         }
     }
 }
@@ -1186,6 +1240,10 @@ impl Operator for Expand {
 
                     let rel = &rels[self.next_rel_index];
                     self.next_rel_index += 1;
+
+                    if rel.deleted {
+                        continue;
+                    }
 
                     if self.rel_type.is_some() && rel.rel_type != self.rel_type.unwrap() {
                         continue;
@@ -1347,6 +1405,11 @@ impl Operator for NodeScan {
                         let node = g.nodes.get(node_id).unwrap();
 
                         if let Some(vis_node) = node.at_version(Version::new(ctx.xid, self.scope)) {
+                            if vis_node.deleted {
+                                node_id += 1;
+                                continue;
+                            }
+
                             if let Some(tok) = self.labels {
                                 if !vis_node.labels.contains(&tok) {
                                     node_id += 1;
@@ -1521,6 +1584,12 @@ enum UpdateAction {
     AppendLabel {
         entity: Slot,
         label: Token,
+    },
+    DeleteEntity {
+        entity: Expr,
+    },
+    DetachDelete {
+        node: Expr,
     }
 }
 
@@ -1648,9 +1717,31 @@ impl Operator for UpdateEntity {
                     let entity_val = &out.slots[*entity];
                     match entity_val {
                         GramVal::Node { id } => {
+                            // TODO this isn't checking if we can see the node..
                             ctx.g.borrow_mut().nodes[*id].labels.insert(*label);
                         }
                         _ => bail!("Can't add label to {:?}", entity_val)
+                    }
+                }
+                UpdateAction::DeleteEntity { entity: node } => {
+                    match node.eval(ctx, out)? {
+                        GramVal::Node{ id } => {
+                            ctx.g.borrow_mut().delete_node(id)
+                        }
+                        GramVal::Rel { node_id, rel_index } => {
+                            ctx.g.borrow_mut().delete_rel(node_id, rel_index)
+                        }
+                        GramVal::Lit(Val::Null) => (),
+                        _ => bail!("Expression to DELETE must be a node or rel")
+                    }
+                }
+                UpdateAction::DetachDelete { node } => {
+                    match node.eval(ctx, out)? {
+                        GramVal::Node{ id } => {
+                            ctx.g.borrow_mut().delete_node(id)
+                        }
+                        GramVal::Lit(Val::Null) => (),
+                        x => bail!("Expression to DELETE must be a node or rel, got {:?}", x)
                     }
                 }
             }
@@ -2382,6 +2473,7 @@ mod parser {
             labels,
             properties: props,
             rels: vec![],
+            deleted: false,
             version: Version::zero(),
         })
     }
@@ -2549,6 +2641,7 @@ pub struct Node {
     labels: HashSet<Token>,
     properties: HashMap<Token, Val>,
     rels: Vec<RelHalf>,
+    deleted: bool,
     version: Version,
 }
 
@@ -2571,6 +2664,7 @@ pub struct RelHalf {
     dir: Dir,
     other_node: usize,
     properties: Rc<RefCell<HashMap<Token, Val>>>,
+    deleted: bool,
 }
 
 #[derive(Debug)]
@@ -2591,6 +2685,11 @@ impl Graph {
             .cloned()
     }
 
+    fn delete_node(&mut self, id: usize) {
+        // TODO should explode if rels exist
+        self.nodes[id].deleted = true;
+    }
+
     fn add_node(&mut self, id: usize, n: Node) {
         while self.nodes.len() <= id {
             let filler_id = self.nodes.len();
@@ -2600,10 +2699,29 @@ impl Graph {
                 labels: Default::default(),
                 properties: Default::default(),
                 rels: vec![],
+                deleted: false,
                 version: Version::zero()
             })
         }
         self.nodes[id] = n;
+    }
+
+    fn delete_rel(&mut self, node_id: usize, rel_index: usize) {
+        let n1 = &mut self.nodes[node_id];
+        let rel1 = &mut n1.rels[rel_index];
+        rel1.deleted = true;
+        let rel2_dir = rel1.dir.reverse();
+        let rel2_other_node = n1.id;
+        let rel2_rel_type = rel1.rel_type;
+        let n2id = rel1.other_node;
+
+        let n2 = &mut self.nodes[n2id];
+        for r in &mut n2.rels {
+            if r.other_node == rel2_other_node && r.rel_type == rel2_rel_type && r.dir == rel2_dir {
+                r.deleted = true;
+                break
+            }
+        }
     }
 
     // Add a rel, return the index of the rel from the start nodes perspective
@@ -2621,6 +2739,7 @@ impl Graph {
             dir: Dir::Out,
             other_node: to,
             properties: Rc::clone(&wrapped_props),
+            deleted: false
         });
         let index = fromrels.len() - 1;
         self.nodes[to].rels.push(RelHalf {
@@ -2628,6 +2747,7 @@ impl Graph {
             dir: Dir::In,
             other_node: from,
             properties: wrapped_props,
+            deleted: false
         });
         index
     }
@@ -2675,6 +2795,7 @@ fn append_node(
         labels,
         properties: node_properties,
         rels: vec![],
+        deleted: false,
         version,
     };
 
@@ -3266,5 +3387,20 @@ mod tests {
         while cursor.next().unwrap().is_some() {
             println!("{:?}", cursor.projection)
         }
+    }
+}
+
+fn unwrap_node_id(v: &GramVal) -> Result<usize> {
+    match v {
+        GramVal::Node { id, .. } => Ok(*id),
+        GramVal::Lit(Val::Node(n)) => Ok(n.id),
+        _ => bail!("expected a node, got {:?}", v)
+    }
+}
+
+fn unwrap_rel_index(v: &GramVal) -> Result<usize> {
+    match v {
+        GramVal::Rel { rel_index, .. } => Ok(*rel_index),
+        _ => bail!("expected a GramVal::Rel, got {:?}", v)
     }
 }

@@ -18,7 +18,9 @@ pub fn plan_with(
     // want to do it unless we have to.
 
     // The ordering enforcement is only needed if there are side-effects without ordering
-    // guarantees "upstream" in the plan
+    // guarantees "upstream" in the plan.
+    // The intent here is that the side-effects calculation can get smarter over time, so that
+    // we only include the Barrier if there are activities later on that may see the side-effects
     if pc.unordered_sideffects.len() > 0 {
         let sideffects = mem::replace(&mut pc.unordered_sideffects, Default::default());
         plan = LogicalPlan::Barrier {
@@ -398,7 +400,6 @@ mod tests {
     fn plan_with_two_withs_only_has_one_barrier() -> Result<(), Error> {
         let mut p = plan("CREATE (n) WITH 1 as p MATCH (m) WITH 2 as o")?;
 
-        let id_n = p.tokenize("n");
         let id_m = p.tokenize("m");
         let id_p = p.tokenize("p");
         let id_o = p.tokenize("o");

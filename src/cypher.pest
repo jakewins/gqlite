@@ -80,18 +80,6 @@ list_comprehension = {
   "[" ~ id ~ ^"IN" ~ expr ~ "|" ~ expr ~ "]"
 }
 
-// Multiple labels are supported for CREATE but not yet for MATCH
-node = { "(" ~ id? ~ ( ":" ~ label )* ~ map? ~ ")" }
-label = { id }
-
-rel = { left_arrow? ~ ( ( "-[" ~ id? ~ ( ":" ~ rel_type )? ~ map? ~ "]-" ) | "--" | "-" ) ~ right_arrow? }
-rel_type = { id }
-left_arrow = { "<" }
-right_arrow = { ">" }
-
-patterns = _{ pattern ~ ( "," ~ pattern )* }
-pattern = { node ~ ( rel ~ node )* }
-
 projection = { expr ~ (^"AS" ~ id)? }
 projections = { projection ~ ( "," ~ projection )* }
 project_all = { "*" }
@@ -110,7 +98,21 @@ distinct_clause = { ^"DISTINCT" }
 
 where_clause = { ^"WHERE" ~ expr }
 
+// Multiple labels are supported for CREATE but not yet for MATCH
+node = { "(" ~ id? ~ ( ":" ~ label )* ~ map? ~ ")" }
+label = { id }
+
+rel = { left_arrow? ~ ( ( "-[" ~ id? ~ ( ":" ~ rel_type )? ~ map? ~ "]-" ) | "--" | "-" ) ~ right_arrow? }
+rel_type = { id }
+left_arrow = { "<" }
+right_arrow = { ">" }
+
+pattern = { node ~ ( rel ~ node )* }
+patterns = _{ pattern ~ ( "," ~ pattern )* }
 merge_patterns = { patterns }
+pattern_name = { id ~ "=" }
+match_pattern = _{ (pattern | (pattern_name ~ pattern) ) }
+match_patterns = _{ match_pattern ~ ( "," ~ match_pattern )* }
 
 on_create_clause = { ^"ON" ~ ^"CREATE" ~ ^"SET" ~ assignments }
 on_match_clause = { ^"ON" ~ ^"MATCH" ~ ^"SET" ~ assignments }
@@ -123,14 +125,17 @@ limit_clause = { ^"LIMIT" ~ expr }
 
 optional_clause = { ^"OPTIONAL" }
 
+detach_clause = { ^"DETACH" }
+
 create_stmt = { ^"CREATE" ~ patterns }
 set_stmt = { ^"SET" ~ assignments }
+delete_stmt = { detach_clause? ~ ^"DELETE" ~ expr }
 merge_stmt = { ^"MERGE" ~ merge_patterns ~ (on_create_clause | on_match_clause)* }
-match_stmt = { optional_clause? ~ ^"MATCH" ~ patterns ~ where_clause? }
+match_stmt = { optional_clause? ~ ^"MATCH" ~ match_patterns ~ where_clause? }
 with_stmt = { ^"WITH" ~ distinct_clause? ~ ( projections | project_all ) ~ where_clause? ~ order_clause? ~ skip_clause? ~ limit_clause? }
 unwind_stmt = { ^"UNWIND" ~ expr ~ ^"AS" ~ id }
 call_stmt = { ^"CALL" ~ function_id ~  "(" ~ arglist? ~ ")" }
 return_stmt = { ^"RETURN" ~ distinct_clause? ~ ( projections | project_all ) ~ order_clause? ~ skip_clause? ~ limit_clause? }
 
-statement = _{ create_stmt | set_stmt | merge_stmt | match_stmt | unwind_stmt | call_stmt | with_stmt }
+statement = _{ create_stmt | set_stmt | delete_stmt | merge_stmt | match_stmt | unwind_stmt | call_stmt | with_stmt }
 query = { SOI ~ ( statement )* ~ return_stmt? ~ EOI }
