@@ -5,7 +5,7 @@
 
 // It is currently single threaded, and provides no data durability guarantees.
 
-use crate::backend::gram::functions::AggregatingFuncSpec;
+use crate::backend::gram::functions::{AggregatingFuncSpec, MapAggregatingFunc};
 use crate::backend::{Backend, BackendCursor, BackendDesc, Token, Tokens};
 use crate::frontend::{Dir, LogicalPlan};
 use crate::{frontend, Error, Row, Slot, Val};
@@ -22,11 +22,15 @@ use std::rc::Rc;
 use std::time::SystemTime;
 use uuid::v1::{Context as UuidContext, Timestamp};
 use uuid::Uuid;
+use crate::backend::gram::store::{Graph, Version};
+
+mod marshal;
+mod store;
 
 #[derive(Debug)]
 pub struct GramBackend {
     tokens: Rc<RefCell<Tokens>>,
-    g: Rc<RefCell<Graph>>,
+    g: Rc<RefCell<store::Graph>>,
     file: Rc<RefCell<File>>,
     aggregators: HashMap<Token, Box<dyn AggregatingFuncSpec>>,
     next_xid: u32,
@@ -37,7 +41,7 @@ impl GramBackend {
         let mut tokens = Tokens {
             table: Default::default(),
         };
-        let g = parser::load(&mut tokens, &mut file)?;
+        let g = marshal::load(&mut tokens, &mut file)?;
 
         let mut aggregators = HashMap::new();
         for agg in functions::aggregating(&mut tokens) {
@@ -359,7 +363,12 @@ impl GramBackend {
                 }
             }
             frontend::Expr::Map(es) => {
-
+                let mut aggregating = Vec::new();
+                for e in es {
+                    // TODO this will obviously break if there is anything non-aggregating in place..
+                    aggregating.push((e.key, self.convert_aggregating_expr(e.val)));
+                }
+                Box::new(MapAggregatingFunc { aggregating })
             }
             _ => panic!(
                 "The gram backend does not support this expression type in aggregations yet: {:?}",
@@ -629,7 +638,7 @@ struct Context {
     tokens: Rc<RefCell<Tokens>>,
     g: Rc<RefCell<Graph>>,
     file: Rc<RefCell<File>>,
-    xid: u32,
+    xid: Version,
     // some expressions create local scopes while they evaluate (eg. list comprehensions),
     // those locals go on this stack.
     stack: Vec<GramVal>,
@@ -770,6 +779,10 @@ impl Expr {
             Expr::Path(es) => {
                 let num_segments = (es.len() - 1) / 2;
                 let mut out = Vec::with_capacity(num_segments);
+
+                if let GramVal::Lit(Val::Null) = &row.slots[es[0]] {
+                    return Ok(GramVal::Lit(Val::Null));
+                }
 
                 let start = unwrap_node_id(&row.slots[es[0]]).unwrap();
                 let mut i = 1;
@@ -942,7 +955,7 @@ impl Expr {
                 let s: &GramVal = &row.slots[*slot];
                 let node_id = s.as_node_id();
                 let g = ctx.g.borrow();
-                let node = g.nodes.get(node_id).unwrap();
+                let node = g.get_node(node_id, ctx.xid).unwrap();
                 Ok(GramVal::Lit(Val::Bool(node.labels.contains(label))))
             }
             Expr::ListComprehension {
@@ -1020,7 +1033,7 @@ impl GramVal {
                 Val::Map(out)
             }
             GramVal::Node { id } => {
-                let n = &ctx.g.borrow().nodes[*id];
+                let n = ctx.g.borrow().get_node(*id, ctx.xid);
                 let mut props = crate::Map::new();
                 for (k, v) in &n.properties {
                     props.push((
@@ -1039,7 +1052,7 @@ impl GramVal {
                 })
             }
             GramVal::Rel { node_id, rel_index } => {
-                let n = &ctx.g.borrow().nodes[*node_id];
+                let n = ctx.g.borrow().get_node(*node_id, ctx.xid);
                 let rel = &n.rels[*rel_index];
 
                 let rel_type = ctx
@@ -1230,7 +1243,7 @@ impl Operator for Expand {
                 ExpandState::InNode => {
                     let node = out.slots[self.src_slot].as_node_id();
                     let g = ctx.g.borrow();
-                    let rels = &g.nodes[node].rels;
+                    let rels = &g.get_node(node, ctx.xid).rels;
                     if self.next_rel_index >= rels.len() {
                         // No more rels on this node
                         self.state = ExpandState::NextNode;
@@ -1293,7 +1306,7 @@ impl Operator for ExpandRel {
         let rel = &out.slots[self.src_rel_slot];
         match rel {
             GramVal::Rel { node_id, rel_index } => {
-                let node_data = &ctx.g.borrow().nodes[*node_id];
+                let node_data = &ctx.g.borrow().get_node(*node_id, ctx.xid);
                 let rel_data = &node_data.rels[*rel_index];
                 out.slots[self.end_node] = GramVal::Node { id: *node_id };
                 out.slots[self.start_node] = GramVal::Node {
@@ -1335,7 +1348,7 @@ impl Operator for ExpandInto {
             let right_raw = &out.slots[self.right_node_slot];
             match (left_raw, right_raw) {
                 (GramVal::Node { id: left }, GramVal::Node { id: right }) => {
-                    let left_node = &ctx.g.borrow().nodes[*left];
+                    let left_node = &ctx.g.borrow().get_node(*left, ctx.xid);
                     for (rel_index, candidate) in left_node.rels.iter().enumerate() {
                         if let Some(rt) = self.rel_type {
                             if candidate.rel_type != rt {
@@ -1359,7 +1372,7 @@ impl Operator for ExpandInto {
     }
 }
 
-// For each src row, perform a full no de scan with the specified filters
+// For each src row, perform a full node scan with the specified filters
 #[derive(Debug)]
 struct NodeScan {
     pub src: Box<dyn Operator>,
@@ -1402,9 +1415,9 @@ impl Operator for NodeScan {
                     let g = ctx.g.borrow();
                     let mut node_id = *next_node;
                     while g.nodes.len() > node_id {
-                        let node = g.nodes.get(node_id).unwrap();
+                        let node = g.get_node(node_id, ctx.xid).unwrap();
 
-                        if let Some(vis_node) = node.at_version(Version::new(ctx.xid, self.scope)) {
+                        if let Some(vis_node) = node.at_version(store::Version::new(ctx.xid, self.scope)) {
                             if vis_node.deleted {
                                 node_id += 1;
                                 continue;
@@ -1732,16 +1745,36 @@ impl Operator for UpdateEntity {
                             ctx.g.borrow_mut().delete_rel(node_id, rel_index)
                         }
                         GramVal::Lit(Val::Null) => (),
-                        _ => bail!("Expression to DELETE must be a node or rel")
+                        GramVal::Path { start, rest } => {
+                            let mut g = ctx.g.borrow_mut();
+                            let mut current_node = start;
+                            for (rel_index, next_node) in rest {
+                                g.delete_rel(current_node, rel_index);
+                                g.delete_node(current_node);
+                                current_node = next_node;
+                            }
+                        }
+                        x => bail!("Expression to DELETE must be a node or rel, got {:?}", x)
                     }
                 }
                 UpdateAction::DetachDelete { node } => {
                     match node.eval(ctx, out)? {
                         GramVal::Node{ id } => {
-                            ctx.g.borrow_mut().delete_node(id)
+                            let mut g = ctx.g.borrow_mut();
+                            g.detach_delete_node(id)
+                        }
+                        GramVal::Rel { node_id, rel_index } => {
+                            ctx.g.borrow_mut().delete_rel(node_id, rel_index)
+                        }
+                        GramVal::Path { start, rest } => {
+                            let mut g = ctx.g.borrow_mut();
+                            g.detach_delete_node(start);
+                            for (_, next_node) in rest {
+                                g.detach_delete_node(next_node);
+                            }
                         }
                         GramVal::Lit(Val::Null) => (),
-                        x => bail!("Expression to DELETE must be a node or rel, got {:?}", x)
+                        x => bail!("Expression to DETACH DELETE must be a node or rel, got {:?}", x)
                     }
                 }
             }
@@ -2400,359 +2433,6 @@ impl Operator for Barrier {
     }
 }
 
-mod parser {
-    use super::Val;
-    use crate::backend::gram::{Graph, Node, Version};
-    use crate::backend::{Token, Tokens};
-    use crate::pest::Parser;
-    use anyhow::Result;
-    use pest::iterators::Pair;
-    use std::collections::HashMap;
-    use std::collections::HashSet;
-    use std::fs::File;
-    use std::io::Read;
-
-    #[derive(Parser)]
-    #[grammar = "backend/gram.pest"]
-    pub struct GramParser;
-
-    /// Indicates how large a buffer to pre-allocate before reading the entire file.
-    fn initial_buffer_size(file: &File) -> usize {
-        // Allocate one extra byte so the buffer doesn't need to grow before the
-        // final `read` call at the end of the file.  Don't worry about `usize`
-        // overflow because reading will fail regardless in that case.
-        file.metadata().map(|m| m.len() as usize + 1).unwrap_or(0)
-    }
-
-    fn read_to_string(file: &mut File) -> Result<String> {
-        //todo lock this (and other io on the file)
-        let mut string = String::with_capacity(initial_buffer_size(&file));
-        file.read_to_string(&mut string)?;
-        Ok(string)
-    }
-
-    struct ParserContext<'a> {
-        anon_id_gen: u32,
-        node_ids: Tokens,
-        tokens: &'a mut Tokens,
-    }
-
-    fn parse_node(item: Pair<Rule>, ctx: &mut ParserContext) -> Result<Node> {
-        let mut identifier: Option<String> = None;
-        let mut props: HashMap<Token, Val> = HashMap::new();
-        let mut labels: HashSet<Token> = HashSet::new();
-
-        for part in item.into_inner() {
-            match part.as_rule() {
-                Rule::id => identifier = Some(part.as_str().to_string()),
-                Rule::label => {
-                    for label in part.into_inner() {
-                        labels.insert(ctx.tokens.tokenize(label.as_str()));
-                    }
-                }
-                Rule::map => parse_props(ctx, &mut props, part),
-                _ => panic!("what? {:?} / {}", part.as_rule(), part.as_str()),
-            }
-        }
-
-        let gid_string = identifier.unwrap_or_else(|| {
-            // Entry with no identifier, generate one
-            loop {
-                let candidate = format!("anon#{}", ctx.anon_id_gen);
-                if !ctx.node_ids.table.contains_key(&candidate) {
-                    return candidate;
-                }
-                ctx.anon_id_gen += 1;
-            }
-        });
-        let gid = ctx.tokens.tokenize(&gid_string);
-        let id = ctx.node_ids.tokenize(&gid_string);
-        Ok(Node {
-            id,
-            gid,
-            labels,
-            properties: props,
-            rels: vec![],
-            deleted: false,
-            version: Version::zero(),
-        })
-    }
-
-    fn parse_props(ctx: &mut ParserContext, props: &mut HashMap<usize, Val>, part: Pair<Rule>) {
-        for pair in part.into_inner() {
-            let mut key: Option<String> = None;
-            let mut val = None;
-            match pair.as_rule() {
-                Rule::map_pair => {
-                    for pair_part in pair.into_inner() {
-                        match pair_part.as_rule() {
-                            Rule::id => key = Some(pair_part.as_str().to_string()),
-                            Rule::expr => {
-                                let stringval = pair_part.into_inner().next().unwrap();
-                                let stringval_content = stringval.into_inner().next().unwrap();
-                                val = Some(stringval_content.as_str().to_string())
-                            }
-                            _ => panic!("what? {:?} / {}", pair_part.as_rule(), pair_part.as_str()),
-                        }
-                    }
-                }
-                _ => panic!("what? {:?} / {}", pair.as_rule(), pair.as_str()),
-            }
-            let key_str = key.unwrap();
-            props.insert(ctx.tokens.tokenize(&key_str), Val::String(val.unwrap()));
-        }
-    }
-
-    pub fn load(tokens: &mut Tokens, file: &mut File) -> Result<Graph> {
-        let mut g = Graph { nodes: vec![] };
-
-        let query_str = read_to_string(file).unwrap();
-        let mut parse_result = GramParser::parse(Rule::gram, &query_str)?;
-
-        let gram = parse_result.next().unwrap(); // get and unwrap the `file` rule; never fails
-
-        let node_ids = Tokens {
-            table: Default::default(),
-        };
-
-        let mut pc = ParserContext {
-            anon_id_gen: 0,
-            node_ids,
-            tokens,
-        };
-
-        for item in gram.into_inner() {
-            match item.as_rule() {
-                Rule::path => {
-                    let mut start_identifier: Option<Token> = None;
-                    let mut end_identifier: Option<Token> = None;
-
-                    let mut rel_type = None;
-                    let mut rel_props: HashMap<Token, Val> = HashMap::new();
-
-                    for part in item.into_inner() {
-                        match part.as_rule() {
-                            Rule::node => {
-                                let n = parse_node(part, &mut pc)?;
-                                if start_identifier == None {
-                                    start_identifier = Some(n.id);
-                                } else {
-                                    end_identifier = Some(n.id);
-                                }
-                                // need like a merge_node operation; but for now, insert the
-                                // first occurrence of a node, so subsequent ones won't clear out
-                                // properties
-                                if g.nodes.len() <= n.id {
-                                    g.add_node(n.id, n);
-                                }
-                            }
-                            Rule::rel => {
-                                for rel_part in part.into_inner() {
-                                    match rel_part.as_rule() {
-                                        Rule::map => {
-                                            parse_props(&mut pc, &mut rel_props, rel_part);
-                                        }
-                                        Rule::rel_type => {
-                                            let rt_id = rel_part.into_inner().next().unwrap();
-                                            rel_type = Some(pc.node_ids.tokenize(
-                                                rt_id.into_inner().next().unwrap().as_str(),
-                                            ));
-                                        }
-                                        _ => panic!(
-                                            "what? {:?} / {}",
-                                            rel_part.as_rule(),
-                                            rel_part.as_str()
-                                        ),
-                                    }
-                                }
-                            }
-                            _ => panic!("what? {:?} / {}", part.as_rule(), part.as_str()),
-                        }
-                    }
-
-                    g.add_rel(
-                        start_identifier.unwrap(),
-                        end_identifier.unwrap(),
-                        rel_type.unwrap_or_else(|| pc.tokens.tokenize("_")),
-                        rel_props,
-                    );
-                }
-                Rule::node => {
-                    let n = parse_node(item, &mut pc)?;
-                    g.add_node(n.id, n)
-                }
-                _ => (),
-            }
-        }
-
-        Ok(g)
-    }
-}
-
-#[derive(Debug, Eq, PartialEq)]
-pub struct Version {
-    xid: u32,
-    // Say you have a query that does something insane, like
-    //
-    // MATCH () CREATE (a)
-    // WITH a MATCH () CREATE (b)
-    // WITH b MATCH () CREATE (c)
-    //
-    // Then the first match should not see *any* nodes created by the subsequent
-    // CREATE statements. The second match should see nodes created by CREATE (a),
-    // and the last match should see nodes created by both CREATE (a) and CREATE (b)
-    //
-    // Say the initial db is a billion nodes, so we'll be at 1 billion old nodes, 1 billion
-    // "invisible" nodes at the first NodeScan for the first MATCH.. TL;DR this is another
-    // piece of infinitely large user-controlled state, I think? we need to know this for
-    // every node, rel etc
-    //
-    // So, we do a sort of intra-query multi-versioning, tracking not just which XID a change
-    // is occurring in, but what section of a given query it happened in.. the problem with this
-    // is that it blows up the amount of space we need to keep around for versions, making them
-    // significantly larger.. hrm.
-    //
-    // TL;DR cursor stability.
-    //
-    // How does PG do this, for INSERT INTO SELECT FROM statements? I guess that's just one
-    // level, not an arbitrary number of stable cursors layering on top of one another.. cypher
-    // lets you express arbitrarily deep pipelines.. but is there any difference between that
-    // and multiple INSERT INTO SELECT FROM statements within one tx? How do they handle stability
-    // in that case?
-    scope: u8,
-}
-
-impl Version {
-    pub fn zero() -> Self {
-        Version{ xid: 0, scope: 0 }
-    }
-
-    pub fn new(xid: u32, scope: u8) -> Version {
-        Version{ xid, scope }
-    }
-}
-
-#[derive(Debug)]
-pub struct Node {
-    // Identifier for this node, matches it's index into the node vector in g
-    id: usize,
-    // Identifier assigned this node in the gram file
-    gid: Token,
-    labels: HashSet<Token>,
-    properties: HashMap<Token, Val>,
-    rels: Vec<RelHalf>,
-    deleted: bool,
-    version: Version,
-}
-
-impl Node {
-    pub fn at_version(&self, v: Version) -> Option<&Self> {
-        if self.version.xid != v.xid || self.version.scope < v.scope {
-            // Because we are single-threaded, if the latest version isn't the executing
-            // tx version, then this is the version that's visible
-            return Some(&self);
-        }
-
-        // TODO: This is wrong right, this makes nodes with modifications dissappear
-        None
-    }
-}
-
-#[derive(Debug)]
-pub struct RelHalf {
-    rel_type: Token,
-    dir: Dir,
-    other_node: usize,
-    properties: Rc<RefCell<HashMap<Token, Val>>>,
-    deleted: bool,
-}
-
-#[derive(Debug)]
-pub struct Graph {
-    nodes: Vec<Node>,
-}
-
-impl Graph {
-    fn get_node_prop(&self, node_id: usize, prop: Token) -> Option<Val> {
-        self.nodes[node_id].properties.get(&prop).cloned()
-    }
-
-    fn get_rel_prop(&self, node_id: usize, rel_index: usize, prop: Token) -> Option<Val> {
-        self.nodes[node_id].rels[rel_index]
-            .properties
-            .borrow()
-            .get(&prop)
-            .cloned()
-    }
-
-    fn delete_node(&mut self, id: usize) {
-        // TODO should explode if rels exist
-        self.nodes[id].deleted = true;
-    }
-
-    fn add_node(&mut self, id: usize, n: Node) {
-        while self.nodes.len() <= id {
-            let filler_id = self.nodes.len();
-            self.nodes.push(Node {
-                id: filler_id,
-                gid: 0,
-                labels: Default::default(),
-                properties: Default::default(),
-                rels: vec![],
-                deleted: false,
-                version: Version::zero()
-            })
-        }
-        self.nodes[id] = n;
-    }
-
-    fn delete_rel(&mut self, node_id: usize, rel_index: usize) {
-        let n1 = &mut self.nodes[node_id];
-        let rel1 = &mut n1.rels[rel_index];
-        rel1.deleted = true;
-        let rel2_dir = rel1.dir.reverse();
-        let rel2_other_node = n1.id;
-        let rel2_rel_type = rel1.rel_type;
-        let n2id = rel1.other_node;
-
-        let n2 = &mut self.nodes[n2id];
-        for r in &mut n2.rels {
-            if r.other_node == rel2_other_node && r.rel_type == rel2_rel_type && r.dir == rel2_dir {
-                r.deleted = true;
-                break
-            }
-        }
-    }
-
-    // Add a rel, return the index of the rel from the start nodes perspective
-    fn add_rel(
-        &mut self,
-        from: usize,
-        to: usize,
-        rel_type: Token,
-        props: HashMap<Token, Val>,
-    ) -> usize {
-        let wrapped_props = Rc::new(RefCell::new(props));
-        let fromrels = &mut self.nodes[from].rels;
-        fromrels.push(RelHalf {
-            rel_type,
-            dir: Dir::Out,
-            other_node: to,
-            properties: Rc::clone(&wrapped_props),
-            deleted: false
-        });
-        let index = fromrels.len() - 1;
-        self.nodes[to].rels.push(RelHalf {
-            rel_type,
-            dir: Dir::In,
-            other_node: from,
-            properties: wrapped_props,
-            deleted: false
-        });
-        index
-    }
-}
-
 fn generate_uuid() -> Uuid {
     // TODO: there should be a single context for the whole backend
     let context = UuidContext::new(42);
@@ -2770,7 +2450,7 @@ fn append_node(
     tokens_in: Rc<RefCell<Tokens>>,
     labels: HashSet<Token>,
     node_properties: HashMap<Token, Val>,
-    version: Version,
+    version: store::Version,
 ) -> Result<GramVal, Error> {
     let p = serialize_props(ctx, &node_properties);
     let gram_identifier = generate_uuid().to_hyphenated().to_string();
@@ -2894,7 +2574,7 @@ fn serialize_val(_ctx: &mut Context, v: &Val) -> String {
 
 mod functions {
     use super::{Context, Expr, GramRow, GramVal, Val};
-    use crate::backend::{FuncSignature, FuncType, Tokens};
+    use crate::backend::{FuncSignature, FuncType, Tokens, Token};
     use crate::{Result, Type};
     use std::cmp::Ordering;
     use std::fmt::Debug;
@@ -3031,12 +2711,61 @@ mod functions {
     }
 
     pub(super) trait AggregatingFunc: Debug {
-        fn init(&mut self, ctx: &mut Context) -> Box<dyn Aggregation>;
+        fn init(&self, ctx: &mut Context) -> Box<dyn Aggregation>;
     }
 
     pub(super) trait Aggregation: Debug {
         fn apply(&mut self, ctx: &mut Context, row: &mut GramRow) -> Result<()>;
         fn complete(&mut self) -> Result<&GramVal>;
+    }
+
+    // This describes a map expression that, within it, contains an aggregation.
+    // This is just the plumbing and delegation to those nested aggregations.
+    #[derive(Debug)]
+    pub(super) struct MapAggregatingFunc {
+        pub(super) aggregating: Vec<(Token, Box<dyn AggregatingFunc>)>,
+    }
+
+    impl AggregatingFunc for MapAggregatingFunc {
+        fn init(&self, ctx: &mut Context) -> Box<dyn Aggregation> {
+            // Initialize nested aggregators
+            let aggregations = self.aggregating.iter().map(|(k, agg_expr)| {
+                (*k, agg_expr.init(ctx))
+            }).collect();
+            println!("{:?}", aggregations);
+            Box::new(MapAggregation { aggregations, output: None })
+        }
+    }
+
+    #[derive(Debug)]
+    pub(super) struct MapAggregation {
+        aggregations: Vec<(Token, Box<dyn Aggregation>)>,
+        output: Option<GramVal>,
+    }
+
+    impl Aggregation for MapAggregation {
+        fn apply(&mut self, ctx: &mut Context, row: &mut GramRow) -> Result<()> {
+            for (_, aggregation) in self.aggregations.iter_mut() {
+                aggregation.apply(ctx, row)?;
+            }
+            Ok(())
+        }
+
+        fn complete(&mut self) -> Result<&GramVal> {
+            // TODO this is garbage, and points to an interesting thing here where
+            //      we can't wrap the borrow we're getting from the nested aggregagations
+            //      also note the horror where we're storing this whole thing on the
+            //      struct just to be able to return a borrow
+            let mut out = Vec::with_capacity(self.aggregations.len());
+            for (k, aggregation) in self.aggregations.iter_mut() {
+                let v = aggregation.complete()?;
+                out.push((*k, v.clone()));
+            }
+            println!("{:?}", out);
+            self.output = Some(GramVal::Map(out));
+
+            Ok(self.output.as_ref().unwrap())
+        }
     }
 
     #[derive(Debug)]
@@ -3076,7 +2805,7 @@ mod functions {
     }
 
     impl AggregatingFunc for Min {
-        fn init(&mut self, _ctx: &mut Context) -> Box<dyn Aggregation> {
+        fn init(&self, _ctx: &mut Context) -> Box<dyn Aggregation> {
             Box::new(MinAggregation {
                 arg: self.arg.clone(),
                 min: None,
@@ -3154,7 +2883,7 @@ mod functions {
     }
 
     impl AggregatingFunc for Max {
-        fn init(&mut self, _ctx: &mut Context) -> Box<dyn Aggregation> {
+        fn init(&self, _ctx: &mut Context) -> Box<dyn Aggregation> {
             Box::new(MaxAggregation {
                 arg: self.arg.clone(),
                 max: None,
@@ -3228,7 +2957,7 @@ mod functions {
     struct Count {}
 
     impl AggregatingFunc for Count {
-        fn init(&mut self, _ctx: &mut Context) -> Box<dyn Aggregation> {
+        fn init(&self, _ctx: &mut Context) -> Box<dyn Aggregation> {
             Box::new(CountAggregation {
                 counter: 0,
                 out: GramVal::Lit(Val::Int(0)),
@@ -3291,7 +3020,7 @@ mod functions {
     }
 
     impl AggregatingFunc for Collect {
-        fn init(&mut self, _ctx: &mut Context) -> Box<dyn Aggregation> {
+        fn init(&self, _ctx: &mut Context) -> Box<dyn Aggregation> {
             Box::new(CollectAggregation {
                 arg: self.arg.clone(),
                 collection: GramVal::List(Vec::new()),

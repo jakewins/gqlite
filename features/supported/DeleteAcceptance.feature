@@ -368,7 +368,7 @@ Feature: DeleteAcceptance
     And the side effects should be:
       | -nodes         | 2 |
       | -relationships | 2 |
-      | -labels        | 1 |
+      | -labels        | 2 |
 
   Scenario: Delete relationship with bidirectional matching
     Given an empty graph

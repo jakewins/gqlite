@@ -129,7 +129,7 @@ detach_clause = { ^"DETACH" }
 
 create_stmt = { ^"CREATE" ~ patterns }
 set_stmt = { ^"SET" ~ assignments }
-delete_stmt = { detach_clause? ~ ^"DELETE" ~ expr }
+delete_stmt = { detach_clause? ~ ^"DELETE" ~ expr ~ ("," ~ expr)* }
 merge_stmt = { ^"MERGE" ~ merge_patterns ~ (on_create_clause | on_match_clause)* }
 match_stmt = { optional_clause? ~ ^"MATCH" ~ match_patterns ~ where_clause? }
 with_stmt = { ^"WITH" ~ distinct_clause? ~ ( projections | project_all ) ~ where_clause? ~ order_clause? ~ skip_clause? ~ limit_clause? }
