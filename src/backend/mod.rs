@@ -3,7 +3,7 @@
 // logical operators the frontend emits that can act on that storage.
 //
 use crate::frontend::LogicalPlan;
-use crate::{Error, Row, Type};
+use crate::{Error, Row, Type, Val};
 use anyhow::Result;
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
@@ -24,7 +24,12 @@ pub trait Backend: Debug {
     fn tokens(&self) -> Rc<RefCell<Tokens>>;
 
     // Evaluate a logical plan and set the cursor up to process the result
-    fn eval(&mut self, plan: LogicalPlan, cursor: &mut Self::Cursor) -> Result<()>;
+    fn eval(
+        &mut self,
+        plan: LogicalPlan,
+        cursor: &mut Self::Cursor,
+        params: Option<&Val>,
+    ) -> Result<()>;
 
     // Describe this backend for the frontends benefit
     fn describe(&self) -> Result<BackendDesc, Error>;

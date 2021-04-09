@@ -5,7 +5,7 @@
 
 // It is currently single threaded, and provides no data durability guarantees.
 
-use crate::backend::gram::functions::AggregatingFuncSpec;
+use crate::backend::gram::functions::{AggregatingFuncSpec, MapAggregatingFunc};
 use crate::backend::{Backend, BackendCursor, BackendDesc, Token, Tokens};
 use crate::frontend::{Dir, LogicalPlan};
 use crate::{frontend, Error, Row, Slot, Val};
@@ -22,13 +22,18 @@ use std::rc::Rc;
 use std::time::SystemTime;
 use uuid::v1::{Context as UuidContext, Timestamp};
 use uuid::Uuid;
+use crate::backend::gram::store::{Graph, Version};
+
+mod marshal;
+mod store;
 
 #[derive(Debug)]
 pub struct GramBackend {
     tokens: Rc<RefCell<Tokens>>,
-    g: Rc<RefCell<Graph>>,
+    g: Rc<RefCell<store::Graph>>,
     file: Rc<RefCell<File>>,
     aggregators: HashMap<Token, Box<dyn AggregatingFuncSpec>>,
+    next_xid: u32,
 }
 
 impl GramBackend {
@@ -36,7 +41,7 @@ impl GramBackend {
         let mut tokens = Tokens {
             table: Default::default(),
         };
-        let g = parser::load(&mut tokens, &mut file)?;
+        let g = marshal::load(&mut tokens, &mut file)?;
 
         let mut aggregators = HashMap::new();
         for agg in functions::aggregating(&mut tokens) {
@@ -48,19 +53,21 @@ impl GramBackend {
             g: Rc::new(RefCell::new(g)),
             file: Rc::new(RefCell::new(file)),
             aggregators,
+            next_xid: 1,
         })
     }
 
     fn convert(&self, plan: LogicalPlan) -> Result<Box<dyn Operator>> {
         match plan {
             LogicalPlan::Argument => Ok(Box::new(Argument { consumed: false })),
-            LogicalPlan::NodeScan { src, slot, labels } => Ok(Box::new(NodeScan {
+            LogicalPlan::NodeScan { src, scope, slot, labels } => Ok(Box::new(NodeScan {
                 src: self.convert(*src)?,
+                scope,
                 slot,
                 labels,
                 state: NodeScanState::Idle,
             })),
-            LogicalPlan::Create { src, nodes, rels } => {
+            LogicalPlan::Create { src, scope, nodes, rels } => {
                 let mut out_nodes = Vec::with_capacity(nodes.len());
                 for (i, ns) in nodes.into_iter().enumerate() {
                     let mut props = HashMap::new();
@@ -95,13 +102,57 @@ impl GramBackend {
                 }
                 Ok(Box::new(Create {
                     src: self.convert(*src)?,
+                    scope,
                     nodes: out_nodes,
                     rels: out_rels,
                     tokens: self.tokens.clone(),
                 }))
             }
+            LogicalPlan::Update { src, scope: _, actions } => {
+                let mut out_actions = Vec::with_capacity(actions.len());
+                for action in actions {
+                    match action {
+                        frontend::UpdateAction::PropAssign { entity, key, value } => out_actions
+                            .push(UpdateAction::SingleAssign {
+                                entity,
+                                key,
+                                value: self.convert_expr(value),
+                            }),
+                        frontend::UpdateAction::PropAppend { entity, value } => {
+                            out_actions.push(UpdateAction::Append {
+                                entity,
+                                value: self.convert_expr(value),
+                            })
+                        }
+                        frontend::UpdateAction::PropOverwrite { entity, value } => {
+                            out_actions.push(UpdateAction::Overwrite {
+                                entity,
+                                value: self.convert_expr(value),
+                            })
+                        }
+                        frontend::UpdateAction::LabelSet { entity, label: label } => {
+                            out_actions.push(UpdateAction::AppendLabel { entity, label })
+                        }
+                        frontend::UpdateAction::DeleteEntity { entity: node } => {
+                            out_actions.push(UpdateAction::DeleteEntity {
+                                entity: self.convert_expr(node),
+                            })
+                        }
+                        frontend::UpdateAction::DetachDelete { node } => {
+                            out_actions.push(UpdateAction::DetachDelete{
+                                node: self.convert_expr(node),
+                            })
+                        }
+                    }
+                }
+                Ok(Box::new(UpdateEntity {
+                    src: self.convert(*src)?,
+                    actions: out_actions,
+                }))
+            }
             LogicalPlan::Expand {
                 src,
+                scope: _,
                 src_slot,
                 rel_slot,
                 dst_slot,
@@ -117,7 +168,35 @@ impl GramBackend {
                 next_rel_index: 0,
                 state: ExpandState::NextNode,
             })),
-            LogicalPlan::Selection { src, predicate } => {
+            LogicalPlan::ExpandRel {
+                src,
+                scope: _,
+                src_rel_slot,
+                start_node_slot: start_node,
+                end_node_slot: end_node,
+            } => Ok(Box::new(ExpandRel {
+                src: self.convert(*src)?,
+                src_rel_slot,
+                start_node,
+                end_node,
+            })),
+            LogicalPlan::ExpandInto {
+                src,
+                scope: _,
+                left_node_slot,
+                right_node_slot,
+                dst_slot,
+                rel_type,
+                dir,
+            } => Ok(Box::new(ExpandInto {
+                src: self.convert(*src)?,
+                left_node_slot,
+                right_node_slot,
+                dst_slot,
+                rel_type,
+                dir,
+            })),
+            LogicalPlan::Selection { src,  predicate } => {
                 // self.convert(*src)
                 Ok(Box::new(Selection {
                     src: self.convert(*src)?,
@@ -184,7 +263,7 @@ impl GramBackend {
                     projections: converted_projections,
                 }))
             }
-            LogicalPlan::Sort { src, sort_by } => {
+            LogicalPlan::Sort { src,  sort_by } => {
                 let mut conv_sort_by = Vec::with_capacity(sort_by.len());
                 for s in sort_by {
                     conv_sort_by.push(self.convert_expr(s));
@@ -218,7 +297,7 @@ impl GramBackend {
                 initialized: false,
                 slots,
             })),
-            LogicalPlan::NestLoop {
+            LogicalPlan::CartesianProduct {
                 outer,
                 inner,
                 predicate,
@@ -228,6 +307,39 @@ impl GramBackend {
                 predicate: self.convert_expr(predicate),
                 initialized: false,
             })),
+            LogicalPlan::Apply { lhs, rhs } => Ok(Box::new(Apply {
+                lhs: self.convert(*lhs)?,
+                rhs: self.convert(*rhs)?,
+                initialized: false,
+            })),
+            LogicalPlan::AntiConditionalApply {
+                lhs,
+                rhs,
+                conditions,
+            } => Ok(Box::new(AntiConditionalApply {
+                lhs: self.convert(*lhs)?,
+                rhs: self.convert(*rhs)?,
+                conditions,
+            })),
+            LogicalPlan::ConditionalApply {
+                lhs,
+                rhs,
+                conditions,
+            } => Ok(Box::new(ConditionalApply {
+                lhs: self.convert(*lhs)?,
+                rhs: self.convert(*rhs)?,
+                conditions,
+            })),
+            LogicalPlan::Barrier {
+                src, ..
+            } => {
+                Ok(Box::new(Barrier{
+                    src: self.convert(*src)?,
+                    buf: None,
+                    ptr: 0
+                }))
+            }
+            other => Err(anyhow!("gram backend does not support {:?} yet", other)),
         }
     }
 
@@ -242,7 +354,7 @@ impl GramBackend {
                     for a in args {
                         arguments.push(self.convert_expr(a));
                     }
-                    return f.init(arguments);
+                    f.init(arguments)
                 } else {
                     panic!(
                         "The gram backend doesn't support nesting regular functions with aggregates yet: {:?}",
@@ -250,8 +362,16 @@ impl GramBackend {
                     )
                 }
             }
+            frontend::Expr::Map(es) => {
+                let mut aggregating = Vec::new();
+                for e in es {
+                    // TODO this will obviously break if there is anything non-aggregating in place..
+                    aggregating.push((e.key, self.convert_aggregating_expr(e.val)));
+                }
+                Box::new(MapAggregatingFunc { aggregating })
+            }
             _ => panic!(
-                "The gram backend does not support this expression type yet: {:?}",
+                "The gram backend does not support this expression type in aggregations yet: {:?}",
                 expr
             ),
         }
@@ -297,8 +417,26 @@ impl GramBackend {
                 ),
             },
 
-            frontend::Expr::Prop(e, props) => Expr::Prop(Box::new(self.convert_expr(*e)), props),
-            frontend::Expr::Slot(s) => Expr::Slot(s),
+            frontend::Expr::ListComprehension {
+                src,
+                stackslot,
+                map_expr,
+            } => Expr::ListComprehension {
+                src: Box::new(self.convert_expr(*src)),
+                stackslot,
+                map_expr: Box::new(self.convert_expr(*map_expr)),
+            },
+
+            frontend::Expr::Prop(e, keys) => Expr::Prop(Box::new(self.convert_expr(*e)), keys),
+            frontend::Expr::DynProp(e, key) => Expr::DynProp(
+                Box::new(self.convert_expr(*e)),
+                Box::new(self.convert_expr(*key)),
+            ),
+
+            frontend::Expr::Param(ptok) => Expr::Param(ptok),
+
+            frontend::Expr::RowRef(s) => Expr::RowRef(s),
+            frontend::Expr::StackRef(s) => Expr::StackRef(s),
             frontend::Expr::List(es) => {
                 let mut items = Vec::with_capacity(es.len());
                 for e in es {
@@ -315,15 +453,22 @@ impl GramBackend {
                 Expr::Map(items)
             }
 
+            frontend::Expr::Path(es) => {
+                Expr::Path(es)
+            }
+
             frontend::Expr::FuncCall { name, args } => {
                 // TODO lol
+                let convargs = args.iter().map(|i| self.convert_expr(i.clone())).collect();
                 let mut tokens = self.tokens.borrow_mut();
                 if name == tokens.tokenize("not") {
-                    let convargs = args.iter().map(|i| self.convert_expr(i.clone())).collect();
-                    return Expr::Call(functions::Func::Not, convargs);
+                    Expr::Call(functions::Func::Not, convargs)
                 } else if name == tokens.tokenize("abs") {
-                    let convargs = args.iter().map(|i| self.convert_expr(i.clone())).collect();
-                    return Expr::Call(functions::Func::Abs, convargs);
+                    Expr::Call(functions::Func::Abs, convargs)
+                } else if name == tokens.tokenize("keys") {
+                    Expr::Call(functions::Func::Keys, convargs)
+                } else if name == tokens.tokenize("range") {
+                    Expr::Call(functions::Func::Range, convargs)
                 } else {
                     panic!("Unknown function: {:?}", tokens.lookup(name).unwrap(),)
                 }
@@ -333,9 +478,9 @@ impl GramBackend {
             frontend::Expr::And(terms) => {
                 Expr::And(terms.iter().map(|e| self.convert_expr(e.clone())).collect())
             }
-
+            frontend::Expr::Not(e) => Expr::Not(Box::new(self.convert_expr(*e))),
             frontend::Expr::HasLabel(slot, label) => Expr::HasLabel { slot, label },
-
+            frontend::Expr::IsNull(term) => Expr::IsNull(Box::new(self.convert_expr(*term))),
             _ => panic!(
                 "The gram backend does not support this expression type yet: {:?}",
                 expr
@@ -348,11 +493,16 @@ impl Backend for GramBackend {
     type Cursor = GramCursor;
 
     fn new_cursor(&mut self) -> GramCursor {
+        let xid = self.next_xid;
+        self.next_xid += 1;
         GramCursor {
             ctx: Context {
                 tokens: Rc::clone(&self.tokens),
                 g: Rc::clone(&self.g),
                 file: Rc::clone(&self.file),
+                stack: vec![GramVal::Lit(Val::Null); 16],
+                parameters: Default::default(),
+                xid,
             },
             plan: None,
             slots: vec![],
@@ -365,7 +515,12 @@ impl Backend for GramBackend {
         Rc::clone(&self.tokens)
     }
 
-    fn eval(&mut self, plan: LogicalPlan, cursor: &mut GramCursor) -> Result<(), Error> {
+    fn eval(
+        &mut self,
+        plan: LogicalPlan,
+        cursor: &mut GramCursor,
+        params: Option<&Val>,
+    ) -> Result<(), Error> {
         let slots = match &plan {
             LogicalPlan::ProduceResult { fields, .. } => fields.clone(),
             _ => Vec::new(),
@@ -375,10 +530,30 @@ impl Backend for GramBackend {
         }
 
         let plan = self.convert(plan)?;
+
+        let mapped_params = match params {
+            None => HashMap::new(),
+            Some(Val::Map(entries)) => {
+                let mut out = HashMap::new();
+                for (k, v) in entries {
+                    let ktok = self.tokens.borrow_mut().tokenize(k);
+                    out.insert(ktok, v.to_owned());
+                }
+                out
+            }
+            _ => bail!("params must be a Val::Map, got {:?}", params),
+        };
+
+        let xid = self.next_xid;
+        self.next_xid += 1;
+
         cursor.ctx = Context {
             tokens: Rc::clone(&self.tokens),
             g: Rc::clone(&self.g),
             file: Rc::clone(&self.file),
+            stack: vec![GramVal::Lit(Val::Null); 16], // TODO needs to match plan stack size
+            parameters: mapped_params,
+            xid,
         };
         cursor.slots = slots;
         cursor.plan = Some(plan);
@@ -431,7 +606,7 @@ impl BackendCursor for GramCursor {
         for (tok, _) in &self.slots {
             out.push(toks.lookup(*tok).unwrap().to_string());
         }
-        return out;
+        out
     }
 
     fn next(&mut self) -> Result<Option<&Row>> {
@@ -463,6 +638,12 @@ struct Context {
     tokens: Rc<RefCell<Tokens>>,
     g: Rc<RefCell<Graph>>,
     file: Rc<RefCell<File>>,
+    xid: Version,
+    // some expressions create local scopes while they evaluate (eg. list comprehensions),
+    // those locals go on this stack.
+    stack: Vec<GramVal>,
+    // Parameters this query was ran with
+    parameters: HashMap<Token, Val>,
 }
 
 #[derive(Debug, Clone)]
@@ -470,12 +651,31 @@ enum Expr {
     Lit(Val),
     // Lookup a property by id
     Prop(Box<Expr>, Vec<Token>),
-    Slot(Slot),
+    // Dynamically lookup a property by a runtime expression
+    DynProp(Box<Expr>, Box<Expr>),
+
+    Param(Token),
+
+    RowRef(Slot),
+    StackRef(Slot),
     List(Vec<Expr>),
     Map(Vec<(Token, Expr)>),
 
+    // Always odd, alternating node/rel/node
+    Path(Vec<Slot>),
+
+    ListComprehension {
+        src: Box<Expr>,
+        // The temporary value of each entry in src gets stored in this local stack slot,
+        // and then accessed by the map_expr
+        stackslot: usize,
+        map_expr: Box<Expr>,
+    },
+
     Call(functions::Func, Vec<Expr>),
+
     And(Vec<Expr>),
+    Not(Box<Expr>),
 
     Gt(Box<Expr>, Box<Expr>),
     Equal(Box<Expr>, Box<Expr>),
@@ -485,16 +685,15 @@ enum Expr {
     Add(Box<Expr>, Box<Expr>),
     Sub(Box<Expr>, Box<Expr>),
 
-    HasLabel { slot: usize, label: Token },
+    HasLabel {
+        slot: usize,
+        label: Token,
+    },
+    IsNull(Box<Expr>),
 }
 
 impl Expr {
-    fn eval_prop(
-        ctx: &mut Context,
-        row: &GramRow,
-        expr: &Expr,
-        prop: &Vec<Token>,
-    ) -> Result<GramVal> {
+    fn eval_prop(ctx: &mut Context, row: &GramRow, expr: &Expr, prop: &[Token]) -> Result<GramVal> {
         let mut v = expr.eval(ctx, row)?;
         for key in prop {
             v = match v {
@@ -512,7 +711,16 @@ impl Expr {
                     .find(|(ek, _)| ek == key)
                     .map(|e| e.1.clone())
                     .unwrap_or(GramVal::Lit(Val::Null)),
-                v => bail!("Gram backend does not yet support {:?}", v),
+                GramVal::Lit(Val::Map(es)) => {
+                    let toks = ctx.tokens.borrow();
+                    let key_str = toks.lookup(*key).unwrap();
+                    es.iter()
+                        .find(|(ek, _)| ek == key_str)
+                        .map(|e| GramVal::Lit(e.1.clone()))
+                        .unwrap_or(GramVal::Lit(Val::Null))
+                }
+                GramVal::Lit(Val::Null) => GramVal::Lit(Val::Null),
+                v => bail!("[eval_prop] Gram backend does not yet support {:?}", v),
             };
         }
         Ok(v)
@@ -520,9 +728,40 @@ impl Expr {
 
     fn eval(&self, ctx: &mut Context, row: &GramRow) -> Result<GramVal> {
         match self {
-            Expr::Prop(expr, props) => Expr::eval_prop(ctx, row, expr, props),
-            Expr::Slot(slot) => Ok(row.slots[*slot].clone()), // TODO not this
-            Expr::Lit(v) => Ok(GramVal::Lit(v.clone())),      // TODO not this,
+            Expr::Param(ptok) => match ctx.parameters.get(ptok) {
+                None => {
+                    let toks = ctx.tokens.borrow();
+                    let want = toks.lookup(*ptok).unwrap_or("N/A");
+                    let have: Vec<String> = ctx
+                        .parameters
+                        .keys()
+                        .map(|k| toks.lookup(*k).unwrap_or("N/A").to_owned())
+                        .collect();
+                    bail!(
+                        "Query parameter '{}' was not specified, known parameters are: {:?}",
+                        want,
+                        have
+                    )
+                }
+                Some(v) => Ok(GramVal::Lit(v.to_owned())),
+            },
+            Expr::Prop(expr, keys) => Expr::eval_prop(ctx, row, expr, keys),
+            Expr::DynProp(expr, key) => {
+                let keyval = key.eval(ctx, row)?;
+                match keyval {
+                    GramVal::Lit(Val::String(keystr)) => {
+                        let tok = ctx.tokens.borrow_mut().tokenize(keystr.as_str());
+                        Expr::eval_prop(ctx, row, expr, &[tok])
+                    }
+                    GramVal::Lit(Val::Int(index)) => {
+                        Ok(expr.eval(ctx, row)?.get_index(index as usize)?.clone())
+                    }
+                    x => bail!("Don't know how to index / look up key: {:?}", x)
+                }
+            }
+            Expr::RowRef(slot) => Ok(row.slots[*slot].clone()), // TODO not this
+            Expr::StackRef(slot) => Ok(ctx.stack[*slot].clone()),
+            Expr::Lit(v) => Ok(GramVal::Lit(v.clone())), // TODO not this,
             Expr::List(vs) => {
                 let mut out = Vec::new();
                 for v in vs {
@@ -536,6 +775,28 @@ impl Expr {
                     out.push((e.0, e.1.eval(ctx, row)?));
                 }
                 Ok(GramVal::Map(out))
+            }
+            Expr::Path(es) => {
+                let num_segments = (es.len() - 1) / 2;
+                let mut out = Vec::with_capacity(num_segments);
+
+                if let GramVal::Lit(Val::Null) = &row.slots[es[0]] {
+                    return Ok(GramVal::Lit(Val::Null));
+                }
+
+                let start = unwrap_node_id(&row.slots[es[0]]).unwrap();
+                let mut i = 1;
+                while i < es.len() {
+                    let r = unwrap_rel_index(&row.slots[es[i]]).unwrap();
+                    let o = unwrap_node_id(&row.slots[es[i+1]]).unwrap();
+                    out.push((r, o));
+                    i += 2;
+                }
+
+                Ok(GramVal::Path {
+                    start,
+                    rest: out
+                })
             }
             Expr::Gt(a, b) => {
                 let a_val = a.eval(ctx, row)?;
@@ -575,6 +836,15 @@ impl Expr {
                     (GramVal::Lit(Val::Int(a_int)), GramVal::Lit(Val::Int(b_int))) => {
                         Ok(GramVal::Lit(Val::Float(*a_int as f64 / *b_int as f64)))
                     }
+                    (GramVal::Lit(Val::Int(a_int)), GramVal::Lit(Val::Float(b_float))) => {
+                        Ok(GramVal::Lit(Val::Float(*a_int as f64 / *b_float)))
+                    }
+                    (GramVal::Lit(Val::Float(a_float)), GramVal::Lit(Val::Int(b_int))) => {
+                        Ok(GramVal::Lit(Val::Float(*a_float / *b_int as f64)))
+                    }
+                    (GramVal::Lit(Val::Float(a_float)), GramVal::Lit(Val::Float(b_float))) => {
+                        Ok(GramVal::Lit(Val::Float(*a_float / *b_float)))
+                    }
                     _ => bail!(
                         "gram backend does not support division of {:?} and {:?}",
                         a_val,
@@ -588,6 +858,49 @@ impl Expr {
                 match (&a_val, &b_val) {
                     (GramVal::Lit(Val::Int(a_int)), GramVal::Lit(Val::Int(b_int))) => {
                         Ok(GramVal::Lit(Val::Int(a_int + b_int)))
+                    }
+                    (GramVal::Lit(Val::String(a_str)), GramVal::Lit(Val::String(b_str))) => {
+                        Ok(GramVal::Lit(Val::String(a_str.to_owned() + b_str)))
+                    }
+                    (GramVal::List(a_items), GramVal::List(b_items)) => {
+                        let mut out = Vec::with_capacity(a_items.len() + b_items.len());
+                        for v in a_items {
+                            out.push(v.to_owned())
+                        }
+                        for v in b_items {
+                            out.push(v.to_owned())
+                        }
+                        Ok(GramVal::List(out))
+                    }
+                    (GramVal::Lit(Val::List(a_items)), GramVal::Lit(Val::List(b_items))) => {
+                        let mut out = Vec::with_capacity(a_items.len() + b_items.len());
+                        for v in a_items {
+                            out.push(GramVal::Lit(v.to_owned()))
+                        }
+                        for v in b_items {
+                            out.push(GramVal::Lit(v.to_owned()))
+                        }
+                        Ok(GramVal::List(out))
+                    }
+                    (GramVal::Lit(Val::List(a_items)), GramVal::List(b_items)) => {
+                        let mut out = Vec::with_capacity(a_items.len() + b_items.len());
+                        for v in a_items {
+                            out.push(GramVal::Lit(v.to_owned()))
+                        }
+                        for v in b_items {
+                            out.push(v.to_owned())
+                        }
+                        Ok(GramVal::List(out))
+                    }
+                    (GramVal::List(a_items), GramVal::Lit(Val::List(b_items))) => {
+                        let mut out = Vec::with_capacity(a_items.len() + b_items.len());
+                        for v in a_items {
+                            out.push(v.to_owned())
+                        }
+                        for v in b_items {
+                            out.push(GramVal::Lit(v.to_owned()))
+                        }
+                        Ok(GramVal::List(out))
                     }
                     _ => bail!(
                         "gram backend does not support addition of {:?} and {:?}",
@@ -625,21 +938,57 @@ impl Expr {
                         _ => panic!("The gram backend does not know how to do binary logic on non-boolean expressions")
                     }
                 }
-                return Ok(GramVal::Lit(Val::Bool(true)));
+                Ok(GramVal::Lit(Val::Bool(true)))
             }
+            Expr::Not(e) => match e.eval(ctx, row)? {
+                GramVal::Lit(Val::Bool(v)) => Ok(GramVal::Lit(Val::Bool(!v))),
+                _ => panic!("the gram backend cannot do NOT of {:?}", e),
+            },
             Expr::Call(f, args) => {
                 let mut argv = Vec::with_capacity(args.len());
                 for a in args {
                     argv.push(a.eval(ctx, row)?);
                 }
-                f.apply(&argv)
+                f.apply(ctx, &argv)
             }
             Expr::HasLabel { slot, label } => {
                 let s: &GramVal = &row.slots[*slot];
                 let node_id = s.as_node_id();
                 let g = ctx.g.borrow();
-                let node = g.nodes.get(node_id).unwrap();
-                return Ok(GramVal::Lit(Val::Bool(node.labels.contains(label))));
+                let node = g.get_node(node_id, ctx.xid).unwrap();
+                Ok(GramVal::Lit(Val::Bool(node.labels.contains(label))))
+            }
+            Expr::ListComprehension {
+                src,
+                stackslot,
+                map_expr,
+            } => {
+                let src_data = src.eval(ctx, row)?;
+                let mut result = Vec::new();
+                match src_data {
+                    GramVal::Lit(Val::List(vals)) => {
+                        for src_val in vals {
+                            ctx.stack[*stackslot] = GramVal::Lit(src_val);
+                            result.push(map_expr.eval(ctx, row)?)
+                        }
+                    }
+                    GramVal::List(vals) => {
+                        for src_val in vals {
+                            ctx.stack[*stackslot] = src_val;
+                            result.push(map_expr.eval(ctx, row)?)
+                        }
+                    }
+
+                    _ => panic!("The gram backend does not know how to do list comprehension with this as source: {:?}", src_data)
+                }
+                Ok(GramVal::List(result))
+            }
+            Expr::IsNull(e) => {
+                if let GramVal::Lit(Val::Null) = e.eval(ctx, row)? {
+                    Ok(GramVal::Lit(Val::Bool(true)))
+                } else {
+                    Ok(GramVal::Lit(Val::Bool(false)))
+                }
             }
         }
     }
@@ -657,6 +1006,9 @@ enum GramVal {
     Map(Vec<(Token, GramVal)>),
     Node { id: usize },
     Rel { node_id: usize, rel_index: usize },
+    // Don't know about this.. lots of considerations. But TL;DR: Right now this is something like
+    // `start` is the first node id, and may be all there is. There is then 0 or more (rel_index, other_node) pairs.
+    Path{ start: usize, rest: Vec<(usize, usize)> }
 }
 
 impl GramVal {
@@ -669,20 +1021,19 @@ impl GramVal {
                 for i in 0..vs.len() {
                     out[i] = vs[i].project(ctx);
                 }
-                return Val::List(out);
+                Val::List(out)
             }
             GramVal::Map(es) => {
                 let mut out = Vec::with_capacity(es.len());
-                for i in 0..es.len() {
-                    let entry = &es[i];
+                for entry in es {
                     let key = ctx.tokens.borrow().lookup(entry.0).unwrap().to_string();
                     let val = entry.1.project(ctx);
                     out.push((key, val))
                 }
-                return Val::Map(out);
+                Val::Map(out)
             }
             GramVal::Node { id } => {
-                let n = &ctx.g.borrow().nodes[*id];
+                let n = ctx.g.borrow().get_node(*id, ctx.xid);
                 let mut props = crate::Map::new();
                 for (k, v) in &n.properties {
                     props.push((
@@ -694,14 +1045,14 @@ impl GramVal {
                 for l in &n.labels {
                     labels.push(ctx.tokens.borrow().lookup(*l).unwrap().to_string());
                 }
-                return Val::Node(crate::Node {
+                Val::Node(crate::Node {
                     id: *id,
                     labels,
                     props,
-                });
+                })
             }
             GramVal::Rel { node_id, rel_index } => {
-                let n = &ctx.g.borrow().nodes[*node_id];
+                let n = ctx.g.borrow().get_node(*node_id, ctx.xid);
                 let rel = &n.rels[*rel_index];
 
                 let rel_type = ctx
@@ -711,7 +1062,7 @@ impl GramVal {
                     .unwrap()
                     .to_string();
                 let mut props = crate::Map::new();
-                for (k, v) in rel.properties.iter() {
+                for (k, v) in rel.properties.borrow().iter() {
                     props.push((
                         ctx.tokens.borrow().lookup(*k).unwrap().to_string(),
                         v.clone(),
@@ -730,13 +1081,25 @@ impl GramVal {
                         start = rel.other_node;
                     }
                 }
-                return Val::Rel(crate::Rel {
+                Val::Rel(crate::Rel {
                     start,
                     end,
                     rel_type,
                     props,
-                });
+                })
             }
+            GramVal::Path { .. } => {
+                panic!("gram backend can't project paths, yet")
+            }
+        }
+    }
+
+    fn get_index(&self, index: usize) -> Result<&GramVal> {
+        match self {
+            GramVal::List(items) => {
+                Ok(&items[index])
+            }
+            x => bail!("Don't know how to index into a {:?}", x)
         }
     }
 
@@ -800,15 +1163,11 @@ impl PartialOrd for GramVal {
                 GramVal::Lit(Val::String(_)) => Some(Ordering::Less),
                 GramVal::Lit(Val::Int(_)) => Some(Ordering::Less),
                 GramVal::Lit(Val::Float(_)) => Some(Ordering::Less),
-                GramVal::List(other_vs) => {
-                    return self_v.partial_cmp(&other_vs);
-                }
+                GramVal::List(other_vs) => self_v.partial_cmp(&other_vs),
                 GramVal::Lit(Val::Null) => None,
                 _ => panic!("Don't know how to compare {:?} to {:?}", self, other),
             },
-            GramVal::Lit(Val::Null) => match other {
-                _ => None,
-            },
+            GramVal::Lit(Val::Null) => None,
             _ => panic!("Don't know how to compare {:?} to {:?}", self, other),
         }
     }
@@ -824,6 +1183,7 @@ impl Display for GramVal {
             GramVal::Rel { node_id, rel_index } => {
                 f.write_str(&format!("Rel({}/{})", node_id, rel_index))
             }
+            GramVal::Path { .. } => f.write_str(&format!("Path(<serialization not implemented in gram backend yet>)"))
         }
     }
 }
@@ -831,6 +1191,8 @@ impl Display for GramVal {
 // Physical operator. We have one of these for each Logical operator the frontend emits.
 trait Operator: Debug {
     fn next(&mut self, ctx: &mut Context, row: &mut GramRow) -> Result<bool>;
+    // "Restart" this operator tree, used by eg. Apply to run a given tree branch repeatedly
+    fn reset(&mut self);
 }
 
 #[derive(Debug)]
@@ -860,6 +1222,11 @@ struct Expand {
 }
 
 impl Operator for Expand {
+    fn reset(&mut self) {
+        self.src.reset();
+        self.state = ExpandState::NextNode;
+    }
+
     fn next(&mut self, ctx: &mut Context, out: &mut GramRow) -> Result<bool> {
         loop {
             match &self.state {
@@ -876,7 +1243,7 @@ impl Operator for Expand {
                 ExpandState::InNode => {
                     let node = out.slots[self.src_slot].as_node_id();
                     let g = ctx.g.borrow();
-                    let rels = &g.nodes[node].rels;
+                    let rels = &g.get_node(node, ctx.xid).rels;
                     if self.next_rel_index >= rels.len() {
                         // No more rels on this node
                         self.state = ExpandState::NextNode;
@@ -887,16 +1254,17 @@ impl Operator for Expand {
                     let rel = &rels[self.next_rel_index];
                     self.next_rel_index += 1;
 
-                    if self.rel_type.is_some() {
-                        if rel.rel_type != self.rel_type.unwrap() {
-                            continue;
-                        }
+                    if rel.deleted {
+                        continue;
                     }
 
-                    if self.dir.is_some() && rel.other_node != node {
-                        if rel.dir != self.dir.unwrap() {
-                            continue;
-                        }
+                    if self.rel_type.is_some() && rel.rel_type != self.rel_type.unwrap() {
+                        continue;
+                    }
+
+                    if self.dir.is_some() && rel.dir != self.dir.unwrap()
+                    {
+                        continue;
                     }
 
                     out.slots[self.rel_slot] = GramVal::Rel {
@@ -911,10 +1279,105 @@ impl Operator for Expand {
     }
 }
 
-// For each src row, perform a full no de scan with the specified filters
+#[derive(Debug)]
+struct ExpandRel {
+    pub src: Box<dyn Operator>,
+
+    pub src_rel_slot: usize,
+
+    pub start_node: usize,
+
+    pub end_node: usize,
+}
+
+impl Operator for ExpandRel {
+    fn reset(&mut self) {
+        self.src.reset();
+    }
+
+    fn next(&mut self, ctx: &mut Context, out: &mut GramRow) -> Result<bool> {
+        if !self.src.next(ctx, out)? {
+            return Ok(false);
+        }
+
+        // TODO: This is wrong, the direction of the pattern needs to be considered,
+        //       see the planner notes about planning ExpandRel; seeing how far the TCK will let
+        //       me go wrong here
+        let rel = &out.slots[self.src_rel_slot];
+        match rel {
+            GramVal::Rel { node_id, rel_index } => {
+                let node_data = &ctx.g.borrow().get_node(*node_id, ctx.xid);
+                let rel_data = &node_data.rels[*rel_index];
+                out.slots[self.end_node] = GramVal::Node { id: *node_id };
+                out.slots[self.start_node] = GramVal::Node {
+                    id: rel_data.other_node,
+                }
+            }
+            _ => unreachable!(),
+        }
+        Ok(true)
+    }
+}
+
+#[derive(Debug)]
+struct ExpandInto {
+    pub src: Box<dyn Operator>,
+
+    pub left_node_slot: usize,
+    pub right_node_slot: usize,
+    pub dst_slot: usize,
+    pub rel_type: Option<Token>,
+    pub dir: Option<Dir>,
+}
+
+impl Operator for ExpandInto {
+    fn reset(&mut self) {
+        self.src.reset();
+    }
+
+    fn next(&mut self, ctx: &mut Context, out: &mut GramRow) -> Result<bool> {
+        loop {
+            if !self.src.next(ctx, out)? {
+                return Ok(false);
+            }
+
+            // TODO this is wrong, it only handles cases of one matching rel, does not
+            //      take direction into account.
+
+            let left_raw = &out.slots[self.left_node_slot];
+            let right_raw = &out.slots[self.right_node_slot];
+            match (left_raw, right_raw) {
+                (GramVal::Node { id: left }, GramVal::Node { id: right }) => {
+                    let left_node = &ctx.g.borrow().get_node(*left, ctx.xid);
+                    for (rel_index, candidate) in left_node.rels.iter().enumerate() {
+                        if let Some(rt) = self.rel_type {
+                            if candidate.rel_type != rt {
+                                continue;
+                            }
+                        }
+                        if candidate.other_node == *right {
+                            out.slots[self.dst_slot] = GramVal::Rel {
+                                node_id: *left,
+                                rel_index,
+                            };
+                            return Ok(true);
+                        }
+                    }
+
+                    // No relationship between these two nodes
+                }
+                _ => panic!("TODO"),
+            };
+        }
+    }
+}
+
+// For each src row, perform a full node scan with the specified filters
 #[derive(Debug)]
 struct NodeScan {
     pub src: Box<dyn Operator>,
+
+    pub scope: u8,
 
     // Where should this scan write its output?
     pub slot: usize,
@@ -934,6 +1397,11 @@ pub enum NodeScanState {
 }
 
 impl Operator for NodeScan {
+    fn reset(&mut self) {
+        self.src.reset();
+        self.state = NodeScanState::Idle;
+    }
+
     fn next(&mut self, ctx: &mut Context, out: &mut GramRow) -> Result<bool> {
         loop {
             match &self.state {
@@ -947,19 +1415,32 @@ impl Operator for NodeScan {
                     let g = ctx.g.borrow();
                     let mut node_id = *next_node;
                     while g.nodes.len() > node_id {
-                        let node = g.nodes.get(node_id).unwrap();
-                        if let Some(tok) = self.labels {
-                            if !node.labels.contains(&tok) {
+                        let node = g.get_node(node_id, ctx.xid).unwrap();
+
+                        if let Some(vis_node) = node.at_version(store::Version::new(ctx.xid, self.scope)) {
+                            if vis_node.deleted {
                                 node_id += 1;
                                 continue;
                             }
-                        }
 
-                        out.slots[self.slot] = GramVal::Node { id: node_id };
-                        self.state = NodeScanState::Scanning {
-                            next_node: node_id + 1,
-                        };
-                        return Ok(true);
+                            if let Some(tok) = self.labels {
+                                if !vis_node.labels.contains(&tok) {
+                                    node_id += 1;
+                                    continue;
+                                }
+                            }
+
+                            out.slots[self.slot] = GramVal::Node { id: node_id };
+                            self.state = NodeScanState::Scanning {
+                                next_node: node_id + 1,
+                            };
+                            return Ok(true);
+                        } else {
+                            // This node is not visible to us (eg. it was created by an event that logically happened
+                            // after we are running, from the users pov)
+                            node_id += 1;
+                            continue
+                        }
                     }
                     self.state = NodeScanState::Idle;
                 }
@@ -970,20 +1451,21 @@ impl Operator for NodeScan {
 
 #[derive(Debug, Clone)]
 struct Argument {
-    // Eventually this operator would yield one row with user-provided parameters; for now
-    // it's simply used as a leaf that yields one "seed" row to set things in motion.
-    // This is because other operators perform their action "once per input row", so you
-    // need one initial row to start the machinery.
+    // Toggle that tracks if our one row has been emitted
     consumed: bool,
 }
 
 impl Operator for Argument {
+    fn reset(&mut self) {
+        self.consumed = false;
+    }
+
     fn next(&mut self, _ctx: &mut Context, _out: &mut GramRow) -> Result<bool> {
         if self.consumed {
             return Ok(false);
         }
         self.consumed = true;
-        return Ok(true);
+        Ok(true)
     }
 }
 
@@ -1026,11 +1508,19 @@ struct Create {
     nodes: Vec<NodeSpec>,
     rels: Vec<RelSpec>,
     tokens: Rc<RefCell<Tokens>>,
+    scope: u8,
 }
 
 impl Operator for Create {
+    fn reset(&mut self) {
+        self.src.reset();
+    }
+
     fn next(&mut self, ctx: &mut Context, out: &mut GramRow) -> Result<bool, Error> {
         if !self.src.next(ctx, out)? {
+            if self.rels.len() > 0 {
+            println!("Create: No next");
+            }
             return Ok(false);
         }
         for node in &self.nodes {
@@ -1038,18 +1528,21 @@ impl Operator for Create {
                 .props
                 .iter()
                 .map(|p| {
-                    if let Ok(GramVal::Lit(val)) = p.1.eval(ctx, out) {
-                        return (*p.0, (val));
-                    } else {
-                        panic!("Property creation expression yielded non-literal?")
+                    match p.1.eval(ctx, out) {
+                        Ok(GramVal::Lit(val)) => (*p.0, (val)),
+                        Ok(gval) => (*p.0, gval.project(ctx)),
+                        r => panic!("property creation expression failed {:?}", r)
                     }
                 })
+                // In create, property expressions that evalutate to null are discarded
+                .filter(|i| match i.1 { Val::Null => false, _ => true })
                 .collect();
             out.slots[node.slot] = append_node(
                 ctx,
                 Rc::clone(&self.tokens),
                 node.labels.clone(),
                 node_properties,
+                Version::new(ctx.xid, self.scope),
             )?;
         }
         for rel in &self.rels {
@@ -1057,12 +1550,14 @@ impl Operator for Create {
                 .props
                 .iter()
                 .map(|p| {
-                    if let Ok(GramVal::Lit(val)) = p.1.eval(ctx, out) {
-                        return (*p.0, (val));
-                    } else {
-                        panic!("Property creation expression yielded non-literal?")
+                    match p.1.eval(ctx, out) {
+                        Ok(GramVal::Lit(val)) => (*p.0, (val)),
+                        Ok(gval) => (*p.0, gval.project(ctx)),
+                        r => panic!("property creation expression failed {:?}", r)
                     }
                 })
+                // In create, property expressions that evalutate to null are discarded
+                .filter(|i| match i.1 { Val::Null => false, _ => true })
                 .collect();
 
             let start_node = match &out.slots[rel.start_node_slot] {
@@ -1085,6 +1580,211 @@ impl Operator for Create {
 }
 
 #[derive(Debug)]
+enum UpdateAction {
+    SingleAssign {
+        entity: Slot,
+        key: Token,
+        value: Expr,
+    },
+    Append {
+        entity: Slot,
+        value: Expr,
+    },
+    Overwrite {
+        entity: Slot,
+        value: Expr,
+    },
+    AppendLabel {
+        entity: Slot,
+        label: Token,
+    },
+    DeleteEntity {
+        entity: Expr,
+    },
+    DetachDelete {
+        node: Expr,
+    }
+}
+
+#[derive(Debug)]
+struct UpdateEntity {
+    pub src: Box<dyn Operator>,
+    pub actions: Vec<UpdateAction>,
+}
+
+impl UpdateEntity {
+    // Look. We're gonna rewrite this whole massive file. Just want to get to a walking skeleton.
+    fn write_prop_to_thing(
+        &self,
+        ctx: &mut Context,
+        thing: &GramVal,
+        key: usize,
+        val: Val,
+    ) -> Result<()> {
+        match thing {
+            GramVal::Rel { node_id, rel_index } => {
+                let node = &ctx.g.borrow_mut().nodes[*node_id];
+                let rel_half = &node.rels[*rel_index];
+                if val == Val::Null {
+                    rel_half.properties.borrow_mut().remove(&key);
+                } else {
+                    rel_half.properties.borrow_mut().insert(key, val);
+                }
+            }
+            GramVal::Node { id } => {
+                let node = &mut ctx.g.borrow_mut().nodes[*id];
+                if val == Val::Null {
+                    node.properties.remove(&key);
+                } else {
+                    node.properties.insert(key, val);
+                }
+            }
+            v => bail!("Don't know how to set properties to {:?}", v),
+        }
+        Ok(())
+    }
+
+    fn write_thing_to_thing(&self, ctx: &mut Context, thing: &GramVal, src: GramVal) -> Result<()> {
+        match src {
+            GramVal::Map(entries) => {
+                for (k, v) in entries {
+                    if let GramVal::Lit(litval) = v {
+                        self.write_prop_to_thing(ctx, thing, k, litval)?;
+                    } else {
+                        bail!(
+                            "Expected a literal value here, probably programming error? Got: {:?}",
+                            v
+                        )
+                    }
+                }
+            }
+            GramVal::Node { id } => {
+                let clonedprops = {
+                    let node = &ctx.g.borrow().nodes[id];
+                    node.properties.clone()
+                };
+                for (k, v) in clonedprops.iter() {
+                    self.write_prop_to_thing(ctx, thing, *k, v.clone())?;
+                }
+            }
+            _ => {
+                bail!("When appending properties to a node or rel, the value you're appending must be a map, got {:?}", src)
+            }
+        }
+        Ok(())
+    }
+
+    fn clear_props_on_thing(&self, ctx: &mut Context, thing: &GramVal) -> Result<()> {
+        match thing {
+            GramVal::Rel { node_id, rel_index } => {
+                let node = &mut ctx.g.borrow_mut().nodes[*node_id];
+                let rel = &mut node.rels[*rel_index];
+                let mut props = rel.properties.borrow_mut();
+                let _num_props = props.len();
+                props.clear();
+            }
+            GramVal::Node { id } => {
+                let node = &mut ctx.g.borrow_mut().nodes[*id];
+                node.properties.clear();
+            }
+            v => bail!("Don't know how to clear properties on {:?}", v),
+        }
+        Ok(())
+    }
+}
+
+impl Operator for UpdateEntity {
+    fn reset(&mut self) {
+        self.src.reset();
+    }
+
+    fn next(&mut self, ctx: &mut Context, out: &mut GramRow) -> Result<bool, Error> {
+        if !self.src.next(ctx, out)? {
+            return Ok(false);
+        }
+
+        for action in &self.actions {
+            match action {
+                UpdateAction::SingleAssign { entity, key, value } => {
+                    let entity_val = &out.slots[*entity];
+                    let gramval = value.eval(ctx, out)?;
+                    if let GramVal::Lit(litval) = gramval {
+                        self.write_prop_to_thing(ctx, entity_val, *key, litval)?;
+                    } else {
+                        let litval = gramval.project(ctx);
+                        self.write_prop_to_thing(ctx, entity_val, *key, litval)?;
+                    }
+                }
+                UpdateAction::Append { entity, value } => {
+                    let entity_val = &out.slots[*entity];
+                    let new_props = value.eval(ctx, out)?;
+                    self.write_thing_to_thing(ctx, entity_val, new_props)?;
+                }
+                UpdateAction::Overwrite { entity, value } => {
+                    let entity_val = &out.slots[*entity];
+                    let new_props = value.eval(ctx, out)?;
+                    self.clear_props_on_thing(ctx, entity_val)?;
+                    self.write_thing_to_thing(ctx, entity_val, new_props)?;
+                }
+                UpdateAction::AppendLabel { entity, label } => {
+                    let entity_val = &out.slots[*entity];
+                    match entity_val {
+                        GramVal::Node { id } => {
+                            // TODO this isn't checking if we can see the node..
+                            ctx.g.borrow_mut().nodes[*id].labels.insert(*label);
+                        }
+                        _ => bail!("Can't add label to {:?}", entity_val)
+                    }
+                }
+                UpdateAction::DeleteEntity { entity: node } => {
+                    match node.eval(ctx, out)? {
+                        GramVal::Node{ id } => {
+                            ctx.g.borrow_mut().delete_node(id)
+                        }
+                        GramVal::Rel { node_id, rel_index } => {
+                            ctx.g.borrow_mut().delete_rel(node_id, rel_index)
+                        }
+                        GramVal::Lit(Val::Null) => (),
+                        GramVal::Path { start, rest } => {
+                            let mut g = ctx.g.borrow_mut();
+                            let mut current_node = start;
+                            for (rel_index, next_node) in rest {
+                                g.delete_rel(current_node, rel_index);
+                                g.delete_node(current_node);
+                                current_node = next_node;
+                            }
+                        }
+                        x => bail!("Expression to DELETE must be a node or rel, got {:?}", x)
+                    }
+                }
+                UpdateAction::DetachDelete { node } => {
+                    match node.eval(ctx, out)? {
+                        GramVal::Node{ id } => {
+                            let mut g = ctx.g.borrow_mut();
+                            g.detach_delete_node(id)
+                        }
+                        GramVal::Rel { node_id, rel_index } => {
+                            ctx.g.borrow_mut().delete_rel(node_id, rel_index)
+                        }
+                        GramVal::Path { start, rest } => {
+                            let mut g = ctx.g.borrow_mut();
+                            g.detach_delete_node(start);
+                            for (_, next_node) in rest {
+                                g.detach_delete_node(next_node);
+                            }
+                        }
+                        GramVal::Lit(Val::Null) => (),
+                        x => bail!("Expression to DETACH DELETE must be a node or rel, got {:?}", x)
+                    }
+                }
+            }
+        }
+
+        Ok(true)
+    }
+}
+
+#[derive(Debug)]
 struct ProduceResults {
     pub src: Box<dyn Operator>,
     pub fields: Vec<(Token, usize)>,
@@ -1092,6 +1792,10 @@ struct ProduceResults {
 }
 
 impl Operator for ProduceResults {
+    fn reset(&mut self) {
+        self.src.reset();
+    }
+
     fn next(&mut self, ctx: &mut Context, out: &mut GramRow) -> Result<bool> {
         if self.print_header {
             println!("----");
@@ -1128,6 +1832,10 @@ struct Project {
 }
 
 impl Operator for Project {
+    fn reset(&mut self) {
+        self.src.reset();
+    }
+
     fn next(&mut self, ctx: &mut Context, out: &mut GramRow) -> Result<bool> {
         if self.src.next(ctx, out)? {
             for proj in &self.projections {
@@ -1150,6 +1858,11 @@ struct Limit {
 }
 
 impl Operator for Limit {
+    fn reset(&mut self) {
+        self.src.reset();
+        self.initialized = false;
+    }
+
     fn next(&mut self, ctx: &mut Context, out: &mut GramRow) -> Result<bool> {
         if !self.initialized {
             self.initialized = true;
@@ -1193,6 +1906,11 @@ struct Optional {
 }
 
 impl Operator for Optional {
+    fn reset(&mut self) {
+        self.src.reset();
+        self.initialized = false;
+    }
+
     fn next(&mut self, ctx: &mut Context, out: &mut GramRow) -> Result<bool> {
         if !self.initialized {
             self.initialized = true;
@@ -1218,6 +1936,12 @@ struct NestLoop {
 }
 
 impl Operator for NestLoop {
+    fn reset(&mut self) {
+        self.outer.reset();
+        self.inner.reset();
+        self.initialized = false;
+    }
+
     fn next(&mut self, ctx: &mut Context, out: &mut GramRow) -> Result<bool> {
         if !self.initialized {
             if !self.outer.next(ctx, out)? {
@@ -1262,6 +1986,11 @@ enum SortState {
 }
 
 impl Operator for Sort {
+    fn reset(&mut self) {
+        self.src.reset();
+        self.state = SortState::Init;
+    }
+
     // TODO lol
     fn next(&mut self, ctx: &mut Context, out: &mut GramRow) -> Result<bool> {
         if let SortState::Init = self.state {
@@ -1290,7 +2019,7 @@ impl Operator for Sort {
                         _ => (),
                     }
                 }
-                return Ordering::Equal;
+                Ordering::Equal
             });
             self.rows = rows;
             self.state = SortState::Yielding { next: 0 };
@@ -1298,9 +2027,8 @@ impl Operator for Sort {
 
         if let SortState::Yielding { next } = self.state {
             let row = &self.rows[next];
-            for i in 0..out.slots.len() {
-                out.slots[i] = row.slots[i].clone();
-            }
+            let size = out.slots.len();
+            out.slots.clone_from_slice(&row.slots[..size]);
             if self.rows.len() > next + 1 {
                 self.state = SortState::Yielding { next: next + 1 }
             } else {
@@ -1320,6 +2048,10 @@ struct Selection {
 }
 
 impl Operator for Selection {
+    fn reset(&mut self) {
+        self.src.reset();
+    }
+
     fn next(&mut self, ctx: &mut Context, out: &mut GramRow) -> Result<bool> {
         while self.src.next(ctx, out)? {
             let ok = self.predicate.eval(ctx, out)?;
@@ -1360,7 +2092,7 @@ impl PartialEq for GroupKey {
                 }
             }
         }
-        return true;
+        true
     }
 }
 
@@ -1371,6 +2103,7 @@ impl Hash for GroupKey {
                 GramVal::Lit(lv) => match lv {
                     Val::Null => 0.hash(state),
                     Val::String(sv) => sv.hash(state),
+                    Val::Bool(v) => v.hash(state),
                     _ => panic!("gram backend can't yet use {:?} as aggregate keys", v),
                 },
                 GramVal::Node { id } => id.hash(state),
@@ -1409,6 +2142,15 @@ struct HashAggregation {
 }
 
 impl Operator for HashAggregation {
+    fn reset(&mut self) {
+        self.src.reset();
+        self.consumed = false;
+        self.aggregated = false;
+        self.group_aggregations.clear();
+        self.group_order.clear();
+    }
+
+    #[allow(clippy::needless_range_loop)]
     fn next(&mut self, ctx: &mut Context, row: &mut GramRow) -> Result<bool> {
         loop {
             if self.consumed {
@@ -1447,7 +2189,11 @@ impl Operator for HashAggregation {
                 }
                 // Does an entry like that exist?
                 let maybe_state = self.group_aggregations.get_mut(&key);
-                if let None = maybe_state {
+                if let Some(group_state) = maybe_state {
+                    for agge in group_state {
+                        agge.apply(ctx, row)?;
+                    }
+                } else {
                     let mut group_state = Vec::with_capacity(self.aggregations.len());
                     for agge in &mut self.aggregations {
                         group_state.push(agge.func.init(ctx))
@@ -1457,11 +2203,6 @@ impl Operator for HashAggregation {
                     }
                     self.group_order.push(key.clone());
                     self.group_aggregations.insert(key, group_state);
-                } else {
-                    let group_state = maybe_state.unwrap();
-                    for agge in group_state {
-                        agge.apply(ctx, row)?;
-                    }
                 }
             }
 
@@ -1481,6 +2222,11 @@ struct Unwind {
 }
 
 impl Operator for Unwind {
+    fn reset(&mut self) {
+        self.src.reset();
+        self.current_list = None;
+        self.next_index = 0;
+    }
     fn next(&mut self, ctx: &mut Context, row: &mut GramRow) -> Result<bool> {
         loop {
             if self.current_list.is_none() {
@@ -1491,6 +2237,11 @@ impl Operator for Unwind {
 
                 match self.list_expr.eval(ctx, row)? {
                     GramVal::List(items) => self.current_list = Some(items),
+                    GramVal::Lit(Val::List(items)) => {
+                        self.current_list =
+                            Some(items.iter().map(|v| GramVal::Lit(v.to_owned())).collect())
+                    }
+                    GramVal::Lit(Val::Null) => self.current_list = Some(Vec::new()),
                     _ => return Err(anyhow!("UNWIND expression must yield a list")),
                 }
                 self.next_index = 0;
@@ -1510,260 +2261,175 @@ impl Operator for Unwind {
     }
 }
 
-mod parser {
-    use super::Val;
-    use crate::backend::gram::{Graph, Node};
-    use crate::backend::{Token, Tokens};
-    use crate::pest::Parser;
-    use anyhow::Result;
-    use pest::iterators::Pair;
-    use std::collections::HashMap;
-    use std::collections::HashSet;
-    use std::fs::File;
-    use std::io::Read;
+#[derive(Debug)]
+struct Apply {
+    pub lhs: Box<dyn Operator>,
+    pub rhs: Box<dyn Operator>,
+    pub initialized: bool,
+}
 
-    #[derive(Parser)]
-    #[grammar = "backend/gram.pest"]
-    pub struct GramParser;
-
-    /// Indicates how large a buffer to pre-allocate before reading the entire file.
-    fn initial_buffer_size(file: &File) -> usize {
-        // Allocate one extra byte so the buffer doesn't need to grow before the
-        // final `read` call at the end of the file.  Don't worry about `usize`
-        // overflow because reading will fail regardless in that case.
-        file.metadata().map(|m| m.len() as usize + 1).unwrap_or(0)
+impl Operator for Apply {
+    fn reset(&mut self) {
+        self.lhs.reset();
+        self.rhs.reset();
+        self.initialized = false;
     }
-
-    fn read_to_string(file: &mut File) -> Result<String> {
-        //todo lock this (and other io on the file)
-        let mut string = String::with_capacity(initial_buffer_size(&file));
-        file.read_to_string(&mut string)?;
-        Ok(string)
-    }
-
-    struct ParserContext<'a> {
-        anon_id_gen: u32,
-        node_ids: Tokens,
-        tokens: &'a mut Tokens,
-    }
-
-    fn parse_node(item: Pair<Rule>, ctx: &mut ParserContext) -> Result<Node> {
-        let mut identifier: Option<String> = None;
-        let mut props: HashMap<Token, Val> = HashMap::new();
-        let mut labels: HashSet<Token> = HashSet::new();
-
-        for part in item.into_inner() {
-            match part.as_rule() {
-                Rule::id => identifier = Some(part.as_str().to_string()),
-                Rule::label => {
-                    for label in part.into_inner() {
-                        labels.insert(ctx.tokens.tokenize(label.as_str()));
-                    }
-                }
-                Rule::map => {
-                    for pair in part.into_inner() {
-                        let mut key: Option<String> = None;
-                        let mut val = None;
-                        match pair.as_rule() {
-                            Rule::map_pair => {
-                                for pair_part in pair.into_inner() {
-                                    match pair_part.as_rule() {
-                                        Rule::id => key = Some(pair_part.as_str().to_string()),
-                                        Rule::expr => {
-                                            let stringval = pair_part.into_inner().next().unwrap();
-                                            let stringval_content =
-                                                stringval.into_inner().next().unwrap();
-                                            val = Some(stringval_content.as_str().to_string())
-                                        }
-                                        _ => panic!(
-                                            "what? {:?} / {}",
-                                            pair_part.as_rule(),
-                                            pair_part.as_str()
-                                        ),
-                                    }
-                                }
-                            }
-                            _ => panic!("what? {:?} / {}", pair.as_rule(), pair.as_str()),
-                        }
-                        let key_str = key.unwrap();
-                        props.insert(ctx.tokens.tokenize(&key_str), Val::String(val.unwrap()));
-                    }
-                }
-                _ => panic!("what? {:?} / {}", part.as_rule(), part.as_str()),
+    fn next(&mut self, ctx: &mut Context, out: &mut GramRow) -> Result<bool> {
+        if !self.initialized {
+            self.initialized = true;
+            let next = self.lhs.next(ctx, out)?;
+            if !next {
+                println!("Apply: No next");
+                return Ok(false);
             }
+            self.rhs.reset()
         }
 
-        let gid_string = identifier.unwrap_or_else(|| {
-            // Entry with no identifier, generate one
-            loop {
-                let candidate = format!("anon#{}", ctx.anon_id_gen);
-                if !ctx.node_ids.table.contains_key(&candidate) {
-                    return candidate;
-                }
-                ctx.anon_id_gen += 1;
+        loop {
+            if self.rhs.next(ctx, out)? {
+                return Ok(true);
             }
-        });
-        let gid = ctx.tokens.tokenize(&gid_string);
-        let id = ctx.node_ids.tokenize(&gid_string);
-        Ok(Node {
-            id,
-            gid,
-            labels,
-            properties: props,
-            rels: vec![],
-        })
-    }
 
-    pub fn load(tokens: &mut Tokens, file: &mut File) -> Result<Graph> {
-        let mut g = Graph { nodes: vec![] };
+            println!("Apply: No rhs next..");
+            // Exhausted rhs, fetch next lhs
 
-        let query_str = read_to_string(file).unwrap();
-        let mut parse_result = GramParser::parse(Rule::gram, &query_str)?;
-
-        let gram = parse_result.next().unwrap(); // get and unwrap the `file` rule; never fails
-
-        let node_ids = Tokens {
-            table: Default::default(),
-        };
-
-        let mut pc = ParserContext {
-            anon_id_gen: 0,
-            node_ids,
-            tokens,
-        };
-
-        for item in gram.into_inner() {
-            match item.as_rule() {
-                Rule::path => {
-                    let mut start_identifier: Option<Token> = None;
-                    let mut end_identifier: Option<Token> = None;
-
-                    let mut rel_type = None;
-
-                    for part in item.into_inner() {
-                        match part.as_rule() {
-                            Rule::node => {
-                                let n = parse_node(part, &mut pc)?;
-                                if start_identifier == None {
-                                    start_identifier = Some(n.id);
-                                } else {
-                                    end_identifier = Some(n.id);
-                                }
-                                // need like a merge_node operation; but for now, insert the
-                                // first occurrence of a node, so subsequent ones won't clear out
-                                // properties
-                                if g.nodes.len() <= n.id {
-                                    g.add_node(n.id, n);
-                                }
-                            }
-                            Rule::rel => {
-                                for rel_part in part.into_inner() {
-                                    match rel_part.as_rule() {
-                                        Rule::map => {}
-                                        Rule::rel_type => {
-                                            let rt_id = rel_part.into_inner().next().unwrap();
-                                            rel_type = Some(pc.node_ids.tokenize(
-                                                rt_id.into_inner().next().unwrap().as_str(),
-                                            ));
-                                        }
-                                        _ => panic!(
-                                            "what? {:?} / {}",
-                                            rel_part.as_rule(),
-                                            rel_part.as_str()
-                                        ),
-                                    }
-                                }
-                            }
-                            _ => panic!("what? {:?} / {}", part.as_rule(), part.as_str()),
-                        }
-                    }
-
-                    g.add_rel(
-                        start_identifier.unwrap(),
-                        end_identifier.unwrap(),
-                        rel_type.unwrap_or(pc.tokens.tokenize("_")),
-                    );
-                }
-                Rule::node => {
-                    let n = parse_node(item, &mut pc)?;
-                    g.add_node(n.id, n)
-                }
-                _ => (),
+            let next = self.lhs.next(ctx, out)?;
+            if !next {
+                println!("Apply: No lhs next :(");
+                return Ok(false);
             }
+            self.rhs.reset()
         }
-
-        Ok(g)
     }
 }
 
 #[derive(Debug)]
-pub struct Node {
-    // Identifier for this node, matches it's index into the node vector in g
-    id: usize,
-    // Identifier assigned this node in the gram file
-    gid: Token,
-    labels: HashSet<Token>,
-    properties: HashMap<Token, Val>,
-    rels: Vec<RelHalf>,
+struct AntiConditionalApply {
+    pub lhs: Box<dyn Operator>,
+    pub rhs: Box<dyn Operator>,
+
+    pub conditions: Vec<usize>,
 }
 
-#[derive(Debug)]
-pub struct RelHalf {
-    rel_type: Token,
-    dir: Dir,
-    other_node: usize,
-    properties: Rc<HashMap<Token, Val>>,
-}
-
-#[derive(Debug)]
-pub struct Graph {
-    nodes: Vec<Node>,
-}
-
-impl Graph {
-    fn get_node_prop(&self, node_id: usize, prop: Token) -> Option<Val> {
-        self.nodes[node_id].properties.get(&prop).cloned()
+impl Operator for AntiConditionalApply {
+    fn reset(&mut self) {
+        self.lhs.reset();
+        self.rhs.reset();
     }
 
-    fn get_rel_prop(&self, node_id: usize, rel_index: usize, prop: Token) -> Option<Val> {
-        self.nodes[node_id].rels[rel_index]
-            .properties
-            .get(&prop)
-            .cloned()
-    }
+    fn next(&mut self, ctx: &mut Context, out: &mut GramRow) -> Result<bool> {
+        loop {
+            if !self.lhs.next(ctx, out)? {
+                println!("aca: No next from {:?}", self.lhs);
+                return Ok(false);
+            }
+            println!("aca: Got next, testing: {:?}", out);
 
-    fn add_node(&mut self, id: usize, n: Node) {
-        while self.nodes.len() <= id {
-            let filler_id = self.nodes.len();
-            self.nodes.push(Node {
-                id: filler_id,
-                gid: 0,
-                labels: Default::default(),
-                properties: Default::default(),
-                rels: vec![],
-            })
+            let mut anticondition_passed = true;
+            for condition_slot in &self.conditions {
+                match out.slots[*condition_slot] {
+                    GramVal::Lit(Val::Null) => (),
+                    _ => {
+                        anticondition_passed = false;
+                        break;
+                    }
+                }
+            }
+
+            if !anticondition_passed {
+                // Just return what we got from lhs
+                return Ok(true)
+            }
+
+            // TODO this is super wrong; we should *keep* yielding from rhs until exhausted
+
+            println!(
+                "anticond passed: conds={:?} / row = {:?}",
+                self.conditions, out
+            );
+            self.rhs.reset();
+            if self.rhs.next(ctx, out)? {
+                return Ok(true);
+            }
         }
-        self.nodes[id] = n;
+    }
+}
+
+#[derive(Debug)]
+struct ConditionalApply {
+    pub lhs: Box<dyn Operator>,
+    pub rhs: Box<dyn Operator>,
+
+    pub conditions: Vec<usize>,
+}
+
+impl Operator for ConditionalApply {
+    fn reset(&mut self) {
+        self.lhs.reset();
+        self.rhs.reset();
+    }
+    fn next(&mut self, ctx: &mut Context, out: &mut GramRow) -> Result<bool> {
+        loop {
+            if !self.lhs.next(ctx, out)? {
+                return Ok(false);
+            }
+
+            let mut condition_passed = true;
+            for condition_slot in &self.conditions {
+                if let GramVal::Lit(Val::Null) = out.slots[*condition_slot] {
+                    condition_passed = false;
+                    break;
+                }
+            }
+            if condition_passed {
+                self.rhs.reset();
+                if self.rhs.next(ctx, out)? {
+                    return Ok(true);
+                }
+            }
+        }
+    }
+}
+
+
+#[derive(Debug)]
+struct Barrier {
+    pub src: Box<dyn Operator>,
+
+    // on first invocation, src is spooled into this buffer to "shake out" its side effects
+    // then we return these one at a time
+    pub buf: Option<Vec<GramRow>>,
+    pub ptr: usize,
+}
+
+impl Operator for Barrier {
+    fn reset(&mut self) {
+        self.src.reset();
+        self.buf = None;
+        self.ptr = 0;
     }
 
-    // Add a rel, return the index of the rel from the start nodes perspective
-    fn add_rel(&mut self, from: usize, to: usize, rel_type: Token) -> usize {
-        let props = Rc::new(Default::default());
-        let fromrels = &mut self.nodes[from].rels;
-        fromrels.push(RelHalf {
-            rel_type,
-            dir: Dir::Out,
-            other_node: to,
-            properties: Rc::clone(&props),
-        });
-        let index = fromrels.len() - 1;
-        self.nodes[to].rels.push(RelHalf {
-            rel_type,
-            dir: Dir::In,
-            other_node: from,
-            properties: props,
-        });
-        return index;
+    fn next(&mut self, ctx: &mut Context, out: &mut GramRow) -> Result<bool> {
+        if let None = self.buf {
+            let mut buf = Vec::new();
+            while self.src.next(ctx, out)? {
+                buf.push(out.clone());
+            }
+            self.buf = Some(buf);
+        }
+
+        let buf = self.buf.as_ref().unwrap();
+
+        if self.ptr < buf.len() {
+            let row = &buf[self.ptr];
+            for (i, val) in row.slots.iter().enumerate() {
+                out.slots[i] = val.clone();
+            }
+            self.ptr += 1;
+            return Ok(true);
+        }
+
+        Ok(false)
     }
 }
 
@@ -1784,6 +2450,7 @@ fn append_node(
     tokens_in: Rc<RefCell<Tokens>>,
     labels: HashSet<Token>,
     node_properties: HashMap<Token, Val>,
+    version: store::Version,
 ) -> Result<GramVal, Error> {
     let p = serialize_props(ctx, &node_properties);
     let gram_identifier = generate_uuid().to_hyphenated().to_string();
@@ -1808,6 +2475,8 @@ fn append_node(
         labels,
         properties: node_properties,
         rels: vec![],
+        deleted: false,
+        version,
     };
 
     ctx.g.borrow_mut().add_node(id, out_node);
@@ -1815,7 +2484,6 @@ fn append_node(
     println!("--- About to write ---");
     println!("{}", gram_string);
     println!("------");
-    // TODO: actually write to the file:
 
     ctx.file
         .borrow_mut()
@@ -1852,7 +2520,7 @@ fn append_rel(
     println!("{}", gram_string);
     println!("------");
 
-    let rel_index = g.add_rel(start_node, end_node, rel_type);
+    let rel_index = g.add_rel(start_node, end_node, rel_type, props);
 
     ctx.file
         .borrow_mut()
@@ -1862,7 +2530,7 @@ fn append_rel(
     match ctx.file.borrow_mut().write_all(gram_string.as_bytes()) {
         Ok(_) => Ok(GramVal::Rel {
             node_id: start_node,
-            rel_index: rel_index,
+            rel_index,
         }),
         Err(e) => Err(Error::new(e)),
     }
@@ -1871,7 +2539,7 @@ fn append_rel(
 fn serialize_props(ctx: &mut Context, props: &HashMap<Token, Val>) -> String {
     let mut out = String::new();
     let mut first = true;
-    out.push_str("{");
+    out.push('{');
     for (k, v) in props {
         if !first {
             out.push_str(", ");
@@ -1886,8 +2554,8 @@ fn serialize_props(ctx: &mut Context, props: &HashMap<Token, Val>) -> String {
         out.push_str(": ");
         out.push_str(&serialize_val(ctx, &v))
     }
-    out.push_str("}");
-    return out;
+    out.push('}');
+    out
 }
 
 fn serialize_val(_ctx: &mut Context, v: &Val) -> String {
@@ -1895,13 +2563,18 @@ fn serialize_val(_ctx: &mut Context, v: &Val) -> String {
         Val::String(s) => format!("\'{}\'", s),
         Val::Int(v) => format!("{}", v),
         Val::Bool(v) => format!("{}", v),
+        Val::List(v) => {
+            let out: Vec<String> = v.iter().map(|it| serialize_val(_ctx, it)).collect();
+            format!("[{}]", out.join(", "))
+        },
+        Val::Null => "null".to_owned(),
         _ => panic!("Don't know how to serialize {:?}", v),
     }
 }
 
 mod functions {
     use super::{Context, Expr, GramRow, GramVal, Val};
-    use crate::backend::{FuncSignature, FuncType, Tokens};
+    use crate::backend::{FuncSignature, FuncType, Tokens, Token};
     use crate::{Result, Type};
     use std::cmp::Ordering;
     use std::fmt::Debug;
@@ -1911,29 +2584,109 @@ mod functions {
         out.push(Box::new(MinSpec::new(tokens)));
         out.push(Box::new(MaxSpec::new(tokens)));
         out.push(Box::new(CountSpec::new(tokens)));
-        return out;
+        out.push(Box::new(CollectSpec::new(tokens)));
+        out
     }
 
     #[derive(Debug, Clone)]
     pub(super) enum Func {
         Not,
         Abs,
+        Keys,
+        Range,
     }
 
     impl Func {
-        pub fn apply(&self, args: &Vec<GramVal>) -> Result<GramVal> {
+        pub fn apply(&self, ctx: &mut Context, args: &[GramVal]) -> Result<GramVal> {
             match self {
-                Func::Not => match args.get(0).ok_or(anyhow!("NOT takes one argument"))? {
+                Func::Range => {
+                    let min = args
+                        .get(0)
+                        .ok_or_else(|| anyhow!("range takes two arguments, got none"))?;
+                    let max = args
+                        .get(1)
+                        .ok_or_else(|| anyhow!("range takes two arguments, got one"))?;
+                    match (min, max) {
+                        (GramVal::Lit(Val::Int(min_int)), GramVal::Lit(Val::Int(max_int))) => {
+                            let mut out = Vec::with_capacity((max_int - min_int) as usize);
+                            for i in *min_int..*max_int + 1 {
+                                out.push(GramVal::Lit(Val::Int(i)))
+                            }
+                            Ok(GramVal::List(out))
+                        }
+                        _ => bail!("range takes two ints, got {:?}, {:?}", min, max),
+                    }
+                }
+                Func::Not => match args
+                    .get(0)
+                    .ok_or_else(|| anyhow!("NOT takes one argument"))?
+                {
                     GramVal::Lit(v) => match v {
                         Val::Bool(b) => Ok(GramVal::Lit(Val::Bool(!*b))),
                         v => bail!("don't know how to do NOT({:?})", v),
                     },
                     v => bail!("don't know how to do NOT({:?})", v),
                 },
-                Func::Abs => match args.get(0).ok_or(anyhow!("ABS takes one argument"))? {
+                Func::Abs => match args
+                    .get(0)
+                    .ok_or_else(|| anyhow!("ABS takes one argument"))?
+                {
                     GramVal::Lit(Val::Int(v)) => Ok(GramVal::Lit(Val::Int(v.abs()))),
                     GramVal::Lit(Val::Float(v)) => Ok(GramVal::Lit(Val::Float(v.abs()))),
                     v => bail!("don't know how to take ABS({:?})", v),
+                },
+                Func::Keys => match args
+                    .get(0)
+                    .ok_or_else(|| anyhow!("ABS takes one argument"))?
+                {
+                    GramVal::Lit(Val::Map(m)) => {
+                        // TODO this kind of allocation is interesting, where should it go?
+                        let o: Vec<GramVal> = m
+                            .iter()
+                            .map(|(k, _)| GramVal::Lit(Val::String(k.to_owned())))
+                            .collect();
+                        Ok(GramVal::List(o))
+                    }
+                    GramVal::Map(entries) => {
+                        let o: Vec<GramVal> = entries
+                            .iter()
+                            .map(|(k, _)| {
+                                GramVal::Lit(Val::String(
+                                    ctx.tokens.borrow().lookup(*k).unwrap().to_owned(),
+                                ))
+                            })
+                            .collect();
+                        Ok(GramVal::List(o))
+                    }
+                    GramVal::Rel { node_id, rel_index } => {
+                        let node = &ctx.g.borrow().nodes[*node_id];
+                        let rel = &node.rels[*rel_index];
+                        let props = rel.properties.borrow();
+                        let o: Vec<GramVal> = props
+                            .keys()
+                            // TODO obvs will blow up on reasonable queries
+                            .map(|k| {
+                                GramVal::Lit(Val::String(
+                                    ctx.tokens.borrow().lookup(*k).unwrap().to_owned(),
+                                ))
+                            })
+                            .collect();
+                        Ok(GramVal::List(o))
+                    }
+                    GramVal::Node { id } => {
+                        let node = &ctx.g.borrow().nodes[*id];
+                        let props = &node.properties;
+                        let o: Vec<GramVal> = props
+                            .keys()
+                            .map(|k| {
+                                GramVal::Lit(Val::String(
+                                    ctx.tokens.borrow().lookup(*k).unwrap().to_owned(),
+                                ))
+                            })
+                            .collect();
+                        Ok(GramVal::List(o))
+                    }
+                    v => bail!("don't know how to do KEYS({:?})", v),
                 },
             }
         }
@@ -1958,12 +2711,61 @@ mod functions {
     }
 
     pub(super) trait AggregatingFunc: Debug {
-        fn init(&mut self, ctx: &mut Context) -> Box<dyn Aggregation>;
+        fn init(&self, ctx: &mut Context) -> Box<dyn Aggregation>;
     }
 
     pub(super) trait Aggregation: Debug {
         fn apply(&mut self, ctx: &mut Context, row: &mut GramRow) -> Result<()>;
         fn complete(&mut self) -> Result<&GramVal>;
+    }
+
+    // This describes a map expression that, within it, contains an aggregation.
+    // This is just the plumbing and delegation to those nested aggregations.
+    #[derive(Debug)]
+    pub(super) struct MapAggregatingFunc {
+        pub(super) aggregating: Vec<(Token, Box<dyn AggregatingFunc>)>,
+    }
+
+    impl AggregatingFunc for MapAggregatingFunc {
+        fn init(&self, ctx: &mut Context) -> Box<dyn Aggregation> {
+            // Initialize nested aggregators
+            let aggregations = self.aggregating.iter().map(|(k, agg_expr)| {
+                (*k, agg_expr.init(ctx))
+            }).collect();
+            println!("{:?}", aggregations);
+            Box::new(MapAggregation { aggregations, output: None })
+        }
+    }
+
+    #[derive(Debug)]
+    pub(super) struct MapAggregation {
+        aggregations: Vec<(Token, Box<dyn Aggregation>)>,
+        output: Option<GramVal>,
+    }
+
+    impl Aggregation for MapAggregation {
+        fn apply(&mut self, ctx: &mut Context, row: &mut GramRow) -> Result<()> {
+            for (_, aggregation) in self.aggregations.iter_mut() {
+                aggregation.apply(ctx, row)?;
+            }
+            Ok(())
+        }
+
+        fn complete(&mut self) -> Result<&GramVal> {
+            // TODO this is garbage, and points to an interesting thing here where
+            //      we can't wrap the borrow we're getting from the nested aggregagations
+            //      also note the horror where we're storing this whole thing on the
+            //      struct just to be able to return a borrow
+            let mut out = Vec::with_capacity(self.aggregations.len());
+            for (k, aggregation) in self.aggregations.iter_mut() {
+                let v = aggregation.complete()?;
+                out.push((*k, v.clone()));
+            }
+            println!("{:?}", out);
+            self.output = Some(GramVal::Map(out));
+
+            Ok(self.output.as_ref().unwrap())
+        }
     }
 
     #[derive(Debug)]
@@ -1987,7 +2789,7 @@ mod functions {
 
     impl AggregatingFuncSpec for MinSpec {
         fn signature(&self) -> &FuncSignature {
-            return &self.sig;
+            &self.sig
         }
 
         fn init(&self, mut args: Vec<Expr>) -> Box<dyn AggregatingFunc> {
@@ -2003,7 +2805,7 @@ mod functions {
     }
 
     impl AggregatingFunc for Min {
-        fn init(&mut self, _ctx: &mut Context) -> Box<dyn Aggregation> {
+        fn init(&self, _ctx: &mut Context) -> Box<dyn Aggregation> {
             Box::new(MinAggregation {
                 arg: self.arg.clone(),
                 min: None,
@@ -2035,7 +2837,7 @@ mod functions {
 
         fn complete(&mut self) -> Result<&GramVal> {
             if let Some(v) = &self.min {
-                return Ok(v);
+                Ok(v)
             } else {
                 Err(anyhow!(
                     "There were no input rows to the aggregation, cannot calculate min(..)"
@@ -2065,11 +2867,10 @@ mod functions {
 
     impl AggregatingFuncSpec for MaxSpec {
         fn signature(&self) -> &FuncSignature {
-            return &self.sig;
+            &self.sig
         }
 
         fn init(&self, mut args: Vec<Expr>) -> Box<dyn AggregatingFunc> {
-            println!("Init max({:?})", args);
             Box::new(Max {
                 arg: args.pop().expect("max takes 1 argument"),
             })
@@ -2082,7 +2883,7 @@ mod functions {
     }
 
     impl AggregatingFunc for Max {
-        fn init(&mut self, _ctx: &mut Context) -> Box<dyn Aggregation> {
+        fn init(&self, _ctx: &mut Context) -> Box<dyn Aggregation> {
             Box::new(MaxAggregation {
                 arg: self.arg.clone(),
                 max: None,
@@ -2114,7 +2915,7 @@ mod functions {
 
         fn complete(&mut self) -> Result<&GramVal> {
             if let Some(v) = &self.max {
-                return Ok(v);
+                Ok(v)
             } else {
                 Err(anyhow!(
                     "There were no input rows to the aggregation, cannot calculate min(..)"
@@ -2144,7 +2945,7 @@ mod functions {
 
     impl AggregatingFuncSpec for CountSpec {
         fn signature(&self) -> &FuncSignature {
-            return &self.sig;
+            &self.sig
         }
 
         fn init(&self, _args: Vec<Expr>) -> Box<dyn AggregatingFunc> {
@@ -2156,7 +2957,7 @@ mod functions {
     struct Count {}
 
     impl AggregatingFunc for Count {
-        fn init(&mut self, _ctx: &mut Context) -> Box<dyn Aggregation> {
+        fn init(&self, _ctx: &mut Context) -> Box<dyn Aggregation> {
             Box::new(CountAggregation {
                 counter: 0,
                 out: GramVal::Lit(Val::Int(0)),
@@ -2178,7 +2979,157 @@ mod functions {
 
         fn complete(&mut self) -> Result<&GramVal> {
             self.out = GramVal::Lit(Val::Int(self.counter));
-            return Ok(&self.out);
+            Ok(&self.out)
         }
+    }
+
+    #[derive(Debug)]
+    struct CollectSpec {
+        sig: FuncSignature,
+    }
+
+    impl CollectSpec {
+        pub fn new(tokens: &mut Tokens) -> CollectSpec {
+            let tok_tollect = tokens.tokenize("collect");
+            CollectSpec {
+                sig: FuncSignature {
+                    func_type: FuncType::Aggregating,
+                    name: tok_tollect,
+                    returns: Type::List(Box::new(Type::Any)),
+                    args: vec![(tokens.tokenize("v"), Type::Any)],
+                },
+            }
+        }
+    }
+
+    impl AggregatingFuncSpec for CollectSpec {
+        fn signature(&self) -> &FuncSignature {
+            &self.sig
+        }
+
+        fn init(&self, mut args: Vec<Expr>) -> Box<dyn AggregatingFunc> {
+            Box::new(Collect {
+                arg: args.pop().expect("collect takes 1 arg"),
+            })
+        }
+    }
+
+    #[derive(Debug)]
+    struct Collect {
+        arg: Expr,
+    }
+
+    impl AggregatingFunc for Collect {
+        fn init(&self, _ctx: &mut Context) -> Box<dyn Aggregation> {
+            Box::new(CollectAggregation {
+                arg: self.arg.clone(),
+                collection: GramVal::List(Vec::new()),
+            })
+        }
+    }
+
+    #[derive(Debug)]
+    struct CollectAggregation {
+        arg: Expr,
+        collection: GramVal,
+    }
+
+    impl Aggregation for CollectAggregation {
+        fn apply(&mut self, ctx: &mut Context, row: &mut GramRow) -> Result<()> {
+            let v = self.arg.eval(ctx, row)?;
+            match &mut self.collection {
+                GramVal::List(entries) => entries.push(v),
+                _ => bail!(
+                    "collect function state corrupted, expected list val got {:?}",
+                    self.collection
+                ),
+            }
+            Ok(())
+        }
+
+        fn complete(&mut self) -> Result<&GramVal> {
+            Ok(&self.collection)
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+
+    use super::*;
+    use tempfile::tempfile;
+
+    #[test]
+    fn test_misc() {
+        // This whole module is intentionally untested; it is meant to be thrown out once the
+        // feature tests pass; it's just here to walk through what needs doing.
+        // This particular test is here to make debugging easier, fill it with what you will.
+
+        let mut g = GramBackend::open(tempfile().unwrap()).unwrap();
+        let f = frontend::Frontend {
+            tokens: g.tokens(),
+            backend_desc: g.describe().unwrap(),
+        };
+        let mut cursor = g.new_cursor();
+
+        g.eval(
+            f.plan("CREATE (:Year {year: 2016})").unwrap(),
+            &mut cursor,
+            None,
+        );
+        while cursor.next().unwrap().is_some() {
+            // ..
+        }
+
+        g.eval(
+            f.plan(
+                "UNWIND $events AS event
+      MATCH (y:Year {year: event.year})
+      MERGE (e:Event {id: event.id})
+      MERGE (y)<-[:IN]-(e)
+      RETURN e.id AS x
+      ORDER BY x",
+            )
+            .unwrap(),
+            &mut cursor,
+            Some(&Val::Map(vec![(
+                "events".to_owned(),
+                Val::List(vec![
+                    Val::Map(vec![
+                        ("id".to_owned(), Val::Int(1)),
+                        ("year".to_owned(), Val::Int(2016)),
+                    ]),
+                    Val::Map(vec![
+                        ("id".to_owned(), Val::Int(2)),
+                        ("year".to_owned(), Val::Int(2016)),
+                    ]),
+                ]),
+            )])),
+        )
+        .unwrap();
+        while cursor.next().unwrap().is_some() {
+            // ..
+        }
+
+        g.eval(f.plan("MATCH (n) RETURN n").unwrap(), &mut cursor, None)
+            .unwrap();
+        while cursor.next().unwrap().is_some() {
+            println!("{:?}", cursor.projection)
+        }
+    }
+}
+
+fn unwrap_node_id(v: &GramVal) -> Result<usize> {
+    match v {
+        GramVal::Node { id, .. } => Ok(*id),
+        GramVal::Lit(Val::Node(n)) => Ok(n.id),
+        _ => bail!("expected a node, got {:?}", v)
+    }
+}
+
+fn unwrap_rel_index(v: &GramVal) -> Result<usize> {
+    match v {
+        GramVal::Rel { rel_index, .. } => Ok(*rel_index),
+        _ => bail!("expected a GramVal::Rel, got {:?}", v)
     }
 }

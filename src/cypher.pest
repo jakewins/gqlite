@@ -10,22 +10,30 @@ add_sub_op = ${ "-" | "+" }
 mult_div_expr = { term ~ (mult_div_op ~ term)* }
 mult_div_op = ${ "*" | "/" }
 
-term = _{ binary_op | atom }
+term = _{ binary_op | is_null | is_not_null | atom }
 
 // Need something where like blah() * b.name / 12 + count(*) is handled right
 binary_op = { atom ~ op ~ atom }
 op = ${ "=" | ">" | "<>" }
 
-atom = _{ bool | science | float | int | prop_lookup | count_call | func_call | string | param | id | list | map | "(" ~ expr ~ ")" }
+is_null = { atom ~ ^"IS" ~ ^"NULL" }
+is_not_null = { atom ~ ^"IS" ~ ^"NOT" ~ ^"NULL" }
+
+atom = _{ bool | science | float | int | prop_lookup | count_call | func_call | string | param_wrap | id | list_comprehension | list | map | "(" ~ expr ~ ")" }
 
 id = ${ ( ASCII_ALPHA | "_" | "-" ) ~ ( ASCII_ALPHANUMERIC | "_" | "-" )* }
 
-param = ${ "$" ~ id }
+param_wrap = _{ "$" ~ param }
+param = ${ id }
 
-prop_lookup = { id ~ ("." ~ id)+ }
+prop_lookup = { (id | param_wrap) ~ (("." ~ id) | ("[" ~ expr ~ "]"))+ }
 
+// TODO: Use function_id and arglist here
 func_call = { id ~ "(" ~ (expr ~ ("," ~ expr)*)? ~ ")" }
 count_call = { ^"COUNT" ~ "(" ~ "*" ~ ")" }
+
+function_id = { id ~ ("." ~ id)+ }
+arglist = { expr ~ ("," ~ expr)* }
 
 string = ${
   "\"" ~ dblq_str_inner ~ "\"" |
@@ -68,25 +76,46 @@ list = {
   "[" ~ expr ~ ("," ~ expr)* ~ "]"
 }
 
-// Multiple labels are supported for CREATE but not yet for MATCH
-node = { "(" ~ id? ~ ( ":" ~ label )* ~ map? ~ ")" }
-label = { id }
-
-rel = { left_arrow? ~ "-" ~ ( "[" ~ id? ~ ( ":" ~ rel_type )? ~ map? ~ "]" )? ~ "-" ~ right_arrow? }
-rel_type = { id }
-left_arrow = { "<" }
-right_arrow = { ">" }
-
-patterns = _{ pattern ~ ( "," ~ pattern )* }
-pattern = { node ~ ( rel ~ node )* }
+list_comprehension = {
+  "[" ~ id ~ ^"IN" ~ expr ~ "|" ~ expr ~ "]"
+}
 
 projection = { expr ~ (^"AS" ~ id)? }
 projections = { projection ~ ( "," ~ projection )* }
 project_all = { "*" }
 
+// this thing with the parens is not right; what we really should do, I *think*,
+// is to say that a single assignment is prop_lookup ~ "=" ~ expr; but I want
+// to see how far the TCK pushes me in that direction
+single_assignment = { ( id | ("(" ~ id ~ ")"))~ "." ~ id ~ "=" ~ expr  }
+overwrite_assignment = { id ~ "=" ~ expr }
+append_assignment = { id ~ "+=" ~ expr }
+label_assignment = { id ~ ":" ~ label }
+assignment = _{ append_assignment | overwrite_assignment | single_assignment | label_assignment }
+assignments = _{ assignment ~ ("," ~ assignment)* }
+
 distinct_clause = { ^"DISTINCT" }
 
 where_clause = { ^"WHERE" ~ expr }
+
+// Multiple labels are supported for CREATE but not yet for MATCH
+node = { "(" ~ id? ~ ( ":" ~ label )* ~ map? ~ ")" }
+label = { id }
+
+rel = { left_arrow? ~ ( ( "-[" ~ id? ~ ( ":" ~ rel_type )? ~ map? ~ "]-" ) | "--" | "-" ) ~ right_arrow? }
+rel_type = { id }
+left_arrow = { "<" }
+right_arrow = { ">" }
+
+pattern = { node ~ ( rel ~ node )* }
+patterns = _{ pattern ~ ( "," ~ pattern )* }
+merge_patterns = { patterns }
+pattern_name = { id ~ "=" }
+match_pattern = _{ (pattern | (pattern_name ~ pattern) ) }
+match_patterns = _{ match_pattern ~ ( "," ~ match_pattern )* }
+
+on_create_clause = { ^"ON" ~ ^"CREATE" ~ ^"SET" ~ assignments }
+on_match_clause = { ^"ON" ~ ^"MATCH" ~ ^"SET" ~ assignments }
 
 order_clause = { ^"ORDER BY" ~ order_expr ~ ( "," ~ order_expr )* }
 order_expr = { expr ~ (^"DESC" | ^"ASC")? }
@@ -96,11 +125,17 @@ limit_clause = { ^"LIMIT" ~ expr }
 
 optional_clause = { ^"OPTIONAL" }
 
+detach_clause = { ^"DETACH" }
+
 create_stmt = { ^"CREATE" ~ patterns }
-match_stmt = { optional_clause? ~ ^"MATCH" ~ patterns ~ where_clause? }
-with_stmt = { ^"WITH" ~ distinct_clause? ~ projections ~ where_clause? ~ order_clause? ~ skip_clause? ~ limit_clause? }
+set_stmt = { ^"SET" ~ assignments }
+delete_stmt = { detach_clause? ~ ^"DELETE" ~ expr ~ ("," ~ expr)* }
+merge_stmt = { ^"MERGE" ~ merge_patterns ~ (on_create_clause | on_match_clause)* }
+match_stmt = { optional_clause? ~ ^"MATCH" ~ match_patterns ~ where_clause? }
+with_stmt = { ^"WITH" ~ distinct_clause? ~ ( projections | project_all ) ~ where_clause? ~ order_clause? ~ skip_clause? ~ limit_clause? }
 unwind_stmt = { ^"UNWIND" ~ expr ~ ^"AS" ~ id }
+call_stmt = { ^"CALL" ~ function_id ~  "(" ~ arglist? ~ ")" }
 return_stmt = { ^"RETURN" ~ distinct_clause? ~ ( projections | project_all ) ~ order_clause? ~ skip_clause? ~ limit_clause? }
 
-statement = _{ create_stmt | match_stmt | unwind_stmt | with_stmt }
+statement = _{ create_stmt | set_stmt | delete_stmt | merge_stmt | match_stmt | unwind_stmt | call_stmt | with_stmt }
 query = { SOI ~ ( statement )* ~ return_stmt? ~ EOI }

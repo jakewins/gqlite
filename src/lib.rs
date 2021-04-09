@@ -43,9 +43,14 @@ impl<T: Backend> Database<T> {
         Cursor { inner: bc }
     }
 
-    pub fn run(&mut self, query_str: &str, cursor: &mut Cursor<T>) -> Result<()> {
+    pub fn run(
+        &mut self,
+        query_str: &str,
+        cursor: &mut Cursor<T>,
+        params: Option<&Val>,
+    ) -> Result<()> {
         let plan = self.frontend.plan(query_str)?;
-        self.backend.eval(plan, &mut cursor.inner)
+        self.backend.eval(plan, &mut cursor.inner, params)
     }
 }
 
@@ -79,6 +84,7 @@ impl<B: Backend> Cursor<B> {
         self.inner.fields()
     }
 
+    #[allow(clippy::should_implement_trait)]
     pub fn next(&mut self) -> Result<Option<&Row>> {
         self.inner.next()
     }

@@ -1,6 +1,7 @@
 use cucumber::{after, before, cucumber};
 use gqlite::gramdb::{GramCursor, GramDatabase};
-use gqlite::{Database, Val};
+use gqlite::{Database, Val, Result};
+use std::collections::{HashMap, HashSet};
 use tempfile::tempfile;
 
 #[macro_use]
@@ -9,8 +10,8 @@ extern crate anyhow;
 pub struct GraphProperties {
     node_count: i32,
     relationship_count: i32,
-    labels_count: i32,
-    properties_count: i32,
+    labels: HashSet<String>,
+    properties: HashMap<String, Val>,
 }
 
 fn empty_db() -> GramDatabase {
@@ -21,7 +22,15 @@ pub struct MyWorld {
     graph: GramDatabase,
     starting_graph_properties: GraphProperties,
     parameters: Vec<(String, Val)>,
+
+    query_outcome: Result<()>,
     result: GramCursor,
+
+    assertion_config: AssertionConfig,
+}
+
+pub struct AssertionConfig {
+    ignore_list_element_order: bool,
 }
 
 impl cucumber::World for MyWorld {}
@@ -33,25 +42,30 @@ impl std::default::Default for MyWorld {
         let cursor = db.new_cursor();
         MyWorld {
             graph: db,
+            query_outcome: Ok(()),
             result: cursor,
             parameters: Vec::new(),
             starting_graph_properties: GraphProperties {
                 node_count: 0,
                 relationship_count: 0,
-                labels_count: 0,
-                properties_count: 0,
+                labels: Default::default(),
+                properties: Default::default(),
+            },
+            assertion_config: AssertionConfig {
+                ignore_list_element_order: false,
             },
         }
     }
 }
 
 mod example_steps {
-    use super::{empty_db, MyWorld};
+    use super::{empty_db, AssertionConfig, MyWorld};
     use anyhow::Result;
     use cucumber::{steps, Step};
     use gqlite::gramdb::GramCursor;
     use gqlite::{Error, Val};
 
+    use std::collections::{HashMap, HashSet};
     use std::iter::Peekable;
     use std::str::Chars;
 
@@ -96,6 +110,7 @@ mod example_steps {
         },
         Rel {
             reltype: String,
+            props: Vec<(String, ValMatcher)>,
         },
     }
 
@@ -103,10 +118,26 @@ mod example_steps {
         pub fn to_val(&self) -> Val {
             match self {
                 ValMatcher::Int(v) => Val::Int(*v),
-                v => panic!("Don't know how to convert {:?} to val", v),
+                ValMatcher::String(v) => Val::String(v.to_owned()),
+                ValMatcher::Bool(v) => Val::Bool(*v),
+                ValMatcher::Map(entries) => {
+                    let mut out = Vec::with_capacity(entries.len());
+                    for (k, v) in entries {
+                        out.push((k.to_owned(), v.to_val()))
+                    }
+                    Val::Map(out)
+                }
+                ValMatcher::List(entries) => {
+                    let mut out = Vec::with_capacity(entries.len());
+                    for v in entries {
+                        out.push(v.to_val())
+                    }
+                    Val::List(out)
+                }
+                v => panic!("ValMatcher don't know how to convert {:?} to val", v),
             }
         }
-        pub fn test_eq(&self, v: Val) -> Result<()> {
+        pub fn test_eq(&self, cfg: &AssertionConfig, v: Val) -> Result<()> {
             match self {
                 ValMatcher::Int(e) => {
                     // The TCK writes float results in a way that doesn't let us distinguish
@@ -132,7 +163,7 @@ mod example_steps {
                             for (ak, av) in &actual {
                                 if ak == k {
                                     found = true;
-                                    ev.test_eq(av.clone())?;
+                                    ev.test_eq(cfg, av.clone())?;
                                 }
                             }
                             if !found {
@@ -153,8 +184,31 @@ mod example_steps {
                                 actual
                             )
                         }
-                        for i in 0..expected.len() {
-                            expected[i].test_eq(actual[i].clone())?;
+                        if cfg.ignore_list_element_order {
+                            let mut actual_remaining = actual.clone();
+                            for ev in expected {
+                                let index = actual_remaining
+                                    .iter()
+                                    .position(|av| match ev.test_eq(cfg, av.clone()) {
+                                        Ok(_) => true,
+                                        _ => false,
+                                    })
+                                    .unwrap_or_else(|| {
+                                        panic!("Expected '{:?}' in list {:?}", ev, expected)
+                                    });
+                                actual_remaining.remove(index);
+                            }
+                            if !actual_remaining.is_empty() {
+                                bail!(
+                                    "expected {:?} to equal {:?}, in any order",
+                                    actual,
+                                    expected
+                                );
+                            }
+                        } else {
+                            for i in 0..expected.len() {
+                                expected[i].test_eq(cfg, actual[i].clone())?;
+                            }
                         }
                         Ok(())
                     }
@@ -171,7 +225,7 @@ mod example_steps {
                             for (ek, ev) in props {
                                 if ek == k {
                                     found = true;
-                                    ev.test_eq(prop_val.clone())?;
+                                    ev.test_eq(cfg, prop_val.clone())?;
                                 }
                             }
                             if !found {
@@ -203,8 +257,24 @@ mod example_steps {
                         bail!("Expected a node, found {:?}", v);
                     }
                 }
-                ValMatcher::Rel { reltype } => {
+                ValMatcher::Rel { reltype, props } => {
                     if let Val::Rel(r) = v {
+                        if r.props.len() != props.len() {
+                            bail!("Rel has different number of properties from spec, expected {:?}, got {:?}",
+                                   props, r.props);
+                        }
+                        for (k, prop_val) in &r.props {
+                            let mut found = false;
+                            for (ek, ev) in props {
+                                if ek == k {
+                                    found = true;
+                                    ev.test_eq(cfg, prop_val.clone())?;
+                                }
+                            }
+                            if !found {
+                                bail!("Node has unspecified property {}", k);
+                            }
+                        }
                         ensure_eq!(reltype, &r.rel_type)
                     } else {
                         bail!("Expected a rel, found {:?}", v);
@@ -216,22 +286,28 @@ mod example_steps {
 
     fn run_preparatory_query(world: &mut MyWorld, step: &Step) -> Result<(), Error> {
         let mut cursor = world.graph.new_cursor();
-        let result = world.graph.run(&step.docstring().unwrap(), &mut cursor);
+        let result = world.graph.run(
+            &step.docstring().unwrap(),
+            &mut cursor,
+            Some(&Val::Map(world.parameters.clone())),
+        );
         while let Some(_) = cursor.next()? {
             // consume
         }
         world.starting_graph_properties.node_count = count_nodes(world);
         world.starting_graph_properties.relationship_count = count_rels(world);
-        world.starting_graph_properties.labels_count = count_labels(world);
-        world.starting_graph_properties.properties_count = count_properties(world);
+        world.starting_graph_properties.labels = gather_labels(world);
+        world.starting_graph_properties.properties = gather_properties(world);
         result
     }
 
     fn set_parameters(world: &mut MyWorld, step: &Step) -> Result<(), Error> {
         let mut table = step.table().unwrap().clone();
         let pkey = table.header[0].to_string();
-        let pval = str_to_val(&mut table.header[1].chars().peekable()).to_val();
-        world.parameters.push((pkey, pval));
+        if !pkey.is_empty() {
+            let pval = str_to_val(&mut table.header[1].chars().peekable()).to_val();
+            world.parameters.push((pkey, pval));
+        }
         for mut row in table.rows {
             let pkey = row[0].to_string();
             let pval = str_to_val(&mut row[1].chars().peekable()).to_val();
@@ -241,10 +317,14 @@ mod example_steps {
     }
 
     fn start_query(world: &mut MyWorld, step: &Step) {
-        world
+        world.query_outcome = world
             .graph
-            .run(&step.docstring().unwrap(), &mut world.result)
-            .expect("Should not fail")
+            .run(
+                &step.docstring().unwrap(),
+                &mut world.result,
+                Some(&Val::Map(world.parameters.clone())),
+            );
+
     }
 
     fn count_rows(result: &mut GramCursor) -> Result<i32, Error> {
@@ -259,7 +339,7 @@ mod example_steps {
         let mut cursor = world.graph.new_cursor();
         world
             .graph
-            .run("MATCH (n) RETURN n", &mut cursor)
+            .run("MATCH (n) RETURN n", &mut cursor, None)
             .expect("should succeed");
         let mut ct = 0;
         while let Some(r) = cursor.next().unwrap() {
@@ -272,16 +352,39 @@ mod example_steps {
         ct as i32
     }
 
-    fn count_properties(world: &mut MyWorld) -> i32 {
+    fn gather_labels(world: &mut MyWorld) -> HashSet<String> {
+        let mut out = HashSet::new();
         let mut cursor = world.graph.new_cursor();
         world
             .graph
-            .run("MATCH (n) RETURN n", &mut cursor)
+            .run("MATCH (n) RETURN n", &mut cursor, None)
             .expect("should succeed");
-        let mut ct = 0;
         while let Some(r) = cursor.next().unwrap() {
             if let Val::Node(n) = &r.slots[0] {
-                ct += n.props.len()
+                for l in &n.labels {
+                    out.insert(l.to_owned());
+                }
+            } else {
+                panic!("Query requesting nodes returned something else: {:?}", r)
+            }
+        }
+        out
+    }
+
+    // Creates a map of '<node|rel>.<id>.<key>' -> Val for all properties in the graph,
+    // used to determine properties being changed by comparing two invocations of this
+    fn gather_properties(world: &mut MyWorld) -> HashMap<String, Val> {
+        let mut out = HashMap::default();
+        let mut cursor = world.graph.new_cursor();
+        world
+            .graph
+            .run("MATCH (n) RETURN n", &mut cursor, None)
+            .expect("should succeed");
+        while let Some(r) = cursor.next().unwrap() {
+            if let Val::Node(n) = &r.slots[0] {
+                for (k, v) in &n.props {
+                    out.insert(format!("node/{}/{}", n.id, k), v.clone());
+                }
             } else {
                 panic!("Query requesting nodes returned something else: {:?}", r)
             }
@@ -289,23 +392,63 @@ mod example_steps {
 
         world
             .graph
-            .run("MATCH ()-[r]->() RETURN r", &mut cursor)
+            .run("MATCH ()-[r]->() RETURN r", &mut cursor, None)
             .expect("should succeed");
         while let Some(r) = cursor.next().unwrap() {
             if let Val::Rel(n) = &r.slots[0] {
-                ct += n.props.len()
+                for (k, v) in &n.props {
+                    out.insert(
+                        format!("rel/{}/{}/{}/{}", n.start, n.rel_type, n.end, k),
+                        v.clone(),
+                    );
+                }
             } else {
                 panic!("Query requesting rels returned something else: {:?}", r)
             }
         }
-        ct as i32
+
+        out
+    }
+
+    fn count_added_properties(original: &HashMap<String, Val>, new: &HashMap<String, Val>) -> i32 {
+        let mut added = 0;
+        for (oldkey, oldval) in original.iter() {
+            if let Some(newval) = new.get(oldkey) {
+                if !oldval.eq(newval) {
+                    added += 1;
+                }
+            }
+        }
+        for (newkey, _newval) in new.iter() {
+            if !original.contains_key(newkey) {
+                added += 1
+            }
+        }
+        added
+    }
+
+    fn count_removed_properties(
+        original: &HashMap<String, Val>,
+        new: &HashMap<String, Val>,
+    ) -> i32 {
+        let mut removed = 0;
+        for (oldkey, oldval) in original.iter() {
+            if let Some(newval) = new.get(oldkey) {
+                if !oldval.eq(newval) {
+                    removed += 1;
+                }
+            } else {
+                removed += 1;
+            }
+        }
+        removed
     }
 
     fn count_nodes(world: &mut MyWorld) -> i32 {
         let mut cursor = world.graph.new_cursor();
         world
             .graph
-            .run("MATCH (n) RETURN n", &mut cursor)
+            .run("MATCH (n) RETURN n", &mut cursor, None)
             .expect("should succeed");
         count_rows(&mut cursor).unwrap()
     }
@@ -314,29 +457,65 @@ mod example_steps {
         let mut cursor = world.graph.new_cursor();
         world
             .graph
-            .run("MATCH (n)-->() RETURN n", &mut cursor)
+            .run(
+                "MATCH (n)-->() RETURN n",
+                &mut cursor,
+                Some(&Val::Map(world.parameters.clone())),
+            )
             .expect("should succeed");
         count_rows(&mut cursor).unwrap()
     }
-
     fn assert_side_effect(world: &mut MyWorld, kind: &str, val: &str) {
         match kind {
             "+nodes" => assert_eq!(
                 count_nodes(world) - world.starting_graph_properties.node_count,
                 val.parse::<i32>().unwrap()
             ),
+            "-nodes" => assert_eq!(
+                world.starting_graph_properties.node_count - count_nodes(world),
+                val.parse::<i32>().unwrap()
+            ),
             "+relationships" => assert_eq!(
                 count_rels(world) - world.starting_graph_properties.relationship_count,
                 val.parse::<i32>().unwrap()
             ),
-            "+labels" => assert_eq!(
-                count_labels(world) - world.starting_graph_properties.labels_count,
+            "-relationships" => assert_eq!(
+                world.starting_graph_properties.relationship_count - count_rels(world),
                 val.parse::<i32>().unwrap()
             ),
-            "+properties" => assert_eq!(
-                count_properties(world) - world.starting_graph_properties.properties_count,
-                val.parse::<i32>().unwrap()
-            ),
+            "+labels" => {
+                let current_labels = gather_labels(world);
+                let original_labels = &world.starting_graph_properties.labels;
+                assert_eq!(
+                    (current_labels.len() - original_labels.len()) as i32,
+                    val.parse::<i32>().unwrap(),
+                    "+labels",
+                )
+            }
+            "-labels" => {
+                let current_labels = gather_labels(world);
+                let original_labels = &world.starting_graph_properties.labels;
+                assert_eq!(
+                    (original_labels.len() - current_labels.len()) as i32,
+                    val.parse::<i32>().unwrap(),
+                    "+labels",
+                )
+            }
+            "+properties" => {
+                let new_props = gather_properties(world);
+                assert_eq!(
+                    count_added_properties(&world.starting_graph_properties.properties, &new_props),
+                    val.parse::<i32>().unwrap()
+                )
+            }
+            "-properties" => {
+                let new_props = gather_properties(world);
+                let removed = count_removed_properties(
+                    &world.starting_graph_properties.properties,
+                    &new_props,
+                );
+                assert_eq!(removed, val.parse::<i32>().unwrap())
+            }
             _ => panic!(format!("unknown side effect: '{}'", kind)),
         }
     }
@@ -369,10 +548,13 @@ mod example_steps {
         }
 
         for mut row in table.rows {
-            if let Some(actual) = world.result.next().unwrap() {
+            let result = world.result.next();
+            if let Some(actual) = result.unwrap() {
                 for slot in 0..row.len() {
-                    str_to_val(&mut row[slot].chars().peekable())
-                        .test_eq(actual.slots[slot].clone())
+                    let expected_val = str_to_val(&mut row[slot].chars().peekable());
+                    let actual = actual.slots[slot].clone();
+                    expected_val
+                        .test_eq(&world.assertion_config, actual)
                         .unwrap();
                 }
             } else {
@@ -419,7 +601,7 @@ mod example_steps {
                 let mut row_copy = row.clone();
                 for slot in 0..row.len() {
                     let slot_equal = str_to_val(&mut row_copy[slot].chars().peekable())
-                        .test_eq(actual.slots[slot].clone());
+                        .test_eq(&world.assertion_config, actual.slots[slot].clone());
                     if slot_equal.is_err() {
                         row_equal = slot_equal;
                         break;
@@ -493,6 +675,7 @@ mod example_steps {
 
         fn parse_rel(chars: &mut Peekable<Chars>) -> ValMatcher {
             let mut reltype = None;
+            let mut props = Vec::new();
             loop {
                 match chars.peek() {
                     Some(':') => {
@@ -503,10 +686,52 @@ mod example_steps {
                         chars.next().unwrap();
                         return ValMatcher::Rel {
                             reltype: reltype.unwrap(),
+                            props,
                         };
+                    }
+                    Some(' ') => {
+                        chars.next().unwrap();
+                    }
+                    Some('{') => {
+                        chars.next().unwrap();
+                        props = parse_map_entries(chars);
                     }
                     _ => panic!("unknown rel part: {:?}", chars),
                 }
+            }
+        }
+
+        fn parse_map_entries(chars: &mut Peekable<Chars>) -> Vec<(String, ValMatcher)> {
+            let mut entries = Vec::new();
+            loop {
+                // Parse entry identifier..
+                let mut identifier = None;
+                loop {
+                    match chars.peek() {
+                        Some('}') => {
+                            chars.next().unwrap();
+                            return entries;
+                        }
+                        Some('a'..='z') => identifier = Some(parse_identifier(chars)),
+                        Some(':') => {
+                            chars.next().unwrap();
+                            break;
+                        }
+                        Some(' ') => {
+                            chars.next().unwrap();
+                            ()
+                        }
+                        Some(',') => {
+                            chars.next().unwrap();
+                            ()
+                        }
+                        _ => panic!(format!("unknown map portion: '{:?}'", chars)),
+                    }
+                }
+
+                // Parse entry value..
+                let value = str_to_val(chars);
+                entries.push((identifier.unwrap(), value))
             }
         }
 
@@ -570,37 +795,7 @@ mod example_steps {
                 }
                 '{' => {
                     chars.next().unwrap();
-                    let mut entries = Vec::new();
-                    loop {
-                        // Parse entry identifier..
-                        let mut identifier = None;
-                        loop {
-                            match chars.peek() {
-                                Some('}') => {
-                                    chars.next().unwrap();
-                                    return ValMatcher::Map(entries);
-                                }
-                                Some('a'..='z') => identifier = Some(parse_identifier(chars)),
-                                Some(':') => {
-                                    chars.next().unwrap();
-                                    break;
-                                }
-                                Some(' ') => {
-                                    chars.next().unwrap();
-                                    ()
-                                }
-                                Some(',') => {
-                                    chars.next().unwrap();
-                                    ()
-                                }
-                                _ => panic!(format!("unknown map portion: '{:?}'", chars)),
-                            }
-                        }
-
-                        // Parse entry value..
-                        let value = str_to_val(chars);
-                        entries.push((identifier.unwrap(), value))
-                    }
+                    return ValMatcher::Map(parse_map_entries(chars));
                 }
                 '(' => {
                     chars.next().unwrap();
@@ -659,17 +854,40 @@ mod example_steps {
             start_query(world, step)
         };
 
+        when "executing control query:" |world, step| {
+            // Take actions
+            start_query(world, step)
+        };
+
         then "the result should be empty" |world, _step| {
-            // Check that the outcomes to be observed have occurred
+            world.query_outcome.as_ref().expect("query should succeed");
             assert_eq!(0, count_rows(&mut world.result).unwrap());
         };
 
         then "the result should be, in any order:" |mut world, step| {
+            world.query_outcome.as_ref().expect("query should succeed");
             assert_result_in_any_order(&mut world, &step)
         };
 
         then "the result should be, in order:" |mut world, step| {
+            world.query_outcome.as_ref().expect("query should succeed");
             assert_result(&mut world, &step)
+        };
+
+        then "the result should be (ignoring element order for lists):" |mut world, step| {
+            world.query_outcome.as_ref().expect("query should succeed");
+            world.assertion_config.ignore_list_element_order = true;
+            assert_result(&mut world, &step);
+            world.assertion_config.ignore_list_element_order = false
+        };
+
+        then "a SyntaxError should be raised at compile time: RequiresDirectedRelationship" |mut world, step| {
+            match world.query_outcome.as_ref() {
+            Err(e) => {
+                // TODO, we've not implemented good error codes / messages
+            }
+            _ => assert_eq!(false, true, "expected query to fail")
+            }
         };
 
         then "the side effects should be:" |world, step| {

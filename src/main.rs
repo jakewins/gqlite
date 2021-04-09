@@ -26,7 +26,7 @@ fn main() -> anyhow::Result<()> {
 
         let mut db = GramDatabase::open(file)?;
         let mut cursor = db.new_cursor();
-        db.run(query_str, &mut cursor)?;
+        db.run(query_str, &mut cursor, None)?;
 
         while let Some(row) = cursor.next()? {
             let mut first = true;

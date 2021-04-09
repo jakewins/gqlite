@@ -1,12 +1,52 @@
-use super::{parse_pattern_graph, Dir, Expr, LogicalPlan, Pair, PlanningContext, Result, Rule};
+use super::{Dir, Expr, LogicalPlan, Pair, PlanningContext, Result, Rule, Op};
 use crate::backend::Token;
-use crate::frontend::{Op, PatternNode};
+use super::patterns::{PatternGraph, PatternNode, parse_pattern_graph};
 
 pub fn plan_match(
     pc: &mut PlanningContext,
     src: LogicalPlan,
     match_stmt: Pair<Rule>,
 ) -> Result<LogicalPlan> {
+    let pg = parse_pattern_graph(pc, match_stmt)?;
+
+    // println!("PG: {:?}", pg);
+
+    if pg.optional {
+        // Optional match is basically just MATCH with a single row if there's no match,
+        // where all unbound outputs are nulled. We just need to get a list of which slots
+        // to clear out:
+        let mut optional_slots = Vec::new();
+
+        for v in pg.v.values() {
+            if !v.solved {
+                optional_slots.push(pc.scoping.lookup_or_allocrow(v.identifier));
+            }
+        }
+        for e in &pg.e {
+            if !e.solved {
+                optional_slots.push(pc.scoping.lookup_or_allocrow(e.identifier));
+            }
+        }
+
+        // Now we plan the match like a normal one
+        let match_plan = plan_match_patterngraph(pc, src, pg)?;
+
+        // And just return it in an Optional operator that'll clear the unbound slots:
+        return Ok(LogicalPlan::Optional {
+            src: Box::new(match_plan),
+            slots: optional_slots,
+        });
+    }
+
+    plan_match_patterngraph(pc, src, pg)
+}
+
+pub fn plan_match_patterngraph(
+    pc: &mut PlanningContext,
+    src: LogicalPlan,
+    mut pg: PatternGraph,
+) -> Result<LogicalPlan> {
+    let scope = pc.scoping.current_scope_no();
     fn filter_expand(expand: LogicalPlan, slot: Token, labels: &[Token]) -> LogicalPlan {
         let labels = labels
             .iter()
@@ -28,55 +68,47 @@ pub fn plan_match(
     }
 
     let mut plan = src;
-    let mut pg = parse_pattern_graph(pc, match_stmt)?;
 
-    if pg.optional {
-        // We currently only handle a singular case here, OPTIONAL MATCH with a single unbound node:
-        if pg.e.len() > 0 {
-            bail!("gqlite does not yet support OPTIONAL MATCH entirely, sorry")
-        }
+    // 0: Loop through the rels in the pattern and find bound rels
+    let mut pattern_has_solved_nodes = false;
+    for rel in &mut pg.e {
+        if rel.solved {
+            pattern_has_solved_nodes = true;
+            let left_node = pg.v.get(&rel.left_node).unwrap();
+            let right_node = pg.v.get(&rel.right_node.unwrap()).unwrap();
 
-        if pg.predicate.is_some() {
-            bail!("gqlite does not yet support OPTIONAL MATCH entirely, sorry")
-        }
-
-        let (_, node) = pg.v.iter().next().unwrap();
-
-        let node_slot = pc.get_or_alloc_slot(node.identifier);
-        return Ok(LogicalPlan::Optional {
-            src: Box::new(LogicalPlan::NodeScan {
+            // TODO this is wrong, lets see how far it can go before the TCK catches on to that..
+            //      eg. at the very least this needs to emit two rows if the path has no direction.
+            //      like in MATCH ()-[r]->() WITH r MATCH (a)-[r]-(b), there are two rows for each
+            //      rel, one with the start node as `a`, one with the start node as `b`.
+            plan = LogicalPlan::ExpandRel {
                 src: Box::new(plan),
-                slot: node_slot,
-                labels: node.labels.first().cloned(),
-            }),
-            slots: vec![node_slot],
-        });
-    }
+                scope,
+                src_rel_slot: pc.scoping.lookup_or_allocrow(rel.identifier),
+                start_node_slot: pc.scoping.lookup_or_allocrow(left_node.identifier),
+                end_node_slot: pc.scoping.lookup_or_allocrow(right_node.identifier),
+            };
 
-    // Ok, now we have parsed the pattern into a full graph, time to start solving it
-    println!("built pg: {:?}", pg);
+            rel.solved = true;
+            pg.v.get_mut(&rel.left_node).unwrap().solved = true;
+            pg.v.get_mut(&rel.right_node.unwrap()).unwrap().solved = true;
+        }
+    }
 
     // 1: Loop through all nodes in the pattern and..
     //    - Find any pre-existing bound nodes we could start from
     //    - Pick a candidate start point to use if ^^ doesn't work
     //    - Declare all identifiers introduced
     let mut candidate_id = None;
-    let mut pattern_has_bound_nodes = false;
     for id in &pg.v_order {
-        if let None = candidate_id {
+        if candidate_id.is_none() {
             candidate_id = Some(id);
         }
         let candidate = pg.v.get_mut(id).unwrap();
 
-        if pc.is_declared(candidate.identifier) {
-            // MATCH (n) WITH n MATCH (n)-->(b); "n" is already a bound value, so we start there
-            pattern_has_bound_nodes = true;
-            candidate.solved = true;
-        }
-
-        // If the node is not anonymous, make sure its identifier is declared
-        if !candidate.anonymous {
-            pc.declare_tok(candidate.identifier)
+        if candidate.solved {
+            pattern_has_solved_nodes = true;
+            break;
         }
 
         // Prefer a candidate with labels since that has higher selectivity
@@ -89,7 +121,7 @@ pub fn plan_match(
     }
 
     // 2: If there's no bound nodes, use the candidate as start point
-    if !pattern_has_bound_nodes {
+    if !pattern_has_solved_nodes {
         if let Some(candidate_id) = candidate_id {
             let candidate = pg.v.get_mut(candidate_id).unwrap();
             candidate.solved = true;
@@ -125,17 +157,12 @@ pub fn plan_match(
                 rel.solved = true;
                 solved_any = true;
 
-                // Annoying to have to do this here, maybe move this
-                // back up into parse_pattern_graph..
-                if !rel.anonymous {
-                    pc.declare_tok(rel.identifier);
-                }
-
-                let dst = pc.get_or_alloc_slot(right_id);
+                let dst = pc.scoping.lookup_or_allocrow(right_id);
                 let expand = LogicalPlan::Expand {
                     src: Box::new(plan),
-                    src_slot: pc.get_or_alloc_slot(left_id),
-                    rel_slot: pc.get_or_alloc_slot(rel.identifier),
+                    scope,
+                    src_slot: pc.scoping.lookup_or_allocrow(left_id),
+                    rel_slot: pc.scoping.lookup_or_allocrow(rel.identifier),
                     dst_slot: dst,
                     rel_type: rel.rel_type,
                     dir: rel.dir,
@@ -148,22 +175,31 @@ pub fn plan_match(
                 rel.solved = true;
                 solved_any = true;
 
-                // Annoying to have to do this here, maybe move this
-                // back up into parse_pattern_graph..
-                if !rel.anonymous {
-                    pc.declare_tok(rel.identifier);
-                }
-
-                let dst = pc.get_or_alloc_slot(left_id);
+                let dst = pc.scoping.lookup_or_allocrow(left_id);
                 let expand = LogicalPlan::Expand {
                     src: Box::new(plan),
-                    src_slot: pc.get_or_alloc_slot(right_id),
-                    rel_slot: pc.get_or_alloc_slot(rel.identifier),
+                    scope,
+                    src_slot: pc.scoping.lookup_or_allocrow(right_id),
+                    rel_slot: pc.scoping.lookup_or_allocrow(rel.identifier),
                     dst_slot: dst,
                     rel_type: rel.rel_type,
                     dir: rel.dir.map(Dir::reverse),
                 };
                 plan = filter_expand(expand, dst, &left_node.labels);
+            } else if left_solved && right_solved {
+                // Both sides are solved, need to find rel that bridges them.
+                rel.solved = true;
+                solved_any = true;
+                let dst_slot = pc.scoping.lookup_or_allocrow(rel.identifier);
+                plan = LogicalPlan::ExpandInto {
+                    src: Box::new(plan),
+                    scope,
+                    left_node_slot: pc.scoping.lookup_or_allocrow(left_id),
+                    right_node_slot: pc.scoping.lookup_or_allocrow(right_id),
+                    dst_slot,
+                    rel_type: rel.rel_type,
+                    dir: rel.dir,
+                }
             }
         }
 
@@ -172,7 +208,7 @@ pub fn plan_match(
         // eg. something like MATCH (a), (b) or MATCH (a), (b)-->(). So, go through the nodes
         // and, if there are unsolved ones, this means there's a cartesian product we need to solve
         if !solved_any {
-            for (_, v) in &mut pg.v {
+            for v in pg.v.values_mut() {
                 if v.solved {
                     continue;
                 }
@@ -182,7 +218,7 @@ pub fn plan_match(
                 v.solved = true;
 
                 let inner = Box::new(plan_match_node(pc, v, LogicalPlan::Argument)?);
-                plan = LogicalPlan::NestLoop {
+                plan = LogicalPlan::CartesianProduct {
                     outer: Box::new(plan),
                     inner,
                     predicate: Expr::Bool(true),
@@ -205,12 +241,19 @@ pub fn plan_match(
         }
     }
 
+    // 4: Store any names for patterns the user asked for, so we know what they mean later on
+    for named_pattern in &pg.named_patterns {
+        // Convert to an expression, now that we know all the parts are solved and can be referenced
+        let pathslots: Vec<usize> = named_pattern.parts.iter().map(|tok| pc.scoping.lookup_or_allocrow(*tok) ).collect();
+        pc.scoping.alias(named_pattern.identifier, Expr::Path(pathslots));
+    }
+
     // Finally, add the pattern-wide predicate to filter the result of the pattern match
     // see the note on PatternGraph about issues with this "late filter" approach
-    if let Some(pred) = pg.predicate {
+    if let Some(pred) = &pg.predicate {
         return Ok(LogicalPlan::Selection {
             src: Box::new(plan),
-            predicate: pred,
+            predicate: pred.clone(),
         });
     }
 
@@ -226,9 +269,10 @@ fn plan_match_node(
         bail!("Multiple label match not yet implemented")
     }
     // Getting all possible nodes..
-    let node_slot = pc.get_or_alloc_slot(v.identifier);
+    let node_slot = pc.scoping.lookup_or_allocrow(v.identifier);
     let mut plan = LogicalPlan::NodeScan {
         src: Box::new(src),
+        scope: pc.scoping.current_scope_no(),
         slot: node_slot,
         labels: v.labels.first().cloned(),
     };
@@ -238,7 +282,7 @@ fn plan_match_node(
         let mut and_terms = Vec::new();
         for e in &v.props {
             and_terms.push(Expr::BinaryOp {
-                left: Box::new(Expr::Prop(Box::new(Expr::Slot(node_slot)), vec![e.key])),
+                left: Box::new(Expr::Prop(Box::new(Expr::RowRef(node_slot)), vec![e.key])),
                 right: Box::new(e.val.clone()),
                 op: Op::Eq,
             })
@@ -268,7 +312,7 @@ mod tests {
     fn plan_match_with_anonymous_rel_type() -> Result<(), Error> {
         let mut p = plan("MATCH (n:Person)-->(o)")?;
         let lbl_person = p.tokenize("Person");
-        let id_anon = p.tokenize("AnonRel#0");
+        let id_anon = p.tokenize("$anonrel0");
         let id_n = p.tokenize("n");
         let id_o = p.tokenize("o");
 
@@ -277,9 +321,11 @@ mod tests {
             LogicalPlan::Expand {
                 src: Box::new(LogicalPlan::NodeScan {
                     src: Box::new(LogicalPlan::Argument),
+                    scope: 1,
                     slot: p.slot(id_n),
                     labels: Some(lbl_person),
                 }),
+                scope: 1,
                 src_slot: p.slot(id_n),
                 rel_slot: p.slot(id_anon),
                 dst_slot: p.slot(id_o),
@@ -305,9 +351,11 @@ mod tests {
                 src: Box::new(LogicalPlan::Expand {
                     src: Box::new(LogicalPlan::NodeScan {
                         src: Box::new(LogicalPlan::Argument),
+                        scope: 1,
                         slot: p.slot(id_o),
                         labels: Some(lbl_person),
                     }),
+                    scope: 1,
                     src_slot: p.slot(id_o),
                     rel_slot: p.slot(id_r),
                     dst_slot: p.slot(id_n),
@@ -331,6 +379,7 @@ mod tests {
             LogicalPlan::Selection {
                 src: Box::new(LogicalPlan::NodeScan {
                     src: Box::new(LogicalPlan::Argument),
+                    scope: 1,
                     slot: p.slot(id_n),
                     labels: None,
                 }),
@@ -342,6 +391,48 @@ mod tests {
                     }),
                     op: Op::Eq
                 }
+            }
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn plan_match_with_bound_rel() -> Result<(), Error> {
+        let mut p = plan("MATCH (x)-[r]->(y) WITH r MATCH (a)-[r]->(b)")?;
+        let id_x = p.tokenize("x");
+        let id_y = p.tokenize("y");
+        let id_a = p.tokenize("a");
+        let id_b = p.tokenize("b");
+        let id_r = p.tokenize("r");
+
+        assert_eq!(
+            p.plan,
+            LogicalPlan::ExpandRel {
+                src: Box::new(LogicalPlan::Project {
+                    src: Box::new(LogicalPlan::Expand {
+                        src: Box::new(LogicalPlan::NodeScan {
+                            src: Box::new(LogicalPlan::Argument),
+                            scope: 1,
+                            slot: p.slot(id_x),
+                            labels: None
+                        }),
+                        scope: 1,
+                        src_slot: 0,
+                        rel_slot: p.slot(id_r),
+                        dst_slot: p.slot(id_y),
+                        rel_type: None,
+                        dir: Some(Dir::Out)
+                    }),
+                    projections: vec![Projection {
+                        expr: Expr::RowRef(p.slot(id_r)),
+                        alias: id_r,
+                        dst: p.slot(id_r)
+                    }]
+                }),
+                scope: 2,
+                src_rel_slot: p.slot(id_r),
+                start_node_slot: p.slot(id_a),
+                end_node_slot: p.slot(id_b)
             }
         );
         Ok(())
@@ -360,18 +451,20 @@ mod tests {
                 src: Box::new(LogicalPlan::Selection {
                     src: Box::new(LogicalPlan::NodeScan {
                         src: Box::new(LogicalPlan::Argument),
+                        scope: 1,
                         slot: p.slot(id_n),
                         labels: None,
                     }),
                     predicate: Expr::BinaryOp {
                         left: Box::new(Expr::Prop(
-                            Box::new(Expr::Slot(p.slot(id_n))),
+                            Box::new(Expr::RowRef(p.slot(id_n))),
                             vec![key_name]
                         )),
                         right: Box::new(Expr::String("David".to_string())),
                         op: Op::Eq
                     }
                 }),
+                scope: 1,
                 src_slot: p.slot(id_n),
                 rel_slot: 2,
                 dst_slot: p.slot(id_m),
@@ -394,18 +487,60 @@ mod tests {
                     src: Box::new(LogicalPlan::Optional {
                         src: Box::new(LogicalPlan::NodeScan {
                             src: Box::new(LogicalPlan::Argument),
+                            scope: 1,
                             slot: p.slot(id_n),
                             labels: None,
                         }),
                         slots: vec![p.slot(id_n)]
                     }),
                     projections: vec![Projection {
-                        expr: Expr::Slot(p.slot(id_n)),
+                        expr: Expr::RowRef(p.slot(id_n)),
                         alias: id_n,
                         dst: p.slot(id_n)
                     }]
                 }),
                 fields: vec![(id_n, p.slot(id_n))]
+            }
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn plan_optional_match_with_rels() -> Result<(), Error> {
+        let mut p = plan("OPTIONAL MATCH (a)-[r:KNOWS]->(b) RETURN r")?;
+        let id_r = p.tokenize("r");
+        let id_a = p.tokenize("a");
+        let id_b = p.tokenize("b");
+        let reltype_knows = p.tokenize("KNOWS");
+
+        assert_eq!(
+            p.plan,
+            LogicalPlan::ProduceResult {
+                src: Box::new(LogicalPlan::Project {
+                    src: Box::new(LogicalPlan::Optional {
+                        src: Box::new(LogicalPlan::Expand {
+                            src: Box::new(LogicalPlan::NodeScan {
+                                src: Box::new(LogicalPlan::Argument),
+                                scope: 1,
+                                slot: p.slot(id_a),
+                                labels: None
+                            }),
+                            scope: 1,
+                            src_slot: p.slot(id_a),
+                            rel_slot: p.slot(id_r),
+                            dst_slot: p.slot(id_b),
+                            rel_type: Some(reltype_knows),
+                            dir: Some(Dir::Out)
+                        }),
+                        slots: vec![0, 1, 2]
+                    }),
+                    projections: vec![Projection {
+                        expr: Expr::RowRef(p.slot(id_r)),
+                        alias: id_r,
+                        dst: p.slot(id_r)
+                    }]
+                }),
+                fields: vec![(id_r, p.slot(id_r))]
             }
         );
         Ok(())
@@ -421,14 +556,16 @@ mod tests {
             p.plan,
             LogicalPlan::ProduceResult {
                 src: Box::new(LogicalPlan::Project {
-                    src: Box::new(LogicalPlan::NestLoop {
+                    src: Box::new(LogicalPlan::CartesianProduct {
                         outer: Box::new(LogicalPlan::NodeScan {
                             src: Box::new(LogicalPlan::Argument),
+                            scope: 1,
                             slot: p.slot(id_a),
                             labels: None,
                         }),
                         inner: Box::new(LogicalPlan::NodeScan {
                             src: Box::new(LogicalPlan::Argument),
+                            scope: 1,
                             slot: p.slot(id_b),
                             labels: None,
                         }),
@@ -438,18 +575,69 @@ mod tests {
                     }),
                     projections: vec![
                         Projection {
-                            expr: Expr::Slot(p.slot(id_a)),
+                            expr: Expr::RowRef(p.slot(id_a)),
                             alias: id_a,
                             dst: p.slot(id_a)
                         },
                         Projection {
-                            expr: Expr::Slot(p.slot(id_b)),
+                            expr: Expr::RowRef(p.slot(id_b)),
                             alias: id_b,
                             dst: p.slot(id_b)
                         }
                     ]
                 }),
                 fields: vec![(id_a, p.slot(id_a)), (id_b, p.slot(id_b))]
+            }
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn plan_path_match() -> Result<(), Error> {
+        let mut p = plan("MATCH p=(a)-[r1:KNOWS]->(b)-[r2:KNOWS]->(c) RETURN p")?;
+        let id_r1 = p.tokenize("r1");
+        let id_r2 = p.tokenize("r2");
+        let id_p = p.tokenize("p");
+        let id_a = p.tokenize("a");
+        let id_b = p.tokenize("b");
+        let id_c = p.tokenize("c");
+        let reltype_knows = p.tokenize("KNOWS");
+
+        // TODO this is actually incorrect I think - cypher rules say r1 must != r2, but we don't
+        //      enforce that here. Lets see if the TCK catches that.
+        assert_eq!(
+            p.plan,
+            LogicalPlan::ProduceResult {
+                src: Box::new(LogicalPlan::Project {
+                    src: Box::new(LogicalPlan::Expand {
+                        src: Box::new(LogicalPlan::Expand {
+                            src: Box::new(LogicalPlan::NodeScan {
+                                src: Box::new(LogicalPlan::Argument),
+                                scope: 1,
+                                slot: p.slot(id_a),
+                                labels: None
+                            }),
+                            scope: 1,
+                            src_slot: p.slot(id_a),
+                            rel_slot: p.slot(id_r1),
+                            dst_slot: p.slot(id_b),
+                            rel_type: Some(reltype_knows),
+                            dir: Some(Dir::Out)
+                        }),
+                        scope: 1,
+                        src_slot: p.slot(id_b),
+                        rel_slot: p.slot(id_r2),
+                        dst_slot: p.slot(id_c),
+                        rel_type: Some(reltype_knows),
+                        dir: Some(Dir::Out)
+                    }),
+                    projections: vec![Projection {
+                        expr: Expr::Path(vec![p.slot(id_a), p.slot(id_r1), p.slot(id_b), p.slot(id_r2), p.slot(id_c)]),
+                        alias: id_p,
+                        dst: p.slot(id_p)
+                    }]
+                }),
+                fields: vec![(id_p, p.slot(id_p))]
             }
         );
         Ok(())

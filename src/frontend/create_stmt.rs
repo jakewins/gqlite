@@ -1,61 +1,71 @@
 use super::{
-    parse_pattern_graph, Dir, LogicalPlan, NodeSpec, Pair, PlanningContext, RelSpec, Result, Rule,
+    Dir, LogicalPlan, NodeSpec, Pair, PlanningContext, RelSpec, Result, Rule,
+    SideEffect,
 };
+use super::patterns::{PatternGraph, parse_pattern_graph};
 
 pub fn plan_create(
-    pc: &mut PlanningContext,
+    mut pc: &mut PlanningContext,
     src: LogicalPlan,
     create_stmt: Pair<Rule>,
 ) -> Result<LogicalPlan> {
-    let mut pg = parse_pattern_graph(pc, create_stmt)?;
+    let pg = parse_pattern_graph(pc, create_stmt)?;
 
+    plan_create_patterngraph(&mut pc, src, pg)
+}
+
+pub fn plan_create_patterngraph(
+    pc: &mut PlanningContext,
+    src: LogicalPlan,
+    mut pg: PatternGraph,
+) -> Result<LogicalPlan> {
     let mut nodes = Vec::new();
     let mut rels = Vec::new();
     for id in pg.v_order {
-        if pc.is_declared(id) {
+        if pg.v.get(&id).map(|n| n.solved).unwrap_or(false) {
             // We already know about this node, it isn't meant to be created. ie
             // MATCH (n) CREATE (n)-[:NEWREL]->(newnode)
             continue;
         }
 
-        let node = pg.v.remove(&id).ok_or(anyhow!("failed to parse pattern in query, please report this and include the query you are running"))?;
-        // Non-anonymous nodes declare new identifiers; we do this
-        // here rather than in parse_pattern_graph so we can do the
-        // is_declared check further up in this block.
-        if !node.anonymous {
-            pc.declare_tok(id);
-        }
+        let node = pg.v.remove(&id).ok_or_else(||anyhow!("failed to parse pattern in query, please report this and include the query you are running"))?;
+
+        pc.unordered_sideffects.insert(SideEffect::AnyNode);
         nodes.push(NodeSpec {
-            slot: pc.get_or_alloc_slot(id),
+            slot: pc.scoping.lookup_or_allocrow(id),
             labels: node.labels,
             props: node.props,
         });
     }
 
+    if ! pg.e.is_empty() {
+        pc.unordered_sideffects.insert(SideEffect::AnyRel);
+    }
+
     for rel in pg.e {
         if !rel.anonymous {
-            pc.declare_tok(rel.identifier);
+            pc.scoping.declare_tok(rel.identifier);
         }
         match rel.dir {
             Some(Dir::Out) => {
                 rels.push(RelSpec {
-                    slot: pc.get_or_alloc_slot(rel.identifier),
-                    rel_type: rel.rel_type.ok_or(anyhow!(
-                        "Relationship patterns in CREATE must have a type specified"
-                    ))?,
-                    start_node_slot: pc.get_or_alloc_slot(rel.left_node),
-                    end_node_slot: pc.get_or_alloc_slot(rel.right_node.unwrap()),
+                    slot: pc.scoping.lookup_or_allocrow(rel.identifier),
+                    rel_type: rel.rel_type.ok_or_else(|| {
+                        anyhow!("Relationship patterns in CREATE must have a type specified")
+                    })?,
+                    start_node_slot: pc.scoping.lookup_or_allocrow(rel.left_node),
+                    end_node_slot: pc.scoping.lookup_or_allocrow(rel.right_node.unwrap()),
                     props: rel.props,
                 });
             }
             Some(Dir::In) => {
                 rels.push(RelSpec {
-                    slot: pc.get_or_alloc_slot(rel.identifier),
-                    rel_type: rel.rel_type.ok_or(anyhow!(
-                        "Relationship patterns in CREATE must have a type specified"
-                    ))?,
-                    start_node_slot: pc.get_or_alloc_slot(rel.right_node.unwrap()),
-                    end_node_slot: pc.get_or_alloc_slot(rel.left_node),
+                    slot: pc.scoping.lookup_or_allocrow(rel.identifier),
+                    rel_type: rel.rel_type.ok_or_else(|| {
+                        anyhow!("Relationship patterns in CREATE must have a type specified")
+                    })?,
+                    start_node_slot: pc.scoping.lookup_or_allocrow(rel.right_node.unwrap()),
+                    end_node_slot: pc.scoping.lookup_or_allocrow(rel.left_node),
                     props: vec![],
                 });
             }
@@ -65,6 +75,7 @@ pub fn plan_create(
 
     Ok(LogicalPlan::Create {
         src: Box::new(src),
+        scope: pc.scoping.current_scope_no(),
         nodes,
         rels,
     })
@@ -86,6 +97,7 @@ mod tests {
             p.plan,
             LogicalPlan::Create {
                 src: Box::new(LogicalPlan::Argument),
+                scope: 1,
                 nodes: vec![NodeSpec {
                     slot: p.slot(id_n),
                     labels: vec![lbl_person],
@@ -106,6 +118,7 @@ mod tests {
             p.plan,
             LogicalPlan::Create {
                 src: Box::new(LogicalPlan::Argument),
+                scope: 1,
                 nodes: vec![NodeSpec {
                     slot: p.slot(id_n),
                     labels: vec![],
@@ -129,6 +142,7 @@ mod tests {
             p.plan,
             LogicalPlan::Create {
                 src: Box::new(LogicalPlan::Argument),
+                scope: 1,
                 nodes: vec![NodeSpec {
                     slot: p.slot(id_n),
                     labels: vec![lbl_person, lbl_actor],
@@ -151,6 +165,7 @@ mod tests {
             p.plan,
             LogicalPlan::Create {
                 src: Box::new(LogicalPlan::Argument),
+                scope: 1,
                 nodes: vec![NodeSpec {
                     slot: p.slot(id_n),
                     labels: vec![lbl_person],
@@ -177,6 +192,7 @@ mod tests {
             p.plan,
             LogicalPlan::Create {
                 src: Box::new(LogicalPlan::Argument),
+                scope: 1,
                 nodes: vec![NodeSpec {
                     slot: p.slot(id_n),
                     labels: vec![lbl_person],
@@ -205,6 +221,7 @@ mod tests {
             p.plan,
             LogicalPlan::Create {
                 src: Box::new(LogicalPlan::Argument),
+                scope: 1,
                 nodes: vec![
                     NodeSpec {
                         slot: p.slot(id_a),
@@ -247,6 +264,7 @@ mod tests {
             p.plan,
             LogicalPlan::Create {
                 src: Box::new(LogicalPlan::Argument),
+                scope: 1,
                 nodes: vec![NodeSpec {
                     slot: p.slot(id_n),
                     labels: vec![lbl_person],
@@ -281,9 +299,11 @@ mod tests {
             LogicalPlan::Create {
                 src: Box::new(LogicalPlan::NodeScan {
                     src: Box::new(LogicalPlan::Argument),
+                    scope: 1,
                     slot: p.slot(id_n),
                     labels: Some(lbl_person),
                 }),
+                scope: 1,
                 nodes: vec![
                     // Note there is just one node here, the planner should understand "n" already exists
                     NodeSpec {
@@ -322,6 +342,7 @@ mod tests {
             p.plan,
             LogicalPlan::Create {
                 src: Box::new(LogicalPlan::Argument),
+                scope: 1,
                 nodes: vec![
                     NodeSpec {
                         slot: p.slot(id_a),
@@ -336,7 +357,7 @@ mod tests {
                         labels: vec![],
                         props: vec![MapEntryExpr {
                             key: key_num,
-                            val: Expr::Prop(Box::new(Expr::Slot(p.slot(id_a))), vec![key_id])
+                            val: Expr::Prop(Box::new(Expr::RowRef(p.slot(id_a))), vec![key_id])
                         }]
                     }
                 ],
@@ -360,9 +381,11 @@ mod tests {
             LogicalPlan::Create {
                 src: Box::new(LogicalPlan::NodeScan {
                     src: Box::new(LogicalPlan::Argument),
+                    scope: 1,
                     slot: p.slot(id_n),
                     labels: Some(lbl_person),
                 }),
+                scope: 1,
                 nodes: vec![
                     // Note there is just one node here, the planner should understand "n" already exists
                     NodeSpec {
