@@ -11,7 +11,7 @@ pub fn plan_set(
     let actions = parse_set_clause(&mut pc.scoping, set_stmt)?;
     Ok(LogicalPlan::Update {
         src: Box::new(src),
-        scope: pc.scoping.current_scope_no(),
+        phase: pc.get_or_create_write_phase(),
         actions,
     })
 }
@@ -86,11 +86,11 @@ mod tests {
             LogicalPlan::Update {
                 src: Box::new(LogicalPlan::NodeScan {
                     src: Box::new(LogicalPlan::Argument),
-                    scope: 1,
+                    phase: 0,
                     slot: p.slot(id_a),
                     labels: None
                 }),
-                scope: 1,
+                phase: 1,
                 actions: vec![UpdateAction::PropAssign {
                     entity: p.slot(id_a),
                     key: key_name,
@@ -114,19 +114,19 @@ mod tests {
                 src: Box::new(LogicalPlan::CartesianProduct {
                     outer: Box::new(LogicalPlan::NodeScan {
                         src: Box::new(LogicalPlan::Argument),
-                        scope: 1,
+                        phase: 0,
                         slot: p.slot(id_a),
                         labels: None
                     }),
                     inner: Box::new(LogicalPlan::NodeScan {
                         src: Box::new(LogicalPlan::Argument),
-                        scope: 1,
+                        phase: 0,
                         slot: p.slot(id_b),
                         labels: None
                     }),
                     predicate: Expr::Bool(true),
                 }),
-                scope: 1,
+                phase: 1,
                 actions: vec![UpdateAction::PropOverwrite {
                     entity: p.slot(id_a),
                     value: Expr::RowRef(p.slot(id_b)),
@@ -147,11 +147,11 @@ mod tests {
             LogicalPlan::Update {
                 src: Box::new(LogicalPlan::NodeScan {
                     src: Box::new(LogicalPlan::Argument),
-                    scope: 1,
+                    phase: 0,
                     slot: p.slot(id_a),
                     labels: None
                 }),
-                scope: 1,
+                phase: 1,
                 actions: vec![UpdateAction::PropAppend {
                     entity: p.slot(id_a),
                     value: Expr::Map(vec![MapEntryExpr {
@@ -175,11 +175,11 @@ mod tests {
             LogicalPlan::Update {
                 src: Box::new(LogicalPlan::NodeScan {
                     src: Box::new(LogicalPlan::Argument),
-                    scope: 1,
+                    phase: 0,
                     slot: p.slot(id_a),
                     labels: None
                 }),
-                scope: 1,
+                phase: 1,
                 actions: vec![UpdateAction::LabelSet {
                     entity: p.slot(id_a),
                     label: lbl_hello,

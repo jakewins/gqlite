@@ -133,27 +133,29 @@ pub enum LogicalPlan {
     // List all visible nodes that match `labels`, and put them one-at-a-time in slot
     NodeScan {
         src: Box<Self>,
-        scope: u8,
+        phase: u8,
         slot: usize,
         labels: Option<Token>,
     },
 
-    // Starting at a node, expand once according to the specifications in this plan, storing
-    // each rel and node pair found in rel_slot and dst_slot
+    // Starting at a node, expand according to the specifications in this plan, storing
+    // each node found in dst_slot
     Expand {
         src: Box<Self>,
-        scope: u8,
+        phase: u8,
         src_slot: usize,
-        rel_slot: usize,
         dst_slot: usize,
+        // If specified, the last connecting rel in the path is stored in this slot
+        rel_slot: Option<usize>,
         rel_type: Option<Token>,
         dir: Option<Dir>,
+        depth: Depth,
     },
 
     // Given a known relationship, produce the nodes it connects
     ExpandRel {
         src: Box<Self>,
-        scope: u8,
+        phase: u8,
         src_rel_slot: usize,
 
         start_node_slot: usize,
@@ -164,7 +166,7 @@ pub enum LogicalPlan {
     // eg. MATCH (a), (b) WITH a, b MATCH (a)-[r]-(b)
     ExpandInto {
         src: Box<Self>,
-        scope: u8,
+        phase: u8,
         left_node_slot: usize,
         right_node_slot: usize,
         dst_slot: usize,
@@ -185,13 +187,13 @@ pub enum LogicalPlan {
     },
     Create {
         src: Box<Self>,
-        scope: u8,
+        phase: u8,
         nodes: Vec<NodeSpec>,
         rels: Vec<RelSpec>,
     },
     Update {
         src: Box<Self>,
-        scope: u8,
+        phase: u8,
         actions: Vec<UpdateAction>,
     },
 
@@ -331,7 +333,7 @@ impl LogicalPlan {
                     ind, proj,
                 )
             }
-            LogicalPlan::NodeScan { src, scope, slot, labels } => {
+            LogicalPlan::NodeScan { src, phase: scope, slot, labels } => {
                 let next_indent = &format!("{}  ", ind);
                 let mut lblstr = String::new();
                 for (i, p) in labels.iter().enumerate() {
@@ -341,7 +343,7 @@ impl LogicalPlan {
                     lblstr.push_str(t.lookup(*p).unwrap_or("?"))
                 }
                 format!(
-                    "NodeScan(\n{}src={}\n{}scope={}\n{}slot=Slot({})\n{}labels=[{}])",
+                    "NodeScan(\n{}src={}\n{}phase={}\n{}slot=Slot({})\n{}labels=[{}])",
                     ind,
                     src.fmt_pretty(next_indent, t),
                     ind, scope,
@@ -353,15 +355,15 @@ impl LogicalPlan {
             }
             LogicalPlan::Expand {
                 src,
-                scope,
+                phase: scope,
                 src_slot,
                 rel_slot,
                 dst_slot,
                 rel_type,
-                dir,
+                dir, depth,
             } => {
                 let next_indent = &format!("{}  ", ind);
-                format!("Expand(\n{}src={}\n{}src={}\n{}src_slot=Slot({})\n{}rel_slot=Slot({})\n{}dst_slot=Slot({}),\n{}rel_type={},\n{}dir={})",
+                format!("Expand(\n{}src={}\n{}src={}\n{}src_slot=Slot({})\n{}rel_slot=Slot({:?})\n{}dst_slot=Slot({}),\n{}rel_type={},\n{}dir={},\n{}depth={:?})",
                         ind, src.fmt_pretty(next_indent, t),
                         ind, scope,
                         ind, src_slot,
@@ -371,11 +373,12 @@ impl LogicalPlan {
                             Some(tok) => t.lookup(*tok).unwrap_or("?"),
                             None => "<any>",
                         },
-                        ind, &format!("{:?}", dir))
+                        ind, &format!("{:?}", dir),
+                        ind, depth)
             }
             LogicalPlan::ExpandInto {
                 src,
-                scope,
+                phase: scope,
                 left_node_slot,
                 right_node_slot,
                 dst_slot,
@@ -394,13 +397,13 @@ impl LogicalPlan {
             }
             LogicalPlan::ExpandRel {
                 src,
-                scope,
+                phase: scope,
                 src_rel_slot,
                 start_node_slot: start_node,
                 end_node_slot: end_node,
             } => {
                 let next_indent = &format!("{}  ", ind);
-                format!("ExpandRel(\n{}src={}\n{}scope={}\n{}src_rel_slot=Slot({})\n{}start_node=Slot({})\n{}end_node=Slot({}))",
+                format!("ExpandRel(\n{}src={}\n{}phase={}\n{}src_rel_slot=Slot({})\n{}start_node=Slot({})\n{}end_node=Slot({}))",
                         ind, src.fmt_pretty(next_indent, t),
                         ind, scope,
                         ind, src_rel_slot,
@@ -408,10 +411,10 @@ impl LogicalPlan {
                         ind, end_node)
             }
             LogicalPlan::Argument => "Argument()".to_string(),
-            LogicalPlan::Create { src, scope, nodes, rels } => {
+            LogicalPlan::Create { src, phase: scope, nodes, rels } => {
                 let next_indent = &format!("{}  ", ind);
                 format!(
-                    "Create(\n{}src={},\n{}scope={},\n{}nodes={},\n{}rels={})",
+                    "Create(\n{}src={},\n{}phase={},\n{}nodes={},\n{}rels={})",
                     ind,
                     src.fmt_pretty(&format!("{}  ", next_indent), t),
                     ind, scope,
@@ -521,10 +524,10 @@ impl LogicalPlan {
                     slots,
                 )
             }
-            LogicalPlan::Update { src, scope, actions } => {
+            LogicalPlan::Update { src, phase: scope, actions } => {
                 let next_indent = &format!("{}  ", ind);
                 format!(
-                    "SetProperties(\n{}src={}\n{}scope={}\n{}actions=[{:?}])",
+                    "Update(\n{}src={}\n{}phase={}\n{}actions=[{:?}])",
                     ind,
                     src.fmt_pretty(next_indent, t),
                     ind, scope,
@@ -574,7 +577,7 @@ pub enum UpdateAction {
     },
     // DETACH DELETE n
     DetachDelete {
-        node: Expr,
+        entity: Expr,
     },
     // SET a.blah = 1
     PropAssign {
@@ -622,6 +625,7 @@ pub enum Dir {
     Out,
     In,
 }
+
 impl Dir {
     pub(crate) fn reverse(self) -> Self {
         match self {
@@ -629,6 +633,12 @@ impl Dir {
             Dir::In => Dir::Out,
         }
     }
+}
+
+#[derive(Debug, PartialEq, Copy, Clone)]
+pub enum Depth {
+    Exact(usize),
+    Unlimited
 }
 
 #[derive(Debug, PartialEq, Copy, Clone)]
@@ -672,11 +682,6 @@ impl Projection {
 
 #[derive(Debug, Clone, Default)]
 pub struct Scope {
-    // This is the number that ends up in the .scope value for plan nodes in this scope
-    // Note that we're really mixing two things here: "scope" as in "which identifiers can I
-    // see" and scope as in "what version of the graph am I looking at"; we should probably
-    // disambiguate better.
-    number: u8,
     // Mapping of names used in the query string to slots in the row being processed
     slots: HashMap<Token, usize>,
     // Identifiers that the user has explictly declared. Eg in MATCH "(a)-->(b)" there are
@@ -706,7 +711,21 @@ pub enum ScopingMode {
     ProjectionMode,
 }
 
-// Owns variable scoping as the query is planned
+// Scoping combines multiple adjacent things. Currently a scope both combines
+//
+// - Which identifiers currently exist, and what do they refer to?
+// - What modifications made to the graph can we currently see?
+//
+// On the second portion the logic, currently, is that your writes go into
+// the current scope, while your reads are from the prior scope. Ie.
+//
+//    MATCH () CREATE ()
+//
+// MATCH and CREATE are in the same scope, currently, and the logic is that
+// the MATCH sees v-1, while CREATE writes into v, hence this won't infinite loop.
+//
+// This is kind of janky, and perhaps would be better represented as two separate
+// concepts - one about identifier scope and one about graph mutation generations
 #[derive(Debug, Clone)]
 pub struct Scoping {
     // Scopes that are no longer in use, kept to allow tests to look stuff up after the fact
@@ -730,6 +749,11 @@ pub struct Scoping {
     // Max next_stackslot used throughput the plan
     stack_highwater: usize,
 
+    // Phase counter; this is used to prevent read-your-writes within the phases of a
+    // single query; when we write, the phase number is included in the XID, so reads that
+    // take place logically "before" can filter those writes out
+    current_phase: u8,
+
     // Tokens are shared across scopes, but we ship them with each scope for programmer convenience
     tokens: Rc<RefCell<Tokens>>,
 
@@ -742,13 +766,11 @@ impl Scoping {
         Scoping {
             history: Default::default(),
             _prior: Scope {
-                number: 0,
                 slots: Default::default(),
                 named_identifiers: Default::default(),
                 aliases: Default::default()
             },
             _current: Scope {
-                number: 1,
                 slots: Default::default(),
                 named_identifiers: Default::default(),
                 aliases: Default::default()
@@ -758,6 +780,7 @@ impl Scoping {
             next_rowslot: 0,
             next_stackslot: 0,
             stack_highwater: 0,
+            current_phase: 0,
             tokens,
             anon_rel_seq: 0,
             anon_node_seq: 0,
@@ -765,11 +788,9 @@ impl Scoping {
     }
 
     pub fn begin_new_scope(&mut self) {
-        let new_scope_no = self._current.number + 1;
         let new_prior = mem::replace(
             &mut self._current,
             Scope {
-                number: new_scope_no,
                 slots: Default::default(),
                 named_identifiers: Default::default(),
                 aliases: Default::default()
@@ -790,16 +811,6 @@ impl Scoping {
         out.push(self._prior.clone());
         out.push(self._current.clone());
         out
-    }
-
-    pub fn current_scope_no(&self) -> u8 {
-        match self.mode {
-            ScopingMode::Current => self._current.number,
-            ScopingMode::Prior => self._prior.number,
-            ScopingMode::ProjectionMode => {
-                panic!("..")
-            }
-        }
     }
 
     pub fn new_anon_rel(&mut self) -> Token {
@@ -963,6 +974,15 @@ pub struct PlanningContext<'i> {
     // include a digest or a version that gets embedded with the planned query, because the query
     // plan may become invalid if indexes or constraints are added and removed.
     backend_desc: &'i BackendDesc,
+
+    // Each query is grouped into phases, which are used to enforce logical read-your-writes
+    // ordering of when side-effects become visible. The phase any given modification was done
+    // in is included in the MVCC information that is written into the graph such that
+    // reads that happen - logically - before the writes can filter them out. This allows
+    // us to write our modifications directly to the graph, in turn letting us perform writes
+    // bounded only by disk size.
+    current_phase: u8,
+    current_phase_type: PhaseType,
 }
 
 impl<'i> PlanningContext<'i> {
@@ -971,8 +991,53 @@ impl<'i> PlanningContext<'i> {
             scoping: Scoping::new(tokens),
             unordered_sideffects: Default::default(),
             backend_desc: bd,
+            current_phase: 0,
+            current_phase_type: PhaseType::Undetermined,
         }
     }
+
+    pub fn get_or_create_write_phase(&mut self) -> u8 {
+        match self.current_phase_type {
+            PhaseType::Write => self.current_phase,
+            PhaseType::Undetermined => {
+                self.current_phase_type = PhaseType::Write;
+                self.current_phase
+            }
+            PhaseType::Read => {
+                // If the current phase is a read phase, we need to move to a new phase
+                // so that writes we're wanting to perform are not visible to the
+                // reads that took place in the currently active read phase.. hence, increment.
+                self.current_phase_type = PhaseType::Write;
+                self.current_phase += 1;
+                self.current_phase
+            }
+        }
+    }
+
+    // Returns the current phase; if the current phase has been a write phase,
+    // it toggles to a read phase (so, any subsequent writes will trigger a new phase no)
+    pub fn get_or_create_read_phase(&mut self) -> u8 {
+        match self.current_phase_type {
+            PhaseType::Read => self.current_phase,
+            PhaseType::Undetermined => {
+                self.current_phase_type = PhaseType::Read;
+                self.current_phase
+            }
+            PhaseType::Write => {
+                // Note that, unlike in the get_or_create_write_phase case, we don't
+                // increment the phase no here; we want to read any prior writes
+                self.current_phase_type = PhaseType::Read;
+                self.current_phase
+            }
+        }
+    }
+}
+
+#[derive(Debug, Copy, Clone, Eq, PartialEq, Hash)]
+pub enum PhaseType {
+    Undetermined,
+    Write,
+    Read,
 }
 
 // Tracks side-effects the query will generate as we plan it; this is used to determine

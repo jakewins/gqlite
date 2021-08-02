@@ -310,9 +310,8 @@ fn parse_projection(projection: Pair<Rule>, scoping: &mut Scoping) -> Result<Pro
 #[cfg(test)]
 mod tests {
     use crate::frontend::tests::plan;
-    use crate::frontend::{Dir, Expr, LogicalPlan, Op, Projection, NodeSpec, SideEffect};
+    use crate::frontend::{Dir, Expr, LogicalPlan, Op, Projection, NodeSpec, SideEffect, Depth};
     use crate::Error;
-    use std::collections::HashSet;
 
     #[test]
     fn plan_noop_with() -> Result<(), Error> {
@@ -324,7 +323,7 @@ mod tests {
             LogicalPlan::Project {
                 src: Box::new(LogicalPlan::NodeScan {
                     src: Box::new(LogicalPlan::Argument),
-                    scope: 1,
+                    phase: 0,
                     slot: 0,
                     labels: None,
                 }),
@@ -349,7 +348,7 @@ mod tests {
             LogicalPlan::Project {
                 src: Box::new(LogicalPlan::NodeScan {
                     src: Box::new(LogicalPlan::Argument),
-                    scope: 1,
+                    phase: 0,
                     slot: 0,
                     labels: None,
                 }),
@@ -367,7 +366,6 @@ mod tests {
     fn plan_with_visible_sideffects_has_barrier() -> Result<(), Error> {
         let mut p = plan("CREATE (n) WITH 1 as p")?;
 
-        let id_n = p.tokenize("n");
         let id_p = p.tokenize("p");
         assert_eq!(
             p.plan,
@@ -375,7 +373,7 @@ mod tests {
                 src: Box::new(LogicalPlan::Project {
                     src: Box::new(LogicalPlan::Create {
                         src: Box::new(LogicalPlan::Argument),
-                        scope: 1,
+                        phase: 0,
                         nodes: vec![NodeSpec{
                             slot: 0,
                             labels: vec![],
@@ -411,7 +409,7 @@ mod tests {
                         src: Box::new(LogicalPlan::Project {
                             src: Box::new(LogicalPlan::Create {
                                 src: Box::new(LogicalPlan::Argument),
-                                scope: 1,
+                                phase: 0,
                                 nodes: vec![NodeSpec{
                                     slot: 0,
                                     labels: vec![],
@@ -427,7 +425,7 @@ mod tests {
                         }),
                         spec: [SideEffect::AnyNode].iter().cloned().collect(),
                     }),
-                    scope: 2,
+                    phase: 0,
                     slot: p.slot(id_m),
                     labels: None
                 }),
@@ -481,7 +479,7 @@ mod tests {
                 src: Box::new(LogicalPlan::Project {
                     src: Box::new(LogicalPlan::NodeScan {
                         src: Box::new(LogicalPlan::Argument),
-                        scope: 1,
+                        phase: 0,
                         slot: 0,
                         labels: None,
                     }),
@@ -596,7 +594,7 @@ mod tests {
                 src: Box::new(LogicalPlan::Project {
                     src: Box::new(LogicalPlan::NodeScan {
                         src: Box::new(LogicalPlan::Argument),
-                        scope: 1,
+                        phase: 0,
                         slot: 0,
                         labels: None,
                     }),
@@ -626,7 +624,7 @@ mod tests {
                     src: Box::new(LogicalPlan::Aggregate {
                         src: Box::new(LogicalPlan::NodeScan {
                             src: Box::new(LogicalPlan::Argument),
-                            scope: 1,
+                            phase: 0,
                             slot: 0,
                             labels: None,
                         }),
@@ -676,7 +674,7 @@ mod tests {
                     src: Box::new(LogicalPlan::Aggregate {
                         src: Box::new(LogicalPlan::NodeScan {
                             src: Box::new(LogicalPlan::Argument),
-                            scope: 1,
+                            phase: 0,
                             slot: 0,
                             labels: None,
                         }),
@@ -712,7 +710,7 @@ mod tests {
                     src: Box::new(LogicalPlan::Aggregate {
                         src: Box::new(LogicalPlan::NodeScan {
                             src: Box::new(LogicalPlan::Argument),
-                            scope: 1,
+                            phase: 0,
                             slot: 0,
                             labels: None,
                         }),
@@ -749,7 +747,7 @@ mod tests {
                 src: Box::new(LogicalPlan::Project {
                     src: Box::new(LogicalPlan::NodeScan {
                         src: Box::new(LogicalPlan::Argument),
-                        scope: 1,
+                        phase: 0,
                         slot: 0,
                         labels: None,
                     }),
@@ -783,7 +781,7 @@ mod tests {
                 src: Box::new(LogicalPlan::Project {
                     src: Box::new(LogicalPlan::NodeScan {
                         src: Box::new(LogicalPlan::Argument),
-                        scope: 1,
+                        phase: 0,
                         slot: 0,
                         labels: None,
                     }),
@@ -821,16 +819,17 @@ mod tests {
                         src: Box::new(LogicalPlan::Expand {
                             src: Box::new(LogicalPlan::NodeScan {
                                 src: Box::new(LogicalPlan::Argument),
-                                scope: 1,
+                                phase: 0,
                                 slot: p.slot(id_a),
                                 labels: None,
                             }),
-                            scope: 1,
+                            phase: 0,
                             src_slot: p.slot(id_a),
-                            rel_slot: 2,
+                            rel_slot: Some(2),
                             dst_slot: p.slot(id_z),
                             rel_type: None,
                             dir: Some(Dir::Out),
+                            depth: Depth::Exact(1),
                         }),
                         projections: vec![Projection {
                             expr: Expr::RowRef(p.slot(id_a)),
@@ -861,7 +860,7 @@ mod tests {
                 src: Box::new(LogicalPlan::Project {
                     src: Box::new(LogicalPlan::NodeScan {
                         src: Box::new(LogicalPlan::Argument),
-                        scope: 1,
+                        phase: 0,
                         slot: 0,
                         labels: None,
                     }),
@@ -889,7 +888,7 @@ mod tests {
                     src: Box::new(LogicalPlan::Aggregate {
                         src: Box::new(LogicalPlan::NodeScan {
                             src: Box::new(LogicalPlan::Argument),
-                            scope: 1,
+                            phase: 0,
                             slot: 0,
                             labels: None,
                         }),
@@ -927,7 +926,7 @@ mod tests {
                     src: Box::new(LogicalPlan::Aggregate {
                         src: Box::new(LogicalPlan::NodeScan {
                             src: Box::new(LogicalPlan::Argument),
-                            scope: 1,
+                            phase: 0,
                             slot: 0,
                             labels: None,
                         }),
@@ -964,7 +963,7 @@ mod tests {
                     src: Box::new(LogicalPlan::Aggregate {
                         src: Box::new(LogicalPlan::NodeScan {
                             src: Box::new(LogicalPlan::Argument),
-                            scope: 1,
+                            phase: 0,
                             slot: 0,
                             labels: Some(lbl_person)
                         }),
@@ -1003,7 +1002,7 @@ mod tests {
                     src: Box::new(LogicalPlan::Aggregate {
                         src: Box::new(LogicalPlan::NodeScan {
                             src: Box::new(LogicalPlan::Argument),
-                            scope: 1,
+                            phase: 0,
                             slot: 0,
                             labels: None
                         }),
@@ -1047,7 +1046,7 @@ mod tests {
                     src: Box::new(LogicalPlan::Aggregate {
                         src: Box::new(LogicalPlan::NodeScan {
                             src: Box::new(LogicalPlan::Argument),
-                            scope: 1,
+                            phase: 0,
                             slot: 0,
                             labels: Some(lbl_person)
                         }),

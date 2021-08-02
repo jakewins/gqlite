@@ -113,6 +113,14 @@ pub struct Rel {
 }
 
 #[derive(Debug, Clone, PartialEq)]
+pub struct Path {
+    // TODO probably not include the whole thing here
+    pub start: Node,
+    pub segments: Vec<(Rel, Node)>,
+}
+
+
+#[derive(Debug, Clone, PartialEq)]
 pub enum Val {
     Null,
     Int(i64),
@@ -125,6 +133,7 @@ pub enum Val {
 
     Node(Node),
     Rel(Rel),
+    Path(Path),
 }
 
 impl Display for Val {
@@ -138,7 +147,8 @@ impl Display for Val {
             Val::List(vs) => f.write_str(&format!("{:?}", vs)),
             Val::Map(v) => f.write_str(&format!("Map{:?}", v)),
             Val::Node(v) => f.write_str(&format!("Node({})", v.id)),
-            Val::Rel(v) => f.write_str(&format!("Rel({}/{})", v.start, v.rel_type)),
+            Val::Rel(v) => f.write_str(&format!("({})-[:{}]->({})", v.start, v.rel_type, v.end)),
+            Val::Path(v) => f.write_str(&format!("Path({:?})", v)),
         }
     }
 }

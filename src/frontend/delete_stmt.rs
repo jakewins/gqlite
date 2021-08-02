@@ -5,7 +5,7 @@ use super::{
 use crate::frontend::expr::plan_expr;
 
 pub fn plan_delete(
-    mut pc: &mut PlanningContext,
+    pc: &mut PlanningContext,
     src: LogicalPlan,
     delete_stmt: Pair<Rule>,
 ) -> Result<LogicalPlan> {
@@ -20,21 +20,31 @@ pub fn plan_delete(
         false
     };
 
-    let delete_expr = if let Rule::expr = part.as_rule() {
-        let expr = plan_expr(&mut pc.scoping, part)?;
-        if is_detach {
-            UpdateAction::DetachDelete { node: expr }
+    let mut actions = Vec::new();
+    loop {
+        let delete_expr = if let Rule::expr = part.as_rule() {
+            let expr = plan_expr(&mut pc.scoping, part)?;
+            if is_detach {
+                UpdateAction::DetachDelete { entity: expr }
+            } else {
+                UpdateAction::DeleteEntity { entity: expr }
+            }
         } else {
-            UpdateAction::DeleteEntity { entity: expr }
+            bail!("unknown delete statement, expected expression")
+        };
+        actions.push(delete_expr);
+
+        if let Some(p) = parts.next() {
+            part = p;
+        } else {
+            break;
         }
-    } else {
-        bail!("unknown delete statement, expected expression")
-    };
+    }
 
     Ok(LogicalPlan::Update {
         src: Box::new(src),
-        scope: pc.scoping.current_scope_no(),
-        actions: vec![delete_expr]
+        phase: pc.get_or_create_write_phase(),
+        actions,
     })
 }
 
@@ -56,13 +66,47 @@ mod tests {
             LogicalPlan::Update {
                 src: Box::new(LogicalPlan::NodeScan {
                     src: Box::new(LogicalPlan::Argument),
-                    scope: 1,
+                    phase: 0,
                     slot: p.slot(id_n),
                     labels: None
                 }),
-                scope: 1,
+                phase: 1,
                 actions: vec![
                     UpdateAction::DeleteEntity { entity: Expr::RowRef(p.slot(id_n)) }
+                ]
+            }
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn plan_multiple_deletes() -> Result<(), Error> {
+        let mut p = plan("MATCH (n), (m) DELETE n, m")?;
+
+        let id_n = p.tokenize("n");
+        let id_m = p.tokenize("m");
+        assert_eq!(
+            p.plan,
+            LogicalPlan::Update {
+                src: Box::new(LogicalPlan::CartesianProduct{
+                    outer: Box::new(LogicalPlan::NodeScan {
+                        src: Box::new(LogicalPlan::Argument),
+                        phase: 0,
+                        slot: p.slot(id_n),
+                        labels: None
+                    }),
+                    inner: Box::new(LogicalPlan::NodeScan {
+                        src: Box::new(LogicalPlan::Argument),
+                        phase: 0,
+                        slot: p.slot(id_m),
+                        labels: None
+                    }),
+                    predicate: Expr::Bool(true),
+                }),
+                phase: 1,
+                actions: vec![
+                    UpdateAction::DeleteEntity { entity: Expr::RowRef(p.slot(id_n)) },
+                    UpdateAction::DeleteEntity { entity: Expr::RowRef(p.slot(id_m)) },
                 ]
             }
         );
@@ -79,13 +123,13 @@ mod tests {
             LogicalPlan::Update {
                 src: Box::new(LogicalPlan::NodeScan {
                     src: Box::new(LogicalPlan::Argument),
-                    scope: 1,
+                    phase: 0,
                     slot: p.slot(id_n),
                     labels: None
                 }),
-                scope: 1,
+                phase: 1,
                 actions: vec![
-                    UpdateAction::DetachDelete { node: Expr::RowRef(p.slot(id_n)) }
+                    UpdateAction::DetachDelete { entity: Expr::RowRef(p.slot(id_n)) }
                 ]
             }
         );

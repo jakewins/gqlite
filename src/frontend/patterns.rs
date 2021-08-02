@@ -8,6 +8,7 @@ use std::fmt::Debug;
 
 use super::{Dir, PlanningContext, Rule};
 use super::expr::{plan_expr, parse_map_expression, Expr, MapEntryExpr};
+use crate::frontend::Depth;
 
 
 #[derive(Debug, PartialEq, Clone)]
@@ -34,6 +35,7 @@ impl PatternNode {
 pub struct PatternRel {
     pub identifier: Token,
     pub rel_type: Option<Token>,
+    pub depth: Depth,
     pub left_node: Token,
     pub right_node: Option<Token>,
     // From the perspective of the left node, is this pattern inbound or outbound?
@@ -247,6 +249,7 @@ fn parse_pattern_rel(
     let mut rel_type = None;
     let mut dir = None;
     let mut props = Vec::new();
+    let mut depth = Depth::Exact(1);
     for part in pattern_rel.into_inner() {
         match part.as_rule() {
             Rule::id => identifier = Some(pc.scoping.tokenize(part.as_str())),
@@ -261,7 +264,15 @@ fn parse_pattern_rel(
             Rule::map => {
                 props = parse_map_expression(&mut pc.scoping, part)?;
             }
-            _ => unreachable!(),
+            Rule::rel_depth => {
+                depth = Depth::Unlimited;
+                for depth_part in part.into_inner() {
+                    match depth_part.as_rule() {
+                        _ => panic!("planner can't handle custom depths yet: {:?}", depth_part),
+                    }
+                }
+            }
+            _ => panic!("unexpected: {:?}", part),
         }
     }
     let anonymous = identifier.is_none();
@@ -272,6 +283,7 @@ fn parse_pattern_rel(
         right_node: None,
         identifier: id,
         rel_type,
+        depth,
         dir,
         props,
         anonymous,

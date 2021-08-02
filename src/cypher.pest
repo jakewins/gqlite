@@ -1,5 +1,5 @@
 
-WHITESPACE = _{ " " | "\t" | "\r" | "\n" }
+WHITESPACE = _{ " " | "\t" | "\r" | "\n" | comment }
 
 expr = { and_expr ~ (^"OR " ~ and_expr)* }
 and_expr = { add_sub_expr ~ (^"AND " ~ add_sub_expr)* }
@@ -48,6 +48,12 @@ singleq_char = {
     !("'" | "\\") ~ ANY
     | "\\" ~ ("'" | "\\" | "/" | "b" | "f" | "n" | "r" | "t")
 }
+
+comment = {
+  "//" ~ comment_content
+}
+comment_content = @{ comment_char* }
+comment_char = { !NEWLINE ~ ANY }
 
 bool = _{ lit_true | lit_false }
 lit_true = { ^"TRUE" }
@@ -102,10 +108,15 @@ where_clause = { ^"WHERE" ~ expr }
 node = { "(" ~ id? ~ ( ":" ~ label )* ~ map? ~ ")" }
 label = { id }
 
-rel = { left_arrow? ~ ( ( "-[" ~ id? ~ ( ":" ~ rel_type )? ~ map? ~ "]-" ) | "--" | "-" ) ~ right_arrow? }
+rel = { left_arrow? ~ ( ( "-[" ~ id? ~ ( ":" ~ rel_type )? ~ map? ~ rel_depth? ~ "]-" ) | "--" | "-" ) ~ right_arrow? }
 rel_type = { id }
 left_arrow = { "<" }
 right_arrow = { ">" }
+
+rel_depth = { "*" ~ ((min_depth? ~ ".." ~ max_depth?) | exact_depth)? }
+exact_depth = { int }
+min_depth = { int }
+max_depth = { int }
 
 pattern = { node ~ ( rel ~ node )* }
 patterns = _{ pattern ~ ( "," ~ pattern )* }
@@ -129,7 +140,7 @@ detach_clause = { ^"DETACH" }
 
 create_stmt = { ^"CREATE" ~ patterns }
 set_stmt = { ^"SET" ~ assignments }
-delete_stmt = { detach_clause? ~ ^"DELETE" ~ expr }
+delete_stmt = { detach_clause? ~ ^"DELETE" ~ expr ~ ("," ~ expr)* }
 merge_stmt = { ^"MERGE" ~ merge_patterns ~ (on_create_clause | on_match_clause)* }
 match_stmt = { optional_clause? ~ ^"MATCH" ~ match_patterns ~ where_clause? }
 with_stmt = { ^"WITH" ~ distinct_clause? ~ ( projections | project_all ) ~ where_clause? ~ order_clause? ~ skip_clause? ~ limit_clause? }

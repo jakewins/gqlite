@@ -75,7 +75,7 @@ pub fn plan_create_patterngraph(
 
     Ok(LogicalPlan::Create {
         src: Box::new(src),
-        scope: pc.scoping.current_scope_no(),
+        phase: pc.get_or_create_write_phase(),
         nodes,
         rels,
     })
@@ -97,7 +97,7 @@ mod tests {
             p.plan,
             LogicalPlan::Create {
                 src: Box::new(LogicalPlan::Argument),
-                scope: 1,
+                phase: 0,
                 nodes: vec![NodeSpec {
                     slot: p.slot(id_n),
                     labels: vec![lbl_person],
@@ -118,7 +118,7 @@ mod tests {
             p.plan,
             LogicalPlan::Create {
                 src: Box::new(LogicalPlan::Argument),
-                scope: 1,
+                phase: 0,
                 nodes: vec![NodeSpec {
                     slot: p.slot(id_n),
                     labels: vec![],
@@ -142,7 +142,7 @@ mod tests {
             p.plan,
             LogicalPlan::Create {
                 src: Box::new(LogicalPlan::Argument),
-                scope: 1,
+                phase: 0,
                 nodes: vec![NodeSpec {
                     slot: p.slot(id_n),
                     labels: vec![lbl_person, lbl_actor],
@@ -165,7 +165,7 @@ mod tests {
             p.plan,
             LogicalPlan::Create {
                 src: Box::new(LogicalPlan::Argument),
-                scope: 1,
+                phase: 0,
                 nodes: vec![NodeSpec {
                     slot: p.slot(id_n),
                     labels: vec![lbl_person],
@@ -192,7 +192,7 @@ mod tests {
             p.plan,
             LogicalPlan::Create {
                 src: Box::new(LogicalPlan::Argument),
-                scope: 1,
+                phase: 0,
                 nodes: vec![NodeSpec {
                     slot: p.slot(id_n),
                     labels: vec![lbl_person],
@@ -221,7 +221,7 @@ mod tests {
             p.plan,
             LogicalPlan::Create {
                 src: Box::new(LogicalPlan::Argument),
-                scope: 1,
+                phase: 0,
                 nodes: vec![
                     NodeSpec {
                         slot: p.slot(id_a),
@@ -264,7 +264,7 @@ mod tests {
             p.plan,
             LogicalPlan::Create {
                 src: Box::new(LogicalPlan::Argument),
-                scope: 1,
+                phase: 0,
                 nodes: vec![NodeSpec {
                     slot: p.slot(id_n),
                     labels: vec![lbl_person],
@@ -299,11 +299,11 @@ mod tests {
             LogicalPlan::Create {
                 src: Box::new(LogicalPlan::NodeScan {
                     src: Box::new(LogicalPlan::Argument),
-                    scope: 1,
+                    phase: 0,
                     slot: p.slot(id_n),
                     labels: Some(lbl_person),
                 }),
-                scope: 1,
+                phase: 1,
                 nodes: vec![
                     // Note there is just one node here, the planner should understand "n" already exists
                     NodeSpec {
@@ -342,7 +342,7 @@ mod tests {
             p.plan,
             LogicalPlan::Create {
                 src: Box::new(LogicalPlan::Argument),
-                scope: 1,
+                phase: 0,
                 nodes: vec![
                     NodeSpec {
                         slot: p.slot(id_a),
@@ -381,11 +381,11 @@ mod tests {
             LogicalPlan::Create {
                 src: Box::new(LogicalPlan::NodeScan {
                     src: Box::new(LogicalPlan::Argument),
-                    scope: 1,
+                    phase: 0,
                     slot: p.slot(id_n),
                     labels: Some(lbl_person),
                 }),
-                scope: 1,
+                phase: 1,
                 nodes: vec![
                     // Note there is just one node here, the planner should understand "n" already exists
                     NodeSpec {

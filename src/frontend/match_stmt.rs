@@ -46,7 +46,7 @@ pub fn plan_match_patterngraph(
     src: LogicalPlan,
     mut pg: PatternGraph,
 ) -> Result<LogicalPlan> {
-    let scope = pc.scoping.current_scope_no();
+    let scope = pc.get_or_create_read_phase();
     fn filter_expand(expand: LogicalPlan, slot: Token, labels: &[Token]) -> LogicalPlan {
         let labels = labels
             .iter()
@@ -83,7 +83,7 @@ pub fn plan_match_patterngraph(
             //      rel, one with the start node as `a`, one with the start node as `b`.
             plan = LogicalPlan::ExpandRel {
                 src: Box::new(plan),
-                scope,
+                phase: scope,
                 src_rel_slot: pc.scoping.lookup_or_allocrow(rel.identifier),
                 start_node_slot: pc.scoping.lookup_or_allocrow(left_node.identifier),
                 end_node_slot: pc.scoping.lookup_or_allocrow(right_node.identifier),
@@ -160,12 +160,13 @@ pub fn plan_match_patterngraph(
                 let dst = pc.scoping.lookup_or_allocrow(right_id);
                 let expand = LogicalPlan::Expand {
                     src: Box::new(plan),
-                    scope,
+                    phase: scope,
                     src_slot: pc.scoping.lookup_or_allocrow(left_id),
-                    rel_slot: pc.scoping.lookup_or_allocrow(rel.identifier),
+                    rel_slot: Some(pc.scoping.lookup_or_allocrow(rel.identifier)),
                     dst_slot: dst,
                     rel_type: rel.rel_type,
                     dir: rel.dir,
+                    depth: rel.depth
                 };
                 plan = filter_expand(expand, dst, &right_node.labels);
             } else if !left_solved && right_solved {
@@ -178,12 +179,13 @@ pub fn plan_match_patterngraph(
                 let dst = pc.scoping.lookup_or_allocrow(left_id);
                 let expand = LogicalPlan::Expand {
                     src: Box::new(plan),
-                    scope,
+                    phase: scope,
                     src_slot: pc.scoping.lookup_or_allocrow(right_id),
-                    rel_slot: pc.scoping.lookup_or_allocrow(rel.identifier),
+                    rel_slot: Some(pc.scoping.lookup_or_allocrow(rel.identifier)),
                     dst_slot: dst,
                     rel_type: rel.rel_type,
                     dir: rel.dir.map(Dir::reverse),
+                    depth: rel.depth
                 };
                 plan = filter_expand(expand, dst, &left_node.labels);
             } else if left_solved && right_solved {
@@ -193,12 +195,13 @@ pub fn plan_match_patterngraph(
                 let dst_slot = pc.scoping.lookup_or_allocrow(rel.identifier);
                 plan = LogicalPlan::ExpandInto {
                     src: Box::new(plan),
-                    scope,
+                    phase: scope,
                     left_node_slot: pc.scoping.lookup_or_allocrow(left_id),
                     right_node_slot: pc.scoping.lookup_or_allocrow(right_id),
                     dst_slot,
                     rel_type: rel.rel_type,
                     dir: rel.dir,
+                    // TODO this is missing depth, eg. `WITH a, b MATCH (a)-[*]-(b)`
                 }
             }
         }
@@ -272,7 +275,7 @@ fn plan_match_node(
     let node_slot = pc.scoping.lookup_or_allocrow(v.identifier);
     let mut plan = LogicalPlan::NodeScan {
         src: Box::new(src),
-        scope: pc.scoping.current_scope_no(),
+        phase: pc.get_or_create_read_phase(),
         slot: node_slot,
         labels: v.labels.first().cloned(),
     };
@@ -305,7 +308,7 @@ fn plan_match_node(
 #[cfg(test)]
 mod tests {
     use crate::frontend::tests::plan;
-    use crate::frontend::{Dir, Expr, LogicalPlan, Op, Projection};
+    use crate::frontend::{Dir, Expr, LogicalPlan, Op, Projection, Depth};
     use crate::Error;
 
     #[test]
@@ -321,16 +324,17 @@ mod tests {
             LogicalPlan::Expand {
                 src: Box::new(LogicalPlan::NodeScan {
                     src: Box::new(LogicalPlan::Argument),
-                    scope: 1,
+                    phase: 0,
                     slot: p.slot(id_n),
                     labels: Some(lbl_person),
                 }),
-                scope: 1,
+                phase: 0,
                 src_slot: p.slot(id_n),
-                rel_slot: p.slot(id_anon),
+                rel_slot: Some(p.slot(id_anon)),
                 dst_slot: p.slot(id_o),
                 rel_type: None,
                 dir: Some(Dir::Out),
+                depth: Depth::Exact(1)
             }
         );
         Ok(())
@@ -351,16 +355,17 @@ mod tests {
                 src: Box::new(LogicalPlan::Expand {
                     src: Box::new(LogicalPlan::NodeScan {
                         src: Box::new(LogicalPlan::Argument),
-                        scope: 1,
+                        phase: 0,
                         slot: p.slot(id_o),
                         labels: Some(lbl_person),
                     }),
-                    scope: 1,
+                    phase: 0,
                     src_slot: p.slot(id_o),
-                    rel_slot: p.slot(id_r),
+                    rel_slot: Some(p.slot(id_r)),
                     dst_slot: p.slot(id_n),
                     rel_type: Some(tpe_knows),
                     dir: Some(Dir::In),
+                    depth: Depth::Exact(1)
                 }),
                 predicate: Expr::HasLabel(p.slot(id_n), lbl_person)
             }
@@ -379,7 +384,7 @@ mod tests {
             LogicalPlan::Selection {
                 src: Box::new(LogicalPlan::NodeScan {
                     src: Box::new(LogicalPlan::Argument),
-                    scope: 1,
+                    phase: 0,
                     slot: p.slot(id_n),
                     labels: None,
                 }),
@@ -412,16 +417,17 @@ mod tests {
                     src: Box::new(LogicalPlan::Expand {
                         src: Box::new(LogicalPlan::NodeScan {
                             src: Box::new(LogicalPlan::Argument),
-                            scope: 1,
+                            phase: 0,
                             slot: p.slot(id_x),
                             labels: None
                         }),
-                        scope: 1,
+                        phase: 0,
                         src_slot: 0,
-                        rel_slot: p.slot(id_r),
+                        rel_slot: Some(p.slot(id_r)),
                         dst_slot: p.slot(id_y),
                         rel_type: None,
-                        dir: Some(Dir::Out)
+                        dir: Some(Dir::Out),
+                        depth: Depth::Exact(1)
                     }),
                     projections: vec![Projection {
                         expr: Expr::RowRef(p.slot(id_r)),
@@ -429,7 +435,7 @@ mod tests {
                         dst: p.slot(id_r)
                     }]
                 }),
-                scope: 2,
+                phase: 0,
                 src_rel_slot: p.slot(id_r),
                 start_node_slot: p.slot(id_a),
                 end_node_slot: p.slot(id_b)
@@ -451,7 +457,7 @@ mod tests {
                 src: Box::new(LogicalPlan::Selection {
                     src: Box::new(LogicalPlan::NodeScan {
                         src: Box::new(LogicalPlan::Argument),
-                        scope: 1,
+                        phase: 0,
                         slot: p.slot(id_n),
                         labels: None,
                     }),
@@ -464,12 +470,13 @@ mod tests {
                         op: Op::Eq
                     }
                 }),
-                scope: 1,
+                phase: 0,
                 src_slot: p.slot(id_n),
-                rel_slot: 2,
+                rel_slot: Some(2),
                 dst_slot: p.slot(id_m),
                 rel_type: None,
-                dir: Some(Dir::Out)
+                dir: Some(Dir::Out),
+                depth: Depth::Exact(1)
             }
         );
         Ok(())
@@ -487,7 +494,7 @@ mod tests {
                     src: Box::new(LogicalPlan::Optional {
                         src: Box::new(LogicalPlan::NodeScan {
                             src: Box::new(LogicalPlan::Argument),
-                            scope: 1,
+                            phase: 0,
                             slot: p.slot(id_n),
                             labels: None,
                         }),
@@ -521,16 +528,17 @@ mod tests {
                         src: Box::new(LogicalPlan::Expand {
                             src: Box::new(LogicalPlan::NodeScan {
                                 src: Box::new(LogicalPlan::Argument),
-                                scope: 1,
+                                phase: 0,
                                 slot: p.slot(id_a),
                                 labels: None
                             }),
-                            scope: 1,
+                            phase: 0,
                             src_slot: p.slot(id_a),
-                            rel_slot: p.slot(id_r),
+                            rel_slot: Some(p.slot(id_r)),
                             dst_slot: p.slot(id_b),
                             rel_type: Some(reltype_knows),
-                            dir: Some(Dir::Out)
+                            dir: Some(Dir::Out),
+                            depth: Depth::Exact(1)
                         }),
                         slots: vec![0, 1, 2]
                     }),
@@ -559,13 +567,13 @@ mod tests {
                     src: Box::new(LogicalPlan::CartesianProduct {
                         outer: Box::new(LogicalPlan::NodeScan {
                             src: Box::new(LogicalPlan::Argument),
-                            scope: 1,
+                            phase: 0,
                             slot: p.slot(id_a),
                             labels: None,
                         }),
                         inner: Box::new(LogicalPlan::NodeScan {
                             src: Box::new(LogicalPlan::Argument),
-                            scope: 1,
+                            phase: 0,
                             slot: p.slot(id_b),
                             labels: None,
                         }),
@@ -592,6 +600,36 @@ mod tests {
         Ok(())
     }
 
+
+    #[test]
+    fn plan_unbound_depth_match() -> Result<(), Error> {
+        let mut p = plan("MATCH (n)-[*]->(o)")?;
+        let id_anon = p.tokenize("$anonrel0");
+        let id_n = p.tokenize("n");
+        let id_o = p.tokenize("o");
+
+        assert_eq!(
+            p.plan,
+            LogicalPlan::Expand {
+                src: Box::new(LogicalPlan::NodeScan {
+                    src: Box::new(LogicalPlan::Argument),
+                    phase: 0,
+                    slot: p.slot(id_n),
+                    labels: None,
+                }),
+                phase: 0,
+                src_slot: p.slot(id_n),
+                rel_slot: Some(p.slot(id_anon)),
+                dst_slot: p.slot(id_o),
+                rel_type: None,
+                dir: Some(Dir::Out),
+                depth: Depth::Unlimited
+            }
+        );
+        Ok(())
+    }
+
+
     #[test]
     fn plan_path_match() -> Result<(), Error> {
         let mut p = plan("MATCH p=(a)-[r1:KNOWS]->(b)-[r2:KNOWS]->(c) RETURN p")?;
@@ -613,23 +651,25 @@ mod tests {
                         src: Box::new(LogicalPlan::Expand {
                             src: Box::new(LogicalPlan::NodeScan {
                                 src: Box::new(LogicalPlan::Argument),
-                                scope: 1,
+                                phase: 0,
                                 slot: p.slot(id_a),
                                 labels: None
                             }),
-                            scope: 1,
+                            phase: 0,
                             src_slot: p.slot(id_a),
-                            rel_slot: p.slot(id_r1),
+                            rel_slot: Some(p.slot(id_r1)),
                             dst_slot: p.slot(id_b),
                             rel_type: Some(reltype_knows),
-                            dir: Some(Dir::Out)
+                            dir: Some(Dir::Out),
+                            depth: Depth::Exact(1)
                         }),
-                        scope: 1,
+                        phase: 0,
                         src_slot: p.slot(id_b),
-                        rel_slot: p.slot(id_r2),
+                        rel_slot: Some(p.slot(id_r2)),
                         dst_slot: p.slot(id_c),
                         rel_type: Some(reltype_knows),
-                        dir: Some(Dir::Out)
+                        dir: Some(Dir::Out),
+                        depth: Depth::Exact(1)
                     }),
                     projections: vec![Projection {
                         expr: Expr::Path(vec![p.slot(id_a), p.slot(id_r1), p.slot(id_b), p.slot(id_r2), p.slot(id_c)]),
