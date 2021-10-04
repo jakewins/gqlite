@@ -47,7 +47,7 @@ pub fn plan_match_patterngraph(
     mut pg: PatternGraph,
 ) -> Result<LogicalPlan> {
     let scope = pc.get_or_create_read_phase();
-    fn filter_expand(expand: LogicalPlan, slot: Token, labels: &[Token]) -> LogicalPlan {
+    fn filter_expand(phase: u8, expand: LogicalPlan, slot: Token, labels: &[Token]) -> LogicalPlan {
         let labels = labels
             .iter()
             .map(|&label| Expr::HasLabel(slot, label))
@@ -57,11 +57,13 @@ pub fn plan_match_patterngraph(
         } else if labels.len() == 1 {
             LogicalPlan::Selection {
                 src: Box::new(expand),
+                phase,
                 predicate: labels.into_iter().next().unwrap(),
             }
         } else {
             LogicalPlan::Selection {
                 src: Box::new(expand),
+                phase,
                 predicate: Expr::And(labels),
             }
         }
@@ -168,7 +170,7 @@ pub fn plan_match_patterngraph(
                     dir: rel.dir,
                     depth: rel.depth
                 };
-                plan = filter_expand(expand, dst, &right_node.labels);
+                plan = filter_expand(pc.current_phase, expand, dst, &right_node.labels);
             } else if !left_solved && right_solved {
                 // Right is solved and left isn't, so we can expand to the left
                 let mut left_node = pg.v.get_mut(&left_id).unwrap();
@@ -187,7 +189,7 @@ pub fn plan_match_patterngraph(
                     dir: rel.dir.map(Dir::reverse),
                     depth: rel.depth
                 };
-                plan = filter_expand(expand, dst, &left_node.labels);
+                plan = filter_expand(pc.current_phase, expand, dst, &left_node.labels);
             } else if left_solved && right_solved {
                 // Both sides are solved, need to find rel that bridges them.
                 rel.solved = true;
@@ -224,6 +226,7 @@ pub fn plan_match_patterngraph(
                 plan = LogicalPlan::CartesianProduct {
                     outer: Box::new(plan),
                     inner,
+                    phase: pc.current_phase,
                     predicate: Expr::Bool(true),
                 };
 
@@ -256,6 +259,7 @@ pub fn plan_match_patterngraph(
     if let Some(pred) = &pg.predicate {
         return Ok(LogicalPlan::Selection {
             src: Box::new(plan),
+            phase: pc.current_phase,
             predicate: pred.clone(),
         });
     }
@@ -298,6 +302,7 @@ fn plan_match_node(
         };
         plan = LogicalPlan::Selection {
             src: Box::new(plan),
+            phase: pc.current_phase,
             predicate,
         }
     }
@@ -367,6 +372,7 @@ mod tests {
                     dir: Some(Dir::In),
                     depth: Depth::Exact(1)
                 }),
+                phase: 0,
                 predicate: Expr::HasLabel(p.slot(id_n), lbl_person)
             }
         );
@@ -388,6 +394,7 @@ mod tests {
                     slot: p.slot(id_n),
                     labels: None,
                 }),
+                phase: 0,
                 predicate: Expr::BinaryOp {
                     left: Box::new(Expr::Bool(true)),
                     right: Box::new(Expr::FuncCall {
@@ -429,6 +436,7 @@ mod tests {
                         dir: Some(Dir::Out),
                         depth: Depth::Exact(1)
                     }),
+                    phase: 0,
                     projections: vec![Projection {
                         expr: Expr::RowRef(p.slot(id_r)),
                         alias: id_r,
@@ -461,6 +469,7 @@ mod tests {
                         slot: p.slot(id_n),
                         labels: None,
                     }),
+                    phase: 0,
                     predicate: Expr::BinaryOp {
                         left: Box::new(Expr::Prop(
                             Box::new(Expr::RowRef(p.slot(id_n))),
@@ -500,6 +509,7 @@ mod tests {
                         }),
                         slots: vec![p.slot(id_n)]
                     }),
+                    phase: 0,
                     projections: vec![Projection {
                         expr: Expr::RowRef(p.slot(id_n)),
                         alias: id_n,
@@ -542,6 +552,7 @@ mod tests {
                         }),
                         slots: vec![0, 1, 2]
                     }),
+                    phase: 0,
                     projections: vec![Projection {
                         expr: Expr::RowRef(p.slot(id_r)),
                         alias: id_r,
@@ -577,10 +588,12 @@ mod tests {
                             slot: p.slot(id_b),
                             labels: None,
                         }),
+                        phase: 0,
                         // always-true predicate makes this a cartesian product, every row combo will
                         // match the join condition
                         predicate: Expr::Bool(true),
                     }),
+                    phase: 0,
                     projections: vec![
                         Projection {
                             expr: Expr::RowRef(p.slot(id_a)),
@@ -671,6 +684,7 @@ mod tests {
                         dir: Some(Dir::Out),
                         depth: Depth::Exact(1)
                     }),
+                    phase: 0,
                     projections: vec![Projection {
                         expr: Expr::Path(vec![p.slot(id_a), p.slot(id_r1), p.slot(id_b), p.slot(id_r2), p.slot(id_c)]),
                         alias: id_p,

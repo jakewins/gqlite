@@ -42,6 +42,7 @@ fn plan_parsed_with(
     let mut plan = if !projections.is_aggregating && !projections.is_distinct {
         LogicalPlan::Project {
             src: Box::new(src),
+            phase: pc.current_phase,
             projections: projections.projections,
         }
     } else {
@@ -51,6 +52,7 @@ fn plan_parsed_with(
     if let Some(e) = projections.selection {
         plan = LogicalPlan::Selection {
             src: Box::new(plan),
+            phase: pc.current_phase,
             predicate: e,
         };
     }
@@ -63,6 +65,7 @@ fn plan_parsed_with(
     if let Some(e) = projections.sort {
         plan = LogicalPlan::Sort {
             src: Box::new(plan),
+            phase: pc.current_phase,
             sort_by: e,
         }
     }
@@ -70,6 +73,7 @@ fn plan_parsed_with(
     if projections.limit.is_some() || projections.skip.is_some() {
         plan = LogicalPlan::Limit {
             src: Box::new(plan),
+            phase: pc.current_phase,
             skip: projections.skip,
             limit: projections.limit,
         }
@@ -107,9 +111,11 @@ pub fn plan_aggregation(
     Ok(LogicalPlan::Project {
         src: Box::new(LogicalPlan::Aggregate {
             src: Box::new(src),
+            phase: pc.current_phase,
             grouping,
             aggregations,
         }),
+        phase: pc.current_phase,
         projections: post_aggregation_projections,
     })
 }
@@ -327,6 +333,7 @@ mod tests {
                     slot: 0,
                     labels: None,
                 }),
+                phase: 0,
                 projections: vec![Projection {
                     expr: Expr::RowRef(p.slot(id_n)),
                     alias: id_n,
@@ -352,6 +359,7 @@ mod tests {
                     slot: 0,
                     labels: None,
                 }),
+                phase: 0,
                 projections: vec![Projection {
                     expr: Expr::RowRef(p.slot(id_n)),
                     alias: id_p,
@@ -381,6 +389,7 @@ mod tests {
                         }],
                         rels: vec![]
                     }),
+                    phase: 0,
                     projections: vec![Projection {
                         expr: Expr::Int(1),
                         alias: id_p,
@@ -417,6 +426,7 @@ mod tests {
                                 }],
                                 rels: vec![]
                             }),
+                            phase: 0,
                             projections: vec![Projection {
                                 expr: Expr::Int(1),
                                 alias: id_p,
@@ -429,6 +439,7 @@ mod tests {
                     slot: p.slot(id_m),
                     labels: None
                 }),
+                phase: 0,
                 projections: vec![Projection {
                     expr: Expr::Int(2),
                     alias: id_o,
@@ -450,14 +461,17 @@ mod tests {
                 src: Box::new(LogicalPlan::Sort {
                     src: Box::new(LogicalPlan::Project {
                         src: Box::new(LogicalPlan::Argument),
+                        phase: 0,
                         projections: vec![Projection {
                             expr: Expr::Int(1),
                             alias: id_p,
                             dst: p.slot(id_p),
                         }],
                     }),
+                    phase: 0,
                     sort_by: vec![Expr::RowRef(p.slot(id_p))]
                 }),
+                phase: 0,
                 skip: Some(Expr::Int(1)),
                 limit: None,
             }
@@ -483,12 +497,14 @@ mod tests {
                         slot: 0,
                         labels: None,
                     }),
+                    phase: 0,
                     projections: vec![Projection {
                         expr: Expr::RowRef(p.slot(id_n)),
                         alias: id_p,
                         dst: p.slot(id_p),
                     }],
                 }),
+                phase: 0,
                 skip: None,
                 limit: Some(Expr::Int(1)),
             }
@@ -508,6 +524,7 @@ mod tests {
 
         let projections = if let LogicalPlan::Project {
             src: _,
+            phase: _,
             projections,
         } = &p.plan
         {
@@ -551,6 +568,7 @@ mod tests {
 
         let projections = if let LogicalPlan::Project {
             src: _,
+            phase: _,
             projections,
         } = &p.plan
         {
@@ -598,12 +616,14 @@ mod tests {
                         slot: 0,
                         labels: None,
                     }),
+                    phase: 0,
                     projections: vec![Projection {
                         expr: Expr::Prop(Box::new(Expr::RowRef(p.slot(id_n))), vec![key_name]),
                         alias: key_name,
                         dst: p.slot(key_name),
                     }],
                 }),
+                phase: 0,
                 sort_by: vec![Expr::RowRef(p.slot(key_name))]
             }
         );
@@ -628,6 +648,7 @@ mod tests {
                             slot: 0,
                             labels: None,
                         }),
+                        phase: 0,
                         grouping: vec![(Expr::RowRef(p.slot(id_n)), p.slot(id_n))],
                         aggregations: vec![(
                             Expr::FuncCall {
@@ -637,6 +658,7 @@ mod tests {
                             p.slot(id_count_call)
                         )]
                     }),
+                    phase: 0,
                     projections: vec![
                         Projection {
                             expr: Expr::RowRef(p.slot(id_n)),
@@ -650,6 +672,7 @@ mod tests {
                         }
                     ],
                 }),
+                phase: 0,
                 sort_by: vec![Expr::RowRef(p.slot(id_count_call))]
             }
         );
@@ -678,18 +701,21 @@ mod tests {
                             slot: 0,
                             labels: None,
                         }),
+                        phase: 0,
                         grouping: vec![(
                             Expr::Prop(Box::new(Expr::RowRef(p.slot(id_n))), vec![key_name]),
                             p.slot(key_name)
                         )],
                         aggregations: vec![]
                     }),
+                    phase: 0,
                     projections: vec![Projection {
                         expr: Expr::RowRef(p.slot(key_name)),
                         alias: key_name,
                         dst: p.slot(key_name),
                     }],
                 }),
+                phase: 0,
                 sort_by: vec![Expr::RowRef(p.slot(key_name))]
             }
         );
@@ -714,15 +740,18 @@ mod tests {
                             slot: 0,
                             labels: None,
                         }),
+                        phase: 0,
                         grouping: vec![(Expr::RowRef(p.slot(id_n)), p.slot(id_n))],
                         aggregations: vec![]
                     }),
+                    phase: 0,
                     projections: vec![Projection {
                         expr: Expr::RowRef(p.slot(id_n)),
                         alias: id_n,
                         dst: p.slot(id_n),
                     }],
                 }),
+                phase: 0,
                 sort_by: vec![Expr::Prop(
                     Box::new(Expr::RowRef(p.slot(id_n))),
                     vec![key_name]
@@ -751,12 +780,14 @@ mod tests {
                         slot: 0,
                         labels: None,
                     }),
+                    phase: 0,
                     projections: vec![Projection {
                         expr: Expr::RowRef(p.slot(id_n)),
                         alias: id_n,
                         dst: p.slot(id_n),
                     }],
                 }),
+                phase: 0,
                 predicate: Expr::BinaryOp {
                     left: Box::new(Expr::Prop(
                         Box::new(Expr::RowRef(p.slot(id_n))),
@@ -785,12 +816,14 @@ mod tests {
                         slot: 0,
                         labels: None,
                     }),
+                    phase: 0,
                     projections: vec![Projection {
                         expr: Expr::Prop(Box::new(Expr::RowRef(p.slot(id_n))), vec![key_name]),
                         alias: key_name,
                         dst: p.slot(key_name),
                     }],
                 }),
+                phase: 0,
                 predicate: Expr::BinaryOp {
                     left: Box::new(Expr::Prop(
                         Box::new(Expr::RowRef(p.slot(id_n))),
@@ -831,12 +864,14 @@ mod tests {
                             dir: Some(Dir::Out),
                             depth: Depth::Exact(1),
                         }),
+                        phase: 0,
                         projections: vec![Projection {
                             expr: Expr::RowRef(p.slot(id_a)),
                             alias: id_a,
                             dst: p.slot(id_a),
                         }],
                     }),
+                    phase: 0,
                     projections: vec![Projection {
                         expr: Expr::RowRef(p.slot(id_a)),
                         alias: id_a,
@@ -864,6 +899,7 @@ mod tests {
                         slot: 0,
                         labels: None,
                     }),
+                    phase: 0,
                     projections: vec![Projection {
                         expr: Expr::RowRef(p.slot(id_n)),
                         alias: id_n,
@@ -892,6 +928,7 @@ mod tests {
                             slot: 0,
                             labels: None,
                         }),
+                        phase: 0,
                         grouping: vec![],
                         aggregations: vec![(
                             Expr::FuncCall {
@@ -901,6 +938,7 @@ mod tests {
                             p.slot(alias)
                         )]
                     }),
+                    phase: 0,
                     projections: vec![Projection {
                         expr: Expr::RowRef(p.slot(alias)),
                         alias,
@@ -930,12 +968,14 @@ mod tests {
                             slot: 0,
                             labels: None,
                         }),
+                        phase: 0,
                         grouping: vec![(
                             Expr::Prop(Box::new(Expr::RowRef(p.slot(id_n))), vec![prop_name]),
                             1
                         ),],
                         aggregations: vec![]
                     }),
+                    phase: 0,
                     projections: vec![Projection {
                         expr: Expr::RowRef(p.slot(alias)),
                         alias,
@@ -967,6 +1007,7 @@ mod tests {
                             slot: 0,
                             labels: Some(lbl_person)
                         }),
+                        phase: 0,
                         grouping: vec![],
                         aggregations: vec![(
                             Expr::FuncCall {
@@ -976,6 +1017,7 @@ mod tests {
                             p.slot(col_count_n)
                         )]
                     }),
+                    phase: 0,
                     projections: vec![Projection {
                         expr: Expr::RowRef(p.slot(col_count_n)),
                         alias: col_count_n,
@@ -1006,6 +1048,7 @@ mod tests {
                             slot: 0,
                             labels: None
                         }),
+                        phase: 0,
                         grouping: vec![],
                         aggregations: vec![(
                             Expr::FuncCall {
@@ -1015,6 +1058,7 @@ mod tests {
                             p.slot(col_count_n)
                         )]
                     }),
+                    phase: 0,
                     projections: vec![Projection {
                         expr: Expr::RowRef(p.slot(col_count_n)),
                         alias: col_count_n,
@@ -1050,6 +1094,7 @@ mod tests {
                             slot: 0,
                             labels: Some(lbl_person)
                         }),
+                        phase: 0,
                         grouping: vec![
                             (
                                 Expr::Prop(Box::new(Expr::RowRef(p.slot(id_n))), vec![key_age]),
@@ -1071,6 +1116,7 @@ mod tests {
                             p.slot(col_count_n)
                         )]
                     }),
+                    phase: 0,
                     projections: vec![
                         Projection {
                             expr: Expr::RowRef(p.slot(col_n_age)),

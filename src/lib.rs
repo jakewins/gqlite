@@ -204,5 +204,9 @@ pub mod gramdb {
             let backend = gram::GramBackend::open(file)?;
             Database::with_backend(backend)
         }
+
+        pub fn flush(&mut self) -> Result<()> {
+            self.backend.flush()
+        }
     }
 }

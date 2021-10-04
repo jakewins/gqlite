@@ -183,6 +183,7 @@ pub enum LogicalPlan {
     },
     Selection {
         src: Box<Self>,
+        phase: u8,
         predicate: Expr,
     },
     Create {
@@ -230,6 +231,7 @@ pub enum LogicalPlan {
 
     Aggregate {
         src: Box<Self>,
+        phase: u8,
         // These projections together make up a grouping key, so if you have a query like
         //
         //   MATCH (n:Person) RETURN n.occupation, n.age, count(n)
@@ -257,6 +259,7 @@ pub enum LogicalPlan {
 
     Unwind {
         src: Box<Self>,
+        phase: u8,
         list_expr: Expr,
         alias: Slot,
     },
@@ -273,20 +276,24 @@ pub enum LogicalPlan {
     CartesianProduct {
         outer: Box<Self>,
         inner: Box<Self>,
+        phase: u8,
         predicate: Expr,
     },
 
     // Take the input and apply the specified projections
     Project {
         src: Box<Self>,
+        phase: u8,
         projections: Vec<Projection>,
     },
     Sort {
         src: Box<Self>,
+        phase: u8,
         sort_by: Vec<Expr>,
     },
     Limit {
         src: Box<Self>,
+        phase: u8,
         skip: Option<Expr>,
         limit: Option<Expr>,
     },
@@ -318,7 +325,7 @@ impl LogicalPlan {
                     proj
                 )
             }
-            LogicalPlan::Project { src, projections } => {
+            LogicalPlan::Project { src, phase, projections } => {
                 let next_indent = &format!("{}  ", ind);
                 let mut proj = String::new();
                 for (i, p) in projections.iter().enumerate() {
@@ -328,8 +335,9 @@ impl LogicalPlan {
                     proj.push_str(&p.fmt_pretty(next_indent, t))
                 }
                 format!(
-                    "Project(\n{}src={},\n{}projections=[{}])",
+                    "Project(\n{}src={},\n{}phase={},\n{}projections=[{}])",
                     ind, src.fmt_pretty(&format!("{}  ", next_indent), t),
+                    ind, phase,
                     ind, proj,
                 )
             }
@@ -424,48 +432,57 @@ impl LogicalPlan {
                     format!("{:?}", rels)
                 )
             }
-            LogicalPlan::Selection { src, predicate } => {
+            LogicalPlan::Selection { src, phase, predicate } => {
                 let next_indent = &format!("{}  ", ind);
                 format!(
-                    "Selection(\n{}src={}\n{}predicate={:?})",
+                    "Selection(\n{}src={}\n{}phase={}\n{}predicate={:?})",
                     ind,
                     src.fmt_pretty(next_indent, t),
+                    ind,
+                    phase,
                     ind,
                     predicate,
                 )
             }
-            LogicalPlan::Limit { src, skip, limit } => {
+            LogicalPlan::Limit { src, phase, skip, limit } => {
                 let next_indent = &format!("{}  ", ind);
                 format!(
-                    "Limit(\n{}src={}\n{}skip={:?},\n{}limit={:?})",
+                    "Limit(\n{}src={}\n{}phase={}\n{}skip={:?},\n{}limit={:?})",
                     ind,
                     src.fmt_pretty(next_indent, t),
+                    ind,
+                    phase,
                     ind,
                     skip,
                     ind,
                     limit,
                 )
             }
-            LogicalPlan::Sort { src, sort_by } => {
+            LogicalPlan::Sort { src, phase, sort_by } => {
                 let next_indent = &format!("{}  ", ind);
                 format!(
-                    "Sort(\n{}src={}\n{}by={:?})",
+                    "Sort(\n{}src={}\n{}phase={}\n{}by={:?})",
                     ind,
                     src.fmt_pretty(next_indent, t),
+                    ind,
+                    phase,
                     ind,
                     sort_by,
                 )
             }
             LogicalPlan::Aggregate {
                 src,
+                phase,
                 grouping,
                 aggregations,
             } => {
                 let next_indent = &format!("{}  ", ind);
                 format!(
-                    "Aggregate(\n{}src={}\n{}grouping=[{:?}]\n{}aggregations=[{:?}])",
+                    "Aggregate(\n{}src={}\n{}phase={}\n{}grouping=[{:?}]\n{}aggregations=[{:?}])",
                     ind,
                     src.fmt_pretty(next_indent, t),
+                    ind,
+                    phase,
                     ind,
                     grouping,
                     ind,
@@ -538,17 +555,18 @@ impl LogicalPlan {
             LogicalPlan::CartesianProduct {
                 outer,
                 inner,
+                phase,
                 predicate,
             } => {
                 let next_indent = &format!("{}  ", ind);
                 format!(
-                    "CartesianProduct(\n{}outer={}\n{}inner={}\n{}predicate={:?})",
+                    "CartesianProduct(\n{}outer={}\n{}inner={}\n{}phase={}\n{}predicate={:?})",
                     ind,
                     outer.fmt_pretty(next_indent, t),
                     ind,
                     inner.fmt_pretty(next_indent, t),
-                    ind,
-                    predicate,
+                    ind, phase,
+                    ind, predicate,
                 )
             }
             LogicalPlan::Barrier {
@@ -1070,6 +1088,7 @@ fn plan_unwind(
 
     Ok(LogicalPlan::Unwind {
         src: Box::new(src),
+        phase: pc.current_phase,
         list_expr,
         alias,
     })
@@ -1159,6 +1178,7 @@ pub(crate) mod tests {
                 p.plan,
                 LogicalPlan::Unwind {
                     src: Box::new(LogicalPlan::Argument),
+                    phase: 0,
                     list_expr: Expr::List(vec![
                         Expr::List(vec![Expr::Int(1)]),
                         Expr::List(vec![Expr::Int(2), Expr::Float(1.0)]),

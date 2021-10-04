@@ -451,6 +451,7 @@ mod tests {
 
         if let Ok(LogicalPlan::Project {
             src: _,
+            phase: _,
             projections,
         }) = plan
         {

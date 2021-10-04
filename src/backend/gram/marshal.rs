@@ -186,3 +186,20 @@ pub fn load(tokens: &mut Tokens, file: &mut File) -> Result<Graph> {
 
     Ok(g)
 }
+
+
+
+pub fn store(toks: &Tokens, g: &mut Graph, file: &mut File) -> Result<()> {
+
+    let mut out = String::with_capacity(1024);
+
+    for n in &g.nodes {
+        out.push_str(&format!("({})", toks.lookup(n.gid).unwrap()))
+    }
+
+    println!("{}", out);
+
+    Ok(())
+
+
+}

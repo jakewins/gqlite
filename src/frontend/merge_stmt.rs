@@ -127,6 +127,7 @@ ON MATCH SET n.updated = timestamp()",
                                 slot: slot_n,
                                 labels: Some(lbl_person)
                             }),
+                            phase: 0,
                             predicate: Expr::BinaryOp {
                                 left: Box::new(Expr::Prop(
                                     Box::new(Expr::RowRef(slot_n)),
@@ -208,6 +209,7 @@ ON MATCH SET n.updated = timestamp()",
                         slot: p.slot(id_b),
                         labels: None
                     }),
+                    phase: 0,
                     predicate: Expr::Bool(true),
                 }),
                 rhs: Box::new(LogicalPlan::AntiConditionalApply {

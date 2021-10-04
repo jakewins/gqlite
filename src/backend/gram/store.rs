@@ -66,7 +66,7 @@ impl Node {
         let mut c = self;
         // Basically, filter out all versions created in the current scope and
         // scopes "in the future" (remember we are a lazy stream pipeline)
-        while c.version.xid == v.xid && c.version.phase >= v.phase {
+        while c.version.xid == v.xid && c.version.phase > v.phase {
             if let Some(p) = &c.prior {
                 c = &p;
             } else {
@@ -130,7 +130,7 @@ struct RelLookup {
 
 #[derive(Debug)]
 pub struct Graph {
-    nodes: Vec<Node>,
+    pub nodes: Vec<Node>,
 }
 
 impl Graph {
@@ -145,16 +145,26 @@ impl Graph {
         self.nodes[node_id].at_version(v)
     }
 
-    pub fn get_node_prop(&self, node_id: usize, prop: Token) -> Option<Val> {
-        self.nodes[node_id].properties.get(&prop).cloned()
+    pub fn get_node_prop(&self, node_id: usize, prop: Token, v: Version) -> Option<Val> {
+        let prop = if let Some(node) = self.nodes[node_id].at_version(v) {
+            node.properties.get(&prop).cloned()
+        } else {
+            None
+        };
+        prop
+
     }
 
-    pub fn get_rel_prop(&self, node_id: usize, rel_index: usize, prop: Token) -> Option<Val> {
-        self.nodes[node_id].rels[rel_index]
-            .properties
-            .borrow()
-            .get(&prop)
-            .cloned()
+    pub fn get_rel_prop(&self, node_id: usize, rel_index: usize, prop: Token, v: Version) -> Option<Val> {
+        if let Some(node) =  self.nodes[node_id].at_version(v) {
+            return node.rels[rel_index]
+                .properties
+                .borrow()
+                .get(&prop)
+                .cloned()
+        } else {
+            None
+        }
     }
 
     pub fn append_label(&mut self, node_id: usize, label: Token, v: Version) {

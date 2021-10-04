@@ -124,6 +124,7 @@ mod tests {
                         slot: p.slot(id_b),
                         labels: None
                     }),
+                    phase: 0,
                     predicate: Expr::Bool(true),
                 }),
                 phase: 1,

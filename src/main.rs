@@ -40,6 +40,8 @@ fn main() -> anyhow::Result<()> {
             }
             println!()
         }
+
+        db.flush();
     }
 
     Ok(())

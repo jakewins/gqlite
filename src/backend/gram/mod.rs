@@ -57,6 +57,13 @@ impl GramBackend {
         })
     }
 
+    pub fn flush(&mut self) -> Result<()> {
+        let mut g = self.g.borrow_mut();
+        let mut f = self.file.borrow_mut();
+        let toks = self.tokens.borrow();
+        marshal::store(&toks, &mut g, &mut f)
+    }
+
     fn convert(&self, plan: LogicalPlan) -> Result<Box<dyn Operator>> {
         match plan {
             LogicalPlan::Argument => Ok(Box::new(Argument { consumed: false })),
@@ -193,7 +200,7 @@ impl GramBackend {
             })),
             LogicalPlan::ExpandInto {
                 src,
-                phase: _,
+                phase,
                 left_node_slot,
                 right_node_slot,
                 dst_slot,
@@ -201,21 +208,24 @@ impl GramBackend {
                 dir,
             } => Ok(Box::new(ExpandInto {
                 src: self.convert(*src)?,
+                phase,
                 left_node_slot,
                 right_node_slot,
                 dst_slot,
                 rel_type,
                 dir,
             })),
-            LogicalPlan::Selection { src,  predicate } => {
+            LogicalPlan::Selection { src,  phase, predicate } => {
                 // self.convert(*src)
                 Ok(Box::new(Selection {
                     src: self.convert(*src)?,
+                    phase,
                     predicate: self.convert_expr(predicate),
                 }))
             }
             LogicalPlan::Aggregate {
                 src,
+                phase,
                 grouping,
                 aggregations,
             } => {
@@ -235,6 +245,7 @@ impl GramBackend {
                 }
                 Ok(Box::new(HashAggregation {
                     src: self.convert(*src)?,
+                    phase,
                     grouping: group_expr,
                     aggregations: agg_exprs,
                     group_aggregations: Default::default(),
@@ -245,10 +256,12 @@ impl GramBackend {
             }
             LogicalPlan::Unwind {
                 src,
+                phase,
                 list_expr,
                 alias,
             } => Ok(Box::new(Unwind {
                 src: self.convert(*src)?,
+                phase,
                 list_expr: self.convert_expr(list_expr),
                 current_list: None,
                 next_index: 0,
@@ -259,7 +272,7 @@ impl GramBackend {
                 fields,
                 print_header: true,
             })),
-            LogicalPlan::Project { src, projections } => {
+            LogicalPlan::Project { src, phase, projections } => {
                 let mut converted_projections = Vec::new();
                 for projection in projections {
                     converted_projections.push(Projection {
@@ -271,22 +284,24 @@ impl GramBackend {
 
                 Ok(Box::new(Project {
                     src: self.convert(*src)?,
+                    phase,
                     projections: converted_projections,
                 }))
             }
-            LogicalPlan::Sort { src,  sort_by } => {
+            LogicalPlan::Sort { src, phase, sort_by } => {
                 let mut conv_sort_by = Vec::with_capacity(sort_by.len());
                 for s in sort_by {
                     conv_sort_by.push(self.convert_expr(s));
                 }
                 Ok(Box::new(Sort {
                     src: self.convert(*src)?,
+                    phase,
                     state: SortState::Init,
                     rows: vec![],
                     sort_by: conv_sort_by,
                 }))
             }
-            LogicalPlan::Limit { src, skip, limit } => {
+            LogicalPlan::Limit { src, phase, skip, limit } => {
                 let mut conv_skip = None;
                 let mut conv_limit = None;
                 if let Some(skip_expr) = skip {
@@ -297,6 +312,7 @@ impl GramBackend {
                 }
                 Ok(Box::new(Limit {
                     src: self.convert(*src)?,
+                    phase,
                     skip: conv_skip,
                     limit: conv_limit,
                     initialized: false,
@@ -311,10 +327,12 @@ impl GramBackend {
             LogicalPlan::CartesianProduct {
                 outer,
                 inner,
+                phase,
                 predicate,
             } => Ok(Box::new(NestLoop {
                 outer: self.convert(*outer)?,
                 inner: self.convert(*inner)?,
+                phase,
                 predicate: self.convert_expr(predicate),
                 initialized: false,
             })),
@@ -601,6 +619,7 @@ struct GramRow {
 pub struct GramCursor {
     ctx: Context,
     plan: Option<Box<dyn Operator>>,
+
     // This is the internal data row, each operator in the execution plan acts on this,
     // reading and writing slots. Another model would be that each operator has it's own
     // row, and that we copy the values between each - or that you use "morsels", buffers of
@@ -627,6 +646,7 @@ impl BackendCursor for GramCursor {
     }
 
     fn next(&mut self) -> Result<Option<&Row>> {
+        let v = Version::new(self.ctx.xid.xid, u8::MAX);
         if let Some(p) = &mut self.plan {
             // TODO hackety hack: If there are no slots to project, just spin through the tree
             if self.slots.is_empty() {
@@ -638,7 +658,7 @@ impl BackendCursor for GramCursor {
             if p.next(&mut self.ctx, &mut self.row)? {
                 for slot in 0..self.slots.len() {
                     self.projection.slots[slot] =
-                        self.row.slots[self.slots[slot].1].project(&mut self.ctx);
+                        self.row.slots[self.slots[slot].1].project(&mut self.ctx, v);
                 }
                 Ok(Some(&self.projection))
             } else {
@@ -710,17 +730,17 @@ enum Expr {
 }
 
 impl Expr {
-    fn eval_prop(ctx: &mut Context, row: &GramRow, expr: &Expr, prop: &[Token]) -> Result<GramVal> {
-        let mut v = expr.eval(ctx, row)?;
+    fn eval_prop(ctx: &mut Context, row: &GramRow, expr: &Expr, prop: &[Token], v: Version) -> Result<GramVal> {
+        let mut val = expr.eval(ctx, row, v)?;
         for key in prop {
-            v = match v {
+            val = match val {
                 GramVal::Node { id } => {
-                    GramVal::Lit(ctx.g.borrow().get_node_prop(id, *key).unwrap_or(Val::Null))
+                    GramVal::Lit(ctx.g.borrow().get_node_prop(id, *key, v).unwrap_or(Val::Null))
                 }
                 GramVal::Rel { node_id, rel_index } => GramVal::Lit(
                     ctx.g
                         .borrow()
-                        .get_rel_prop(node_id, rel_index, *key)
+                        .get_rel_prop(node_id, rel_index, *key, v)
                         .unwrap_or(Val::Null),
                 ),
                 GramVal::Map(es) => es
@@ -737,13 +757,13 @@ impl Expr {
                         .unwrap_or(GramVal::Lit(Val::Null))
                 }
                 GramVal::Lit(Val::Null) => GramVal::Lit(Val::Null),
-                v => bail!("[eval_prop] Gram backend does not yet support {:?}", v),
+                val => bail!("[eval_prop] Gram backend does not yet support {:?}", v),
             };
         }
-        Ok(v)
+        Ok(val)
     }
 
-    fn eval(&self, ctx: &mut Context, row: &GramRow) -> Result<GramVal> {
+    fn eval(&self, ctx: &mut Context, row: &GramRow, v: Version) -> Result<GramVal> {
         match self {
             Expr::Param(ptok) => match ctx.parameters.get(ptok) {
                 None => {
@@ -762,16 +782,16 @@ impl Expr {
                 }
                 Some(v) => Ok(GramVal::Lit(v.to_owned())),
             },
-            Expr::Prop(expr, keys) => Expr::eval_prop(ctx, row, expr, keys),
+            Expr::Prop(expr, keys) => Expr::eval_prop(ctx, row, expr, keys, v),
             Expr::DynProp(expr, key) => {
-                let keyval = key.eval(ctx, row)?;
+                let keyval = key.eval(ctx, row, v)?;
                 match keyval {
                     GramVal::Lit(Val::String(keystr)) => {
                         let tok = ctx.tokens.borrow_mut().tokenize(keystr.as_str());
-                        Expr::eval_prop(ctx, row, expr, &[tok])
+                        Expr::eval_prop(ctx, row, expr, &[tok], v)
                     }
                     GramVal::Lit(Val::Int(index)) => {
-                        Ok(expr.eval(ctx, row)?.get_index(index as usize)?.clone())
+                        Ok(expr.eval(ctx, row, v)?.get_index(index as usize)?.clone())
                     }
                     x => bail!("Don't know how to index / look up key: {:?}", x)
                 }
@@ -781,15 +801,15 @@ impl Expr {
             Expr::Lit(v) => Ok(GramVal::Lit(v.clone())), // TODO not this,
             Expr::List(vs) => {
                 let mut out = Vec::new();
-                for v in vs {
-                    out.push(v.eval(ctx, row)?);
+                for ve in vs {
+                    out.push(ve.eval(ctx, row, v)?);
                 }
                 Ok(GramVal::List(out))
             }
             Expr::Map(es) => {
                 let mut out = Vec::with_capacity(es.len());
                 for e in es {
-                    out.push((e.0, e.1.eval(ctx, row)?));
+                    out.push((e.0, e.1.eval(ctx, row, v)?));
                 }
                 Ok(GramVal::Map(out))
             }
@@ -816,22 +836,22 @@ impl Expr {
                 })
             }
             Expr::Gt(a, b) => {
-                let a_val = a.eval(ctx, row)?;
-                let b_val = b.eval(ctx, row)?;
+                let a_val = a.eval(ctx, row, v)?;
+                let b_val = b.eval(ctx, row, v)?;
                 match a_val.partial_cmp(&b_val) {
                     Some(Ordering::Greater) => Ok(GramVal::Lit(Val::Bool(true))),
                     _ => Ok(GramVal::Lit(Val::Bool(false))),
                 }
             }
             Expr::Equal(a, b) => {
-                let a_val = a.eval(ctx, row)?;
-                let b_val = b.eval(ctx, row)?;
+                let a_val = a.eval(ctx, row, v)?;
+                let b_val = b.eval(ctx, row, v)?;
                 let eq = a_val.eq(&b_val);
                 Ok(GramVal::Lit(Val::Bool(eq)))
             }
             Expr::Mul(a, b) => {
-                let a_val = a.eval(ctx, row)?;
-                let b_val = b.eval(ctx, row)?;
+                let a_val = a.eval(ctx, row, v)?;
+                let b_val = b.eval(ctx, row, v)?;
                 match (&a_val, &b_val) {
                     (GramVal::Lit(Val::Int(a_int)), GramVal::Lit(Val::Int(b_int))) => {
                         Ok(GramVal::Lit(Val::Int(a_int * b_int)))
@@ -847,8 +867,8 @@ impl Expr {
                 }
             }
             Expr::Div(a, b) => {
-                let a_val = a.eval(ctx, row)?;
-                let b_val = b.eval(ctx, row)?;
+                let a_val = a.eval(ctx, row, v)?;
+                let b_val = b.eval(ctx, row, v)?;
                 match (&a_val, &b_val) {
                     (GramVal::Lit(Val::Int(a_int)), GramVal::Lit(Val::Int(b_int))) => {
                         Ok(GramVal::Lit(Val::Float(*a_int as f64 / *b_int as f64)))
@@ -870,8 +890,8 @@ impl Expr {
                 }
             }
             Expr::Add(a, b) => {
-                let a_val = a.eval(ctx, row)?;
-                let b_val = b.eval(ctx, row)?;
+                let a_val = a.eval(ctx, row, v)?;
+                let b_val = b.eval(ctx, row, v)?;
                 match (&a_val, &b_val) {
                     (GramVal::Lit(Val::Int(a_int)), GramVal::Lit(Val::Int(b_int))) => {
                         Ok(GramVal::Lit(Val::Int(a_int + b_int)))
@@ -927,8 +947,8 @@ impl Expr {
                 }
             }
             Expr::Sub(a, b) => {
-                let a_val = a.eval(ctx, row)?;
-                let b_val = b.eval(ctx, row)?;
+                let a_val = a.eval(ctx, row, v)?;
+                let b_val = b.eval(ctx, row, v)?;
                 match (&a_val, &b_val) {
                     (GramVal::Lit(Val::Int(a_int)), GramVal::Lit(Val::Int(b_int))) => {
                         Ok(GramVal::Lit(Val::Int(a_int - b_int)))
@@ -948,7 +968,7 @@ impl Expr {
             }
             Expr::And(terms) => {
                 for t in terms {
-                    match t.eval(ctx, row)? {
+                    match t.eval(ctx, row, v)? {
                         GramVal::Lit(Val::Bool(b)) => if !b {
                             return Ok(GramVal::Lit(Val::Bool(false)))
                         },
@@ -957,14 +977,14 @@ impl Expr {
                 }
                 Ok(GramVal::Lit(Val::Bool(true)))
             }
-            Expr::Not(e) => match e.eval(ctx, row)? {
+            Expr::Not(e) => match e.eval(ctx, row, v)? {
                 GramVal::Lit(Val::Bool(v)) => Ok(GramVal::Lit(Val::Bool(!v))),
                 _ => panic!("the gram backend cannot do NOT of {:?}", e),
             },
             Expr::Call(f, args) => {
                 let mut argv = Vec::with_capacity(args.len());
                 for a in args {
-                    argv.push(a.eval(ctx, row)?);
+                    argv.push(a.eval(ctx, row, v)?);
                 }
                 f.apply(ctx, &argv)
             }
@@ -980,19 +1000,19 @@ impl Expr {
                 stackslot,
                 map_expr,
             } => {
-                let src_data = src.eval(ctx, row)?;
+                let src_data = src.eval(ctx, row, v)?;
                 let mut result = Vec::new();
                 match src_data {
                     GramVal::Lit(Val::List(vals)) => {
                         for src_val in vals {
                             ctx.stack[*stackslot] = GramVal::Lit(src_val);
-                            result.push(map_expr.eval(ctx, row)?)
+                            result.push(map_expr.eval(ctx, row, v)?)
                         }
                     }
                     GramVal::List(vals) => {
                         for src_val in vals {
                             ctx.stack[*stackslot] = src_val;
-                            result.push(map_expr.eval(ctx, row)?)
+                            result.push(map_expr.eval(ctx, row, v)?)
                         }
                     }
 
@@ -1001,7 +1021,7 @@ impl Expr {
                 Ok(GramVal::List(result))
             }
             Expr::IsNull(e) => {
-                if let GramVal::Lit(Val::Null) = e.eval(ctx, row)? {
+                if let GramVal::Lit(Val::Null) = e.eval(ctx, row, v)? {
                     Ok(GramVal::Lit(Val::Bool(true)))
                 } else {
                     Ok(GramVal::Lit(Val::Bool(false)))
@@ -1029,10 +1049,10 @@ enum GramVal {
 }
 
 impl GramVal {
-    pub fn project(&self, ctx: &mut Context) -> Val {
-        fn project_node(ctx: &mut Context, id: usize) -> crate::Node {
+    pub fn project(&self, ctx: &mut Context, v: Version) -> Val {
+        fn project_node(ctx: &mut Context, v: Version, id: usize) -> crate::Node {
             let g = ctx.g.borrow();
-            let n = g.get_node(id, ctx.xid).unwrap();
+            let n = g.get_node(id, v).unwrap();
             let mut props = crate::Map::new();
             for (k, v) in &n.properties {
                 props.push((
@@ -1051,9 +1071,9 @@ impl GramVal {
             }
         }
 
-        fn project_rel(ctx: &mut Context, node_id: usize, rel_index: usize) -> crate::Rel {
+        fn project_rel(ctx: &mut Context, v: Version, node_id: usize, rel_index: usize) -> crate::Rel {
             let g = ctx.g.borrow();
-            let n = g.get_node(node_id, ctx.xid).unwrap();
+            let n = g.get_node(node_id, v).unwrap();
             let rel = &n.rels[rel_index];
 
             let rel_type = ctx
@@ -1095,7 +1115,7 @@ impl GramVal {
                 let mut out = Vec::new();
                 out.resize(vs.len(), Val::Null);
                 for i in 0..vs.len() {
-                    out[i] = vs[i].project(ctx);
+                    out[i] = vs[i].project(ctx, v);
                 }
                 Val::List(out)
             }
@@ -1103,29 +1123,29 @@ impl GramVal {
                 let mut out = Vec::with_capacity(es.len());
                 for entry in es {
                     let key = ctx.tokens.borrow().lookup(entry.0).unwrap().to_string();
-                    let val = entry.1.project(ctx);
+                    let val = entry.1.project(ctx, v);
                     out.push((key, val))
                 }
                 Val::Map(out)
             }
             GramVal::Node { id } => {
-                Val::Node(project_node(ctx, *id))
+                Val::Node(project_node(ctx, v, *id))
             }
             GramVal::Rel { node_id, rel_index } => {
-                Val::Rel(project_rel(ctx, *node_id, *rel_index))
+                Val::Rel(project_rel(ctx, v, *node_id, *rel_index))
             }
             GramVal::Path { start, rest } => {
                 let mut segments = Vec::new();
                 let mut prior_node = *start;
                 for i in 0..rest.len() {
                     let seg = &rest[i];
-                    let rel = project_rel(ctx, prior_node, seg.0);
-                    let node = project_node(ctx, seg.1);
+                    let rel = project_rel(ctx, v, prior_node, seg.0);
+                    let node = project_node(ctx, v, seg.1);
                     segments.push((rel, node));
                     prior_node = seg.1;
                 }
                 Val::Path(crate::Path{
-                    start: project_node(ctx, *start),
+                    start: project_node(ctx, v, *start),
                     segments,
                 })
             }
@@ -1417,7 +1437,7 @@ impl Operator for ExpandRel {
 #[derive(Debug)]
 struct ExpandInto {
     pub src: Box<dyn Operator>,
-
+    pub phase: u8,
     pub left_node_slot: usize,
     pub right_node_slot: usize,
     pub dst_slot: usize,
@@ -1431,6 +1451,7 @@ impl Operator for ExpandInto {
     }
 
     fn next(&mut self, ctx: &mut Context, out: &mut GramRow) -> Result<bool> {
+        let v = Version::new(ctx.xid.xid, self.phase);
         loop {
             if !self.src.next(ctx, out)? {
                 return Ok(false);
@@ -1444,7 +1465,7 @@ impl Operator for ExpandInto {
             match (left_raw, right_raw) {
                 (GramVal::Node { id: left }, GramVal::Node { id: right }) => {
                     let g = ctx.g.borrow();
-                    let left_node = g.get_node(*left, ctx.xid).unwrap();
+                    let left_node = g.get_node(*left, v).unwrap();
                     for (rel_index, candidate) in left_node.rels.iter().enumerate() {
                         if let Some(rt) = self.rel_type {
                             if candidate.rel_type != rt {
@@ -1612,6 +1633,7 @@ impl Operator for Create {
     }
 
     fn next(&mut self, ctx: &mut Context, out: &mut GramRow) -> Result<bool, Error> {
+        let v = Version::new(ctx.xid.xid, self.phase);
         if !self.src.next(ctx, out)? {
             if self.rels.len() > 0 {
             println!("Create: No next");
@@ -1623,9 +1645,9 @@ impl Operator for Create {
                 .props
                 .iter()
                 .map(|p| {
-                    match p.1.eval(ctx, out) {
+                    match p.1.eval(ctx, out, v) {
                         Ok(GramVal::Lit(val)) => (*p.0, (val)),
-                        Ok(gval) => (*p.0, gval.project(ctx)),
+                        Ok(gval) => (*p.0, gval.project(ctx, v)),
                         r => panic!("property creation expression failed {:?}", r)
                     }
                 })
@@ -1637,7 +1659,7 @@ impl Operator for Create {
                 Rc::clone(&self.tokens),
                 node.labels.clone(),
                 node_properties,
-                Version::new(ctx.xid.xid, self.phase),
+                v,
             )?;
         }
         for rel in &self.rels {
@@ -1645,9 +1667,9 @@ impl Operator for Create {
                 .props
                 .iter()
                 .map(|p| {
-                    match p.1.eval(ctx, out) {
+                    match p.1.eval(ctx, out, v) {
                         Ok(GramVal::Lit(val)) => (*p.0, (val)),
-                        Ok(gval) => (*p.0, gval.project(ctx)),
+                        Ok(gval) => (*p.0, gval.project(ctx, v)),
                         r => panic!("property creation expression failed {:?}", r)
                     }
                 })
@@ -1714,6 +1736,7 @@ impl UpdateEntity {
     fn write_prop_to_thing(
         &self,
         ctx: &mut Context,
+        v: Version,
         thing: &GramVal,
         key: usize,
         val: Val,
@@ -1721,7 +1744,7 @@ impl UpdateEntity {
         match thing {
             GramVal::Rel { node_id, rel_index } => {
                 let mut g = ctx.g.borrow_mut();
-                let mut props = g.update_rel_props(*node_id, *rel_index, ctx.xid).unwrap();
+                let mut props = g.update_rel_props(*node_id, *rel_index, v).unwrap();
                 if val == Val::Null {
                     props.remove(&key);
                 } else {
@@ -1730,7 +1753,7 @@ impl UpdateEntity {
             }
             GramVal::Node { id } => {
                 let mut g = ctx.g.borrow_mut();
-                let props = g.update_node_props(*id, ctx.xid).unwrap();
+                let props = g.update_node_props(*id, v).unwrap();
                 if val == Val::Null {
                     props.remove(&key);
                 } else {
@@ -1742,12 +1765,12 @@ impl UpdateEntity {
         Ok(())
     }
 
-    fn write_thing_to_thing(&self, ctx: &mut Context, thing: &GramVal, src: GramVal) -> Result<()> {
+    fn write_thing_to_thing(&self, ctx: &mut Context, v: Version, thing: &GramVal, src: GramVal) -> Result<()> {
         match src {
             GramVal::Map(entries) => {
-                for (k, v) in entries {
-                    if let GramVal::Lit(litval) = v {
-                        self.write_prop_to_thing(ctx, thing, k, litval)?;
+                for (k, val) in entries {
+                    if let GramVal::Lit(litval) = val {
+                        self.write_prop_to_thing(ctx, v, thing, k, litval)?;
                     } else {
                         bail!(
                             "Expected a literal value here, probably programming error? Got: {:?}",
@@ -1762,8 +1785,8 @@ impl UpdateEntity {
                     let node = g.get_node(id, ctx.xid).unwrap();
                     node.properties.clone()
                 };
-                for (k, v) in clonedprops.iter() {
-                    self.write_prop_to_thing(ctx, thing, *k, v.clone())?;
+                for (k, val) in clonedprops.iter() {
+                    self.write_prop_to_thing(ctx, v, thing, *k, val.clone())?;
                 }
             }
             _ => {
@@ -1808,24 +1831,24 @@ impl Operator for UpdateEntity {
             match action {
                 UpdateAction::SingleAssign { entity, key, value } => {
                     let entity_val = &out.slots[*entity];
-                    let gramval = value.eval(ctx, out)?;
+                    let gramval = value.eval(ctx, out, v)?;
                     if let GramVal::Lit(litval) = gramval {
-                        self.write_prop_to_thing(ctx, entity_val, *key, litval)?;
+                        self.write_prop_to_thing(ctx, v, entity_val, *key, litval)?;
                     } else {
-                        let litval = gramval.project(ctx);
-                        self.write_prop_to_thing(ctx, entity_val, *key, litval)?;
+                        let litval = gramval.project(ctx, v);
+                        self.write_prop_to_thing(ctx, v, entity_val, *key, litval)?;
                     }
                 }
                 UpdateAction::Append { entity, value } => {
                     let entity_val = &out.slots[*entity];
-                    let new_props = value.eval(ctx, out)?;
-                    self.write_thing_to_thing(ctx, entity_val, new_props)?;
+                    let new_props = value.eval(ctx, out, v)?;
+                    self.write_thing_to_thing(ctx, v, entity_val, new_props)?;
                 }
                 UpdateAction::Overwrite { entity, value } => {
                     let entity_val = &out.slots[*entity];
-                    let new_props = value.eval(ctx, out)?;
+                    let new_props = value.eval(ctx, out, v)?;
                     self.clear_props_on_thing(ctx, entity_val)?;
-                    self.write_thing_to_thing(ctx, entity_val, new_props)?;
+                    self.write_thing_to_thing(ctx, v, entity_val, new_props)?;
                 }
                 UpdateAction::AppendLabel { entity, label } => {
                     let entity_val = &out.slots[*entity];
@@ -1837,7 +1860,7 @@ impl Operator for UpdateEntity {
                     }
                 }
                 UpdateAction::DeleteEntity { entity: node } => {
-                    match node.eval(ctx, out)? {
+                    match node.eval(ctx, out, v)? {
                         GramVal::Node{ id } => {
                             ctx.g.borrow_mut().delete_node(id, v)
                         }
@@ -1858,7 +1881,7 @@ impl Operator for UpdateEntity {
                     }
                 }
                 UpdateAction::DetachDelete { entity: node } => {
-                    match node.eval(ctx, out)? {
+                    match node.eval(ctx, out, v)? {
                         GramVal::Node{ id } => {
                             let mut g = ctx.g.borrow_mut();
                             g.detach_delete_node(id, v)
@@ -1928,6 +1951,7 @@ struct Projection {
 #[derive(Debug)]
 struct Project {
     pub src: Box<dyn Operator>,
+    pub phase: u8,
     pub projections: Vec<Projection>,
 }
 
@@ -1937,9 +1961,10 @@ impl Operator for Project {
     }
 
     fn next(&mut self, ctx: &mut Context, out: &mut GramRow) -> Result<bool> {
+        let v = Version::new(ctx.xid.xid, self.phase);
         if self.src.next(ctx, out)? {
             for proj in &self.projections {
-                out.slots[proj.slot] = proj.expr.eval(ctx, out)?;
+                out.slots[proj.slot] = proj.expr.eval(ctx, out, v)?;
             }
             return Ok(true);
         }
@@ -1950,6 +1975,7 @@ impl Operator for Project {
 #[derive(Debug)]
 struct Limit {
     src: Box<dyn Operator>,
+    phase: u8,
     skip: Option<Expr>,
     limit: Option<Expr>,
 
@@ -1964,10 +1990,11 @@ impl Operator for Limit {
     }
 
     fn next(&mut self, ctx: &mut Context, out: &mut GramRow) -> Result<bool> {
+        let v = Version::new(ctx.xid.xid, self.phase);
         if !self.initialized {
             self.initialized = true;
             if let Some(skip_expr) = &self.skip {
-                let skip_val = skip_expr.eval(ctx, out)?;
+                let skip_val = skip_expr.eval(ctx, out, v)?;
                 let mut skip = if let GramVal::Lit(Val::Int(i)) = skip_val {
                     i
                 } else {
@@ -1978,7 +2005,7 @@ impl Operator for Limit {
                 }
             }
             if let Some(limit_expr) = &self.limit {
-                let limit_val = limit_expr.eval(ctx, out)?;
+                let limit_val = limit_expr.eval(ctx, out, v)?;
                 self.limit_remaining = if let GramVal::Lit(Val::Int(i)) = limit_val {
                     Some(i)
                 } else {
@@ -2031,6 +2058,7 @@ impl Operator for Optional {
 struct NestLoop {
     outer: Box<dyn Operator>,
     inner: Box<dyn Operator>,
+    phase: u8,
     predicate: Expr,
     initialized: bool,
 }
@@ -2051,6 +2079,8 @@ impl Operator for NestLoop {
             self.initialized = true;
         }
 
+        let v = Version::new(ctx.xid.xid, self.phase);
+
         loop {
             if !self.inner.next(ctx, out)? {
                 // We need the ability to "reset" the inner operator here, which we don't
@@ -2063,7 +2093,7 @@ impl Operator for NestLoop {
                 return Ok(false);
             }
 
-            if self.predicate.eval(ctx, out)?.as_bool()? {
+            if self.predicate.eval(ctx, out, v)?.as_bool()? {
                 return Ok(true);
             }
         }
@@ -2073,6 +2103,7 @@ impl Operator for NestLoop {
 #[derive(Debug)]
 struct Sort {
     src: Box<dyn Operator>,
+    phase: u8,
     state: SortState,
     rows: Vec<GramRow>,
     sort_by: Vec<Expr>,
@@ -2093,6 +2124,7 @@ impl Operator for Sort {
 
     // TODO lol
     fn next(&mut self, ctx: &mut Context, out: &mut GramRow) -> Result<bool> {
+        let v = Version::new(ctx.xid.xid, self.phase);
         if let SortState::Init = self.state {
             let mut rows = Vec::new();
             while self.src.next(ctx, out)? {
@@ -2106,8 +2138,8 @@ impl Operator for Sort {
 
             rows.sort_by(|a, b| {
                 for e in &self.sort_by {
-                    let a_val = e.eval(ctx, a).unwrap();
-                    let b_val = e.eval(ctx, b).unwrap();
+                    let a_val = e.eval(ctx, a, v).unwrap();
+                    let b_val = e.eval(ctx, b, v).unwrap();
                     let cmp = a_val.partial_cmp(&b_val);
                     match cmp {
                         Some(Ordering::Greater) => return Ordering::Greater,
@@ -2144,6 +2176,7 @@ impl Operator for Sort {
 #[derive(Debug)]
 struct Selection {
     pub src: Box<dyn Operator>,
+    pub phase: u8,
     pub predicate: Expr,
 }
 
@@ -2153,8 +2186,10 @@ impl Operator for Selection {
     }
 
     fn next(&mut self, ctx: &mut Context, out: &mut GramRow) -> Result<bool> {
+        let v = Version::new(ctx.xid.xid, self.phase);
         while self.src.next(ctx, out)? {
-            let ok = self.predicate.eval(ctx, out)?;
+            println!("Eval pred: {:?} for {:?}", self.predicate, v);
+            let ok = self.predicate.eval(ctx, out, v)?;
             if let GramVal::Lit(Val::Bool(true)) = ok {
                 return Ok(true);
             }
@@ -2230,6 +2265,7 @@ struct AggregateEntry {
 #[derive(Debug)]
 struct HashAggregation {
     src: Box<dyn Operator>,
+    phase: u8,
 
     grouping: Vec<GroupEntry>,
     aggregations: Vec<AggregateEntry>,
@@ -2252,6 +2288,7 @@ impl Operator for HashAggregation {
 
     #[allow(clippy::needless_range_loop)]
     fn next(&mut self, ctx: &mut Context, row: &mut GramRow) -> Result<bool> {
+        let v = Version::new(ctx.xid.xid, self.phase);
         loop {
             if self.consumed {
                 return Ok(false);
@@ -2285,7 +2322,7 @@ impl Operator for HashAggregation {
                     vals: Vec::with_capacity(self.grouping.len()),
                 };
                 for group in &self.grouping {
-                    key.vals.push(group.expr.eval(ctx, row)?)
+                    key.vals.push(group.expr.eval(ctx, row, v)?)
                 }
                 // Does an entry like that exist?
                 let maybe_state = self.group_aggregations.get_mut(&key);
@@ -2296,7 +2333,7 @@ impl Operator for HashAggregation {
                 } else {
                     let mut group_state = Vec::with_capacity(self.aggregations.len());
                     for agge in &mut self.aggregations {
-                        group_state.push(agge.func.init(ctx))
+                        group_state.push(agge.func.init(ctx, v))
                     }
                     for agge in &mut group_state {
                         agge.apply(ctx, row)?;
@@ -2314,6 +2351,7 @@ impl Operator for HashAggregation {
 #[derive(Debug)]
 struct Unwind {
     src: Box<dyn Operator>,
+    phase: u8,
     list_expr: Expr,
     dst: Slot,
     // TODO this should use an iterator
@@ -2328,6 +2366,7 @@ impl Operator for Unwind {
         self.next_index = 0;
     }
     fn next(&mut self, ctx: &mut Context, row: &mut GramRow) -> Result<bool> {
+        let v = Version::new(ctx.xid.xid, self.phase);
         loop {
             if self.current_list.is_none() {
                 let src = &mut *self.src;
@@ -2335,7 +2374,7 @@ impl Operator for Unwind {
                     return Ok(false);
                 }
 
-                match self.list_expr.eval(ctx, row)? {
+                match self.list_expr.eval(ctx, row, v)? {
                     GramVal::List(items) => self.current_list = Some(items),
                     GramVal::Lit(Val::List(items)) => {
                         self.current_list =
@@ -2379,7 +2418,6 @@ impl Operator for Apply {
             self.initialized = true;
             let next = self.lhs.next(ctx, out)?;
             if !next {
-                println!("Apply: No next");
                 return Ok(false);
             }
             self.rhs.reset()
@@ -2390,12 +2428,10 @@ impl Operator for Apply {
                 return Ok(true);
             }
 
-            println!("Apply: No rhs next..");
             // Exhausted rhs, fetch next lhs
 
             let next = self.lhs.next(ctx, out)?;
             if !next {
-                println!("Apply: No lhs next :(");
                 return Ok(false);
             }
             self.rhs.reset()
@@ -2420,11 +2456,8 @@ impl Operator for AntiConditionalApply {
     fn next(&mut self, ctx: &mut Context, out: &mut GramRow) -> Result<bool> {
         loop {
             if !self.lhs.next(ctx, out)? {
-                println!("aca: No next from {:?}", self.lhs);
                 return Ok(false);
             }
-            println!("aca: Got next, testing: {:?}", out);
-
             let mut anticondition_passed = true;
             for condition_slot in &self.conditions {
                 match out.slots[*condition_slot] {
@@ -2443,10 +2476,6 @@ impl Operator for AntiConditionalApply {
 
             // TODO this is super wrong; we should *keep* yielding from rhs until exhausted
 
-            println!(
-                "anticond passed: conds={:?} / row = {:?}",
-                self.conditions, out
-            );
             self.rhs.reset();
             if self.rhs.next(ctx, out)? {
                 return Ok(true);
@@ -2582,19 +2611,7 @@ fn append_node(
 
     ctx.g.borrow_mut().add_node(id, out_node);
 
-    println!("--- About to write ---");
-    println!("{}", gram_string);
-    println!("------");
-
-    ctx.file
-        .borrow_mut()
-        .seek(SeekFrom::End(0))
-        .expect("seek error");
-
-    match ctx.file.borrow_mut().write_all(gram_string.as_bytes()) {
-        Ok(_) => Ok(GramVal::Node { id }),
-        Err(e) => Err(Error::new(e)),
-    }
+    Ok(GramVal::Node { id })
 }
 
 fn append_rel(
@@ -2684,6 +2701,7 @@ mod functions {
     use crate::{Result, Type};
     use std::cmp::Ordering;
     use std::fmt::Debug;
+    use crate::backend::gram::store::Version;
 
     pub(super) fn aggregating(tokens: &mut Tokens) -> Vec<Box<dyn AggregatingFuncSpec>> {
         let mut out: Vec<Box<dyn AggregatingFuncSpec>> = Default::default();
@@ -2819,7 +2837,7 @@ mod functions {
     }
 
     pub(super) trait AggregatingFunc: Debug {
-        fn init(&self, ctx: &mut Context) -> Box<dyn Aggregation>;
+        fn init(&self, ctx: &mut Context, v: Version) -> Box<dyn Aggregation>;
     }
 
     pub(super) trait Aggregation: Debug {
@@ -2835,13 +2853,12 @@ mod functions {
     }
 
     impl AggregatingFunc for MapAggregatingFunc {
-        fn init(&self, ctx: &mut Context) -> Box<dyn Aggregation> {
+        fn init(&self, ctx: &mut Context, v: Version) -> Box<dyn Aggregation> {
             // Initialize nested aggregators
             let aggregations = self.aggregating.iter().map(|(k, agg_expr)| {
-                (*k, agg_expr.init(ctx))
+                (*k, agg_expr.init(ctx, v))
             }).collect();
-            println!("{:?}", aggregations);
-            Box::new(MapAggregation { aggregations, output: None })
+            Box::new(MapAggregation { aggregations, output: None, version: v })
         }
     }
 
@@ -2849,6 +2866,7 @@ mod functions {
     pub(super) struct MapAggregation {
         aggregations: Vec<(Token, Box<dyn Aggregation>)>,
         output: Option<GramVal>,
+        version: Version,
     }
 
     impl Aggregation for MapAggregation {
@@ -2913,10 +2931,11 @@ mod functions {
     }
 
     impl AggregatingFunc for Min {
-        fn init(&self, _ctx: &mut Context) -> Box<dyn Aggregation> {
+        fn init(&self, _ctx: &mut Context, v: Version) -> Box<dyn Aggregation> {
             Box::new(MinAggregation {
                 arg: self.arg.clone(),
                 min: None,
+                version: v,
             })
         }
     }
@@ -2925,11 +2944,12 @@ mod functions {
     struct MinAggregation {
         arg: Expr,
         min: Option<GramVal>,
+        version: Version,
     }
 
     impl Aggregation for MinAggregation {
         fn apply(&mut self, ctx: &mut Context, row: &mut GramRow) -> Result<()> {
-            let v = self.arg.eval(ctx, row)?;
+            let v = self.arg.eval(ctx, row, self.version)?;
             if let Some(current_min) = &self.min {
                 if v == GramVal::Lit(Val::Null) {
                     return Ok(());
@@ -2991,10 +3011,11 @@ mod functions {
     }
 
     impl AggregatingFunc for Max {
-        fn init(&self, _ctx: &mut Context) -> Box<dyn Aggregation> {
+        fn init(&self, _ctx: &mut Context, v: Version) -> Box<dyn Aggregation> {
             Box::new(MaxAggregation {
                 arg: self.arg.clone(),
                 max: None,
+                version: v,
             })
         }
     }
@@ -3003,11 +3024,12 @@ mod functions {
     struct MaxAggregation {
         arg: Expr,
         max: Option<GramVal>,
+        version: Version,
     }
 
     impl Aggregation for MaxAggregation {
         fn apply(&mut self, ctx: &mut Context, row: &mut GramRow) -> Result<()> {
-            let v = self.arg.eval(ctx, row)?;
+            let v = self.arg.eval(ctx, row, self.version)?;
             if let Some(current_max) = &self.max {
                 if v == GramVal::Lit(Val::Null) {
                     return Ok(());
@@ -3065,10 +3087,11 @@ mod functions {
     struct Count {}
 
     impl AggregatingFunc for Count {
-        fn init(&self, _ctx: &mut Context) -> Box<dyn Aggregation> {
+        fn init(&self, _ctx: &mut Context, v: Version) -> Box<dyn Aggregation> {
             Box::new(CountAggregation {
                 counter: 0,
                 out: GramVal::Lit(Val::Int(0)),
+                version: v,
             })
         }
     }
@@ -3077,6 +3100,7 @@ mod functions {
     struct CountAggregation {
         counter: i64,
         out: GramVal,
+        version: Version,
     }
 
     impl Aggregation for CountAggregation {
@@ -3128,10 +3152,11 @@ mod functions {
     }
 
     impl AggregatingFunc for Collect {
-        fn init(&self, _ctx: &mut Context) -> Box<dyn Aggregation> {
+        fn init(&self, _ctx: &mut Context, v: Version) -> Box<dyn Aggregation> {
             Box::new(CollectAggregation {
                 arg: self.arg.clone(),
                 collection: GramVal::List(Vec::new()),
+                version: v,
             })
         }
     }
@@ -3140,11 +3165,12 @@ mod functions {
     struct CollectAggregation {
         arg: Expr,
         collection: GramVal,
+        version: Version,
     }
 
     impl Aggregation for CollectAggregation {
         fn apply(&mut self, ctx: &mut Context, row: &mut GramRow) -> Result<()> {
-            let v = self.arg.eval(ctx, row)?;
+            let v = self.arg.eval(ctx, row, self.version)?;
             match &mut self.collection {
                 GramVal::List(entries) => entries.push(v),
                 _ => bail!(
@@ -3181,7 +3207,7 @@ mod tests {
         let mut cursor = g.new_cursor();
 
         g.eval(
-            f.plan("CREATE (:Year {year: 2016})").unwrap(),
+            f.plan("CREATE ({name: 'A'})").unwrap(),
             &mut cursor,
             None,
         ).unwrap();
@@ -3191,32 +3217,21 @@ mod tests {
 
         g.eval(
             f.plan(
-                "UNWIND $events AS event
-      MATCH (y:Year {year: event.year})
-      MERGE (e:Event {id: event.id})
-      MERGE (y)<-[:IN]-(e)
-      RETURN e.id AS x
-      ORDER BY x",
+                "MATCH (n)
+      MATCH (m)
+      WITH n AS a, m AS b
+      CREATE (a)-[:T]->(b)
+      WITH a AS x, b AS y
+      CREATE (x)-[:T]->(y)
+      RETURN x, y",
             )
             .unwrap(),
             &mut cursor,
-            Some(&Val::Map(vec![(
-                "events".to_owned(),
-                Val::List(vec![
-                    Val::Map(vec![
-                        ("id".to_owned(), Val::Int(1)),
-                        ("year".to_owned(), Val::Int(2016)),
-                    ]),
-                    Val::Map(vec![
-                        ("id".to_owned(), Val::Int(2)),
-                        ("year".to_owned(), Val::Int(2016)),
-                    ]),
-                ]),
-            )])),
+            None,
         )
         .unwrap();
         while cursor.next().unwrap().is_some() {
-            // ..
+            println!("{:?}", cursor.projection)
         }
 
         g.eval(f.plan("MATCH (n) RETURN n").unwrap(), &mut cursor, None)
