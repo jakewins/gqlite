@@ -17,7 +17,7 @@ use std::collections::{HashMap, HashSet};
 use std::fmt::{self, Debug, Display, Formatter};
 use std::fs::File;
 use std::hash::{Hash, Hasher};
-use std::io::{Seek, SeekFrom, Write};
+use std::io::{Write};
 use std::rc::Rc;
 use std::time::SystemTime;
 use uuid::v1::{Context as UuidContext, Timestamp};
