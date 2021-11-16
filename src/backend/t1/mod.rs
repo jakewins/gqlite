@@ -2,8 +2,8 @@ mod ldbc_populator;
 
 use std::collections::HashMap;
 use std::convert::TryInto;
-use std::ops::Sub;
-use std::time::Instant;
+use std::ops::{Add, Sub};
+use std::time::{Duration, Instant};
 use rand::rngs::SmallRng;
 use rand::{Rng, RngCore, SeedableRng};
 use sled::IVec;
@@ -24,34 +24,61 @@ pub fn run() {
     let lbl_continent = engine.lbl_get_or_create(b"Continent");
     let lbl_country = engine.lbl_get_or_create(b"Country");
 
+    let mut random = SmallRng::seed_from_u64(1337);
+    let degree:u64 = 20;
+
+    let total_rels: u64 = 2_000_000;
+    let total_nodes: u64 = (total_rels / degree) / 2;
+
+    // Create dataset in 14 seconds
+    // Degree=20
+    // Expanded 324312 random nodes in 10 secs / 25922880 rels seen, hash is 648322698218
+    // Maximum resident set size (kbytes): 81280
+
+    // Create dataset in 13 seconds
+    // Degree=10
+    // Expanded 409257 random nodes in 10 secs / 16365954 rels seen, hash is 818369521158
+
+    // Create dataset in 13 seconds
+    // Degree=1
+    // Expanded 539012 random nodes in 10 secs / 2155466 rels seen, hash is 1077726210307
+    // Maximum resident set size (kbytes): 81556
+
     let start = Instant::now();
-    ldbc_populator::populate(&mut engine, 1);
-    let delta = Instant::now().sub(start).as_secs();
 
-    println!("delta={} secs", delta);
-
-    let mut countries = HashMap::new();
-    for country in engine.node_scan(lbl_country) {
-        countries.insert(countries.len(), country);
+    for i in 0..total_nodes {
+        engine.node_create(&[]);
     }
 
-    let mut random = SmallRng::seed_from_u64(1337);
+    for i in 0..total_rels {
+        let start: u64 = random.gen_range(0, total_nodes);
+        let end: u64 = random.gen_range(0, total_nodes);
+        engine.rel_create(start, end, rt_is_part_of);
+
+        if i % 10_000 == 0 {
+            println!("{} / {} rels", i, total_rels)
+        }
+    }
+
+    let delta = Instant::now().sub(start).as_secs();
+
+    println!("Create dataset in {} seconds", delta);
+    println!("Degree={}", degree);
+
+    let mut nodes_seen: u64 = 0;
     let mut rels_seen: u64 = 0;
     let mut hash: u64 = 0;
-    let start = Instant::now();
-    for i in 0..100_000 {
+    let deadline = Instant::now().add(Duration::from_secs(10));
+    while Instant::now() < deadline {
         // let random_node : u64 = random.gen_range(0, 1_000_000);
-        let pick = random.gen_range(0, countries.len());
-        let random_node = *countries.get(&pick).unwrap();
-        for rel in engine.rel_scan(random_node, rt_is_part_of) {
+        let rand_node: u64 = random.gen_range(0, total_nodes);
+        nodes_seen += 1;
+        for rel in engine.rel_scan(rand_node, rt_is_part_of) {
             hash += rel.other;
             rels_seen += 1;
         }
     }
-    let delta = Instant::now().sub(start).as_secs();
-    // Need this to be 1sec for 1M random pick
-    // Need this to be 22 sec for 10K countries pick
-    println!("Expanded random nodes in {} secs / {} rels seen, hash is {}", delta, rels_seen, hash);
+    println!("Expanded {} random nodes in 10 secs / {} rels seen, hash is {}", nodes_seen, rels_seen, hash);
 }
 
 #[derive(FromBytes, AsBytes, Unaligned)]
