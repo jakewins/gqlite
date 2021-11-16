@@ -14,6 +14,7 @@ use {
         byteorder::U64, AsBytes, FromBytes, LayoutVerified, Unaligned, U16, U32,
     },
 };
+use rocksdb::{DB, Options, ColumnFamilyDescriptor, BlockBasedOptions, Cache};
 
 pub fn run() {
     use ldbc_populator;
@@ -28,7 +29,6 @@ pub fn run() {
     let delta = Instant::now().sub(start).as_secs();
 
     println!("delta={} secs", delta);
-    println!("nodes={}, size={}", engine.db.generate_id().unwrap(), engine.db.size_on_disk().unwrap() / 1024);
 
     let mut countries = HashMap::new();
     for country in engine.node_scan(lbl_country) {
@@ -39,9 +39,10 @@ pub fn run() {
     let mut rels_seen: u64 = 0;
     let mut hash: u64 = 0;
     let start = Instant::now();
-    for i in 0..10_000 {
+    for i in 0..100_000 {
         // let random_node : u64 = random.gen_range(0, 1_000_000);
-        let random_node = *countries.get(&random.gen_range(0, countries.len())).unwrap();
+        let pick = random.gen_range(0, countries.len());
+        let random_node = *countries.get(&pick).unwrap();
         for rel in engine.rel_scan(random_node, rt_is_part_of) {
             hash += rel.other;
             rels_seen += 1;
@@ -235,18 +236,22 @@ fn decode_node_from_node_lblkey(raw: &[u8]) -> u64 {
     LittleEndian::read_u64(&raw[4..])
 }
 
-pub struct NodeScan {
-    inner: sled::Iter,
+pub struct NodeScan<'a> {
+    inner: rocksdb::DBIterator<'a>,
+    end: sled::IVec,
 }
 
-impl Iterator for NodeScan {
+impl<'a> Iterator for NodeScan<'a> {
     type Item = u64;
 
     fn next(&mut self) -> Option<Self::Item> {
         match self.inner.next() {
             None => None,
-            Some(item) => {
-                let (key, _) = item.unwrap();
+            Some(kvb) => {
+                let key = kvb.0;
+                if !(key.as_bytes()).lt(self.end.as_bytes()) {
+                    return None
+                }
                 Some(decode_node_from_node_lblkey(key.as_bytes()))
             }
         }
@@ -259,98 +264,114 @@ pub struct Rel {
     other: u64,
 }
 
-pub struct RelIter {
-    inner: sled::Iter,
+pub struct RelIter<'a> {
+    inner: rocksdb::DBIterator<'a>,
+    end: sled::IVec,
 }
 
-impl Iterator for RelIter {
+impl<'a> Iterator for RelIter<'a> {
     type Item = Rel;
 
     fn next(&mut self) -> Option<Self::Item> {
         match self.inner.next() {
             None => None,
-            Some(relkey) => {
-                let (key, _) = relkey.unwrap();
-                Some(decode_rel_from_relkey(key.as_bytes()))
+            Some(kvb) => {
+                let key = kvb.0;
+                if !(key.as_bytes()).lt(self.end.as_bytes()) {
+                    return None
+                }
+                Some(decode_rel_from_relkey(&key))
             }
         }
     }
 }
 
 pub struct SE1 {
-    db: sled::Db,
-    nodes: sled::Tree,
-    rels: sled::Tree,
+    idgen: u64,
+    schema_idgen: u32,
 
-    labels: sled::Tree,
-
-    schema: sled::Tree,
+    db: rocksdb::DB,
 }
 
 impl SE1 {
     pub fn new() -> Self {
-        let db: sled::Db = sled::Config::new()
-            .cache_capacity(1024 * 1024 * 64)
-            .temporary(true)
-            // .path("./hmm.db")
-            .open().unwrap();
+        // let db: sled::Db = sled::Config::new()
+        //     .cache_capacity(1024 * 1024 * 64)
+        //     .temporary(true)
+        //     // .path("./hmm.db")
+        //     .open().unwrap();
 
-        let nodes = db.open_tree("nodes.1").unwrap();
-        let rels = db.open_tree("rels.1").unwrap();
-        let labels = db.open_tree("labels.1").unwrap();
-        let schema = db.open_tree("schema.1").unwrap();
+        let path = "rocks.db";
+        let cf_nodes = ColumnFamilyDescriptor::new("nodes.1", Options::default());
+        let cf_rels = ColumnFamilyDescriptor::new("rels.1", Options::default());
+        let cf_schema = ColumnFamilyDescriptor::new("schema.1", Options::default());
+        let cf_labels = ColumnFamilyDescriptor::new("labels.1", Options::default());
+
+        let mut block_opts = BlockBasedOptions::default();
+        let block_cache = Cache::new_lru_cache(1024 * 1024 * 64).unwrap();
+
+        block_opts.set_block_cache(&block_cache);
+        let mut db_opts = Options::default();
+
+        db_opts.create_missing_column_families(true);
+        db_opts.create_if_missing(true);
+        db_opts.set_block_based_table_factory(&block_opts);
+        // delta=11 secs
+        // Expanded random nodes in 19 secs / 121024830 rels seen, hash is 81268423432147
+        let db = DB::open_cf_descriptors(&db_opts, path, vec![
+            cf_nodes, cf_rels, cf_schema, cf_labels]).unwrap();
+
         Self {
+            idgen: 0,
+            schema_idgen: 0,
             db,
-            nodes,
-            rels,
-            schema,
-            labels,
         }
     }
+
+    pub fn max_node_id(&self) -> u64 {
+        self.idgen
+    }
+
     pub fn node_create(&mut self, labels: &[u32]) -> u64 {
-        let id = self.db.generate_id().unwrap();
+        let id = self.idgen;
+        self.idgen += 1;
         for lbl in labels {
             let key = encode_node_lblkey(id, *lbl);
-            self.labels.insert(key, &[]);
+            self.db.put_cf(self.db.cf_handle("labels.1").unwrap(), key, &[]);
         }
         id
     }
 
     pub fn node_scan(&mut self, label: u32) -> NodeScan {
         let (start, end) = encode_node_lblkey_range(label);
+        let iter = self.db.full_iterator_cf(self.db.cf_handle("labels.1").unwrap(), rocksdb::IteratorMode::From(&start, rocksdb::Direction::Forward));
         NodeScan {
-            inner: self.labels.range(start..end),
+            inner: iter,
+            end
         }
     }
 
     pub fn node_prop_set(&mut self, node: u64, key: u32, val: SE1Val) {
-        self.nodes.insert(encode_node_propkey(node, key), encode_se1_val(&val));
+        self.db.put_cf(self.db.cf_handle("nodes.1").unwrap(), encode_node_propkey(node, key), encode_se1_val(&val));
     }
 
     pub fn node_prop_get(&mut self, node: u64, key: u32) -> Option<SE1Val> {
-        match self.nodes.get(encode_node_propkey(node, key)).unwrap() {
-            None => None,
-            Some(raw) => {
-                Some(decode_se1_val(&raw))
-            }
-        }
+        todo!()
     }
 
     pub fn rel_create(&mut self, from: u64, to: u64, rt: u16) {
-        let res: TransactionResult<()> = self.rels.transaction(|tx| {
-            let ob_key = encode_relkey(from, to, rt);
-            let ib_key = encode_relkey(to, from, rt);
-            tx.insert(ob_key, &[]).unwrap();
-            tx.insert(ib_key, &[]).unwrap();
-            Ok(())
-        });
-        res.unwrap();
+        let ob_key = encode_relkey(from, to, rt);
+        let ib_key = encode_relkey(to, from, rt);
+        self.db.put(ob_key, &[]).unwrap();
+        self.db.put(ib_key, &[]).unwrap();
     }
 
     pub fn rel_scan(&self, node: u64, rt: u16) -> RelIter {
         let (start, end) = encode_relkey_range(node, rt);
+        let iter = self.db.full_iterator( rocksdb::IteratorMode::From(&start, rocksdb::Direction::Forward));
         RelIter {
-            inner: self.rels.range(start..end),
+            inner: iter,
+            end,
         }
     }
 
@@ -376,30 +397,24 @@ impl SE1 {
         }
 
         // Check if the rel type exists already
-        if let Some(raw) = self.schema.get(&key).unwrap() {
+        if let Some(raw) = self.db.get_cf(self.db.cf_handle("schema.1").unwrap(), &key).unwrap() {
             return decode_tok_id(raw.as_bytes())
         }
 
         // Alloc an id for it
-        let rtid = decode_tok_id(
-            self.schema.update_and_fetch(idgen_key, |current_rtid| {
-                if current_rtid.is_none() {
-                    let zero: u32 = 0;
-                    return Some(sled::IVec::from(zero.to_be_bytes().as_bytes()))
-                }
-                let mut rtid = decode_tok_id(current_rtid.unwrap().as_bytes());
-                rtid += 1;
-                Some(encode_tok_id(rtid))
-            }).unwrap().unwrap().as_bytes()
-        );
+        let rtid = self.schema_idgen;
+        self.schema_idgen += 1;
 
         let empty: Option<&[u8]> = None;
-        match self.schema.compare_and_swap(key, empty, Some(encode_tok_id(rtid))).unwrap() {
-            Ok(_) => return rtid,
-            Err(cas_err) => {
-                return decode_tok_id(cas_err.current.unwrap().as_bytes())
-            }
-        }
+        // Can't figure out how merge is surfaced here.. yolo it
+        self.db.put_cf(self.db.cf_handle("schema.1").unwrap(), key, &encode_tok_id(rtid));
+        rtid
+        // match self.schema.compare_and_swap(key, empty, Some(encode_tok_id(rtid))).unwrap() {
+        //     Ok(_) => return rtid,
+        //     Err(cas_err) => {
+        //         return decode_tok_id(cas_err.current.unwrap().as_bytes())
+        //     }
+        // }
     }
 }
 
@@ -450,25 +465,9 @@ mod tests {
         }.as_bytes());
     }
 
-    fn mkengine() -> SE1 {
-        let db: sled::Db = sled::Config::new().cache_capacity(1024 * 1024 * 16).temporary(true).open().unwrap();
-
-        let nodes = db.open_tree("nodes.1").unwrap();
-        let rels = db.open_tree("rels.1").unwrap();
-        let labels = db.open_tree("labels.1").unwrap();
-        let schema = db.open_tree("schema.1").unwrap();
-        SE1 {
-            db,
-            nodes,
-            rels,
-            schema,
-            labels,
-        }
-    }
-
     #[test]
     fn hmm2() {
-        let mut engine = mkengine();
+        let mut engine = SE1::new();
 
         let p1 = engine.node_create(&[]);
         let p2 = engine.node_create(&[]);
@@ -492,25 +491,12 @@ mod tests {
     #[test]
     fn ldbc() {
         use ldbc_populator;
-        let mut engine = mkengine();
+        let mut engine = SE1::new();
         let rt_is_part_of = engine.rt_get_or_create(b"IS_PART_OF");
         let propk_name = engine.propk_get_or_create(b"name");
         let lbl_continent = engine.lbl_get_or_create(b"Continent");
 
         ldbc_populator::populate(&mut engine, 1);
-
-        for node in engine.node_scan(lbl_continent) {
-            println!("{} name={:?}", node, engine.node_prop_get(node, propk_name));
-            for country in engine.rel_scan(node, rt_is_part_of) {
-                println!("  {} name={:?}", country.other, engine.node_prop_get(country.other, propk_name));
-                for city_rel in engine.rel_scan(country.other, rt_is_part_of) {
-                    println!("    {} name={:?}", city_rel.other, engine.node_prop_get(city_rel.other, propk_name));
-                }
-            }
-        }
-
-        println!("nodes={}, size={}", engine.db.generate_id().unwrap(), engine.db.size_on_disk().unwrap() / 1024);
-
 
     }
 
