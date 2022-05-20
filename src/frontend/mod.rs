@@ -90,10 +90,10 @@ impl Frontend {
             }
         }
 
-        println!(
-            "plan: {}",
-            &plan.fmt_pretty(&"", &pc.scoping.tokens.borrow())
-        );
+        // println!(
+        //     "plan: {}",
+        //     &plan.fmt_pretty(&"", &pc.scoping.tokens.borrow())
+        // );
 
         Ok(plan)
     }

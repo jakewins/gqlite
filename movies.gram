@@ -1,0 +1,16 @@
+(`Charlie Sheen`:Person {name:"Charlie Sheen"})
+(`Martin Sheen`:Person {name:"Martin Sheen"})
+(`Michael Douglas`:Person {name:"Michael Douglas"})
+(`Oliver Stone`:Person {name:"Oliver Stone"})
+(`Rob Reiner`:Person {name:"Rob Reiner"})
+(`Wall Street`:Movie {title:"Wall Street"})
+(`The American President`:Movie {title:"The American President"})
+
+(`Oliver Stone`)-[:DIRECTED]->(`Wall Street`)
+(`Michael Douglas`)-[:ACTED_IN {role: "Gordon Gekko"}]->(`Wall Street`)
+(`Martin Sheen`)-[:ACTED_IN {role: "Carl Fox"}]->(`Wall Street`)
+(`Charlie Sheen`)-[:ACTED_IN {role: "Bud Fox"}]->(`Wall Street`)
+
+(`Rob Reiner`)-[:DIRECTED]->(`The American President`)
+(`Michael Douglas`)-[:ACTED_IN {role: "President Andrew Shepard"}]->(`The American President`)
+(`Martin Sheen`)-[:ACTED_IN {role: "A. J. MacInerney"}]->(`The American President`)

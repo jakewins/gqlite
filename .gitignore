@@ -2,3 +2,4 @@
 .idea
 *.iml
 graph.gram
+.DS_Store

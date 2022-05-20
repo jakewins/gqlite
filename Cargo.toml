@@ -30,7 +30,7 @@ rand = { version = "0.7", optional = true }
 serde = { version = "1.0.123", optional = true }
 serde_yaml = { version = "0.8", optional = true }
 uuid = { version = "0.8", features = ["v1"], optional = true }
-sled = "0.34.6"
+# sled = "0.34.6"
 
 [features]
 default = ["gram", "cli"]

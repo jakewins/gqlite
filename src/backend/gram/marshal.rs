@@ -197,7 +197,7 @@ pub fn store(toks: &Tokens, g: &mut Graph, file: &mut File) -> Result<()> {
         out.push_str(&format!("({})", toks.lookup(n.gid).unwrap()))
     }
 
-    println!("{}", out);
+    // println!("{}", out);
 
     Ok(())
 

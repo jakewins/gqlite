@@ -1316,7 +1316,7 @@ impl Operator for Expand {
                     let g = ctx.g.borrow();
                     let rels = &g.get_node(node, v).unwrap().rels;
 
-                    println!("Fetched rels @{:?}: {:?}", v, rels);
+                    // println!("Fetched rels @{:?}: {:?}", v, rels);
 
                     if current_rel_index >= rels.len() {
                         // No more rels on this node, pop stack
@@ -2188,7 +2188,7 @@ impl Operator for Selection {
     fn next(&mut self, ctx: &mut Context, out: &mut GramRow) -> Result<bool> {
         let v = Version::new(ctx.xid.xid, self.phase);
         while self.src.next(ctx, out)? {
-            println!("Eval pred: {:?} for {:?}", self.predicate, v);
+            // println!("Eval pred: {:?} for {:?}", self.predicate, v);
             let ok = self.predicate.eval(ctx, out, v)?;
             if let GramVal::Lit(Val::Bool(true)) = ok {
                 return Ok(true);
